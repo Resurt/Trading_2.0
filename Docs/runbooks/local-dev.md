@@ -118,3 +118,21 @@ python scripts/check.py
 ```
 
 На Windows, если PowerShell блокирует `npm.ps1`, используйте `npm.cmd` напрямую из `apps/frontend`.
+
+## Report Worker
+
+Celery tasks используют Redis:
+
+```powershell
+$env:CELERY_BROKER_URL = "redis://localhost:6379/0"
+$env:CELERY_RESULT_BACKEND = "redis://localhost:6379/0"
+celery -A report_worker.tasks worker --loglevel=INFO
+```
+
+Ручной запуск отчетов без FastAPI:
+
+```powershell
+python scripts/run_hourly_report.py --micro-session-id 2026-06-12:weekday_main:1000 --strategy-id baseline
+python scripts/run_daily_report.py --trading-date 2026-06-12 --strategy-id baseline
+python scripts/run_counterfactual.py --trading-date 2026-06-12 --strategy-id baseline
+```

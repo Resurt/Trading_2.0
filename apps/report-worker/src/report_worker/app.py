@@ -1,8 +1,4 @@
-"""Initial report-worker application boundary.
-
-Celery tasks are intentionally deferred to the reporting step. This module only
-provides an importable service skeleton and health payload.
-"""
+"""Report-worker application boundary and health identity."""
 
 from trading_common import AppIdentity, RuntimeMode, ServiceHealth, ServiceName
 from trading_common.models import HealthStatus

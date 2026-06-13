@@ -18,7 +18,7 @@ def main() -> None:
         ServiceHealth(
             identity=identity,
             status=HealthStatus.OK,
-            detail="report-worker skeleton is running; Celery tasks are added in a later step",
+            detail="report-worker health server is running; Celery tasks are available",
         )
     )
 

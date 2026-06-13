@@ -1,0 +1,29 @@
+from __future__ import annotations
+
+import argparse
+import json
+
+from report_worker.analytics import ReportAnalyticsService
+from trading_common.db.config import build_database_url_from_env
+from trading_common.db.service import DatabaseService
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Build one hourly micro-session report.")
+    parser.add_argument("--micro-session-id", required=True)
+    parser.add_argument("--strategy-id", required=True)
+    parser.add_argument("--database-url")
+    args = parser.parse_args()
+
+    database = DatabaseService(args.database_url or build_database_url_from_env())
+    with database.session_scope() as session:
+        service = ReportAnalyticsService(session)
+        report = service.build_hourly_report(
+            micro_session_id=args.micro_session_id,
+            strategy_id=args.strategy_id,
+        )
+        print(json.dumps(service.hourly_read_model(report), ensure_ascii=False, indent=2))
+
+
+if __name__ == "__main__":
+    main()

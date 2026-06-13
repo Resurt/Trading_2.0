@@ -1,0 +1,31 @@
+"""Analytics public API for report-worker."""
+
+from report_worker.analytics.calculations import (
+    analyze_counterfactual,
+    classify_day_trend,
+    state_time_distribution,
+)
+from report_worker.analytics.models import (
+    AnalyticsAssumptions,
+    CounterfactualAnalysis,
+    CounterfactualSource,
+    FunnelMetrics,
+    PricePathPoint,
+    TrendClassification,
+    WindowOutcome,
+)
+from report_worker.analytics.service import ReportAnalyticsService
+
+__all__ = [
+    "AnalyticsAssumptions",
+    "CounterfactualAnalysis",
+    "CounterfactualSource",
+    "FunnelMetrics",
+    "PricePathPoint",
+    "ReportAnalyticsService",
+    "TrendClassification",
+    "WindowOutcome",
+    "analyze_counterfactual",
+    "classify_day_trend",
+    "state_time_distribution",
+]

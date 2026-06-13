@@ -292,6 +292,9 @@
 - `run_counterfactual_analysis_for_date`;
 - CLI scripts для ручного запуска отчетов.
 
+Реализация шага зафиксирована в `Docs/logging-analytics-spec.md` и
+`report_worker.analytics`.
+
 Критерии готовности:
 
 - отчеты строятся вне `api`;

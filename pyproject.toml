@@ -10,8 +10,10 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
   "alembic>=1.17,<2.0",
+  "celery>=5.4,<6.0",
   "prometheus-client>=0.20,<1.0",
   "psycopg[binary]>=3.2,<4.0",
+  "redis>=5.0,<6.0",
   "SQLAlchemy>=2.0,<3.0",
 ]
 
@@ -72,5 +74,5 @@ files = [
 ]
 
 [[tool.mypy.overrides]]
-module = ["alembic.*", "prometheus_client.*"]
+module = ["alembic.*", "celery.*", "prometheus_client.*"]
 ignore_missing_imports = true

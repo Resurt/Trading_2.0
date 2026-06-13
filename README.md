@@ -37,7 +37,9 @@
 сессионная модель с hourly micro-sessions, market data pipeline с bar engine и
 каркас strategy/risk/execution/reconciliation без прибыльной бизнес-логики.
 Также добавлены structured JSON logging, Prometheus metrics registry и Grafana
-dashboards provisioning для production-like observability.
+dashboards provisioning для production-like observability. `report-worker`
+содержит Celery task pipeline, hourly/daily reports, counterfactual analytics и
+ручные CLI-скрипты для запуска отчетов вне FastAPI.
 
 ## Каркас репозитория
 

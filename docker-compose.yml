@@ -212,6 +212,8 @@ services:
       HOST: 0.0.0.0
       PORT: 8002
       TRADING_RUNTIME_MODE: ${TRADING_RUNTIME_MODE:-historical_replay}
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
     ports:
       - "${REPORT_WORKER_PORT:-8002}:8002"
     depends_on:

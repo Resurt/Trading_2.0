@@ -411,6 +411,79 @@ Counterfactual pipeline отвечает на вопросы:
 - MFE/MAE по окнам 5/10/15 минут;
 - итог `would_profit_*`.
 
+### Counterfactual algorithm v1
+
+Реализация находится в `report_worker.analytics`.
+
+Вход:
+
+- blocked `signal_candidate` с финальным `blocker_event`;
+- cancelled `order_intent` с `cancel_reason_code`;
+- closed `market_candle` после времени события;
+- assumptions: `fee_bps`, `slippage_bps`, `take_profit_bps`, `stop_loss_bps`.
+
+Окна:
+
+- 5 минут;
+- 10 минут;
+- 15 минут.
+
+Для long/buy:
+
+- `MFE = (max(high_price) - entry_price) / entry_price * 10000`;
+- `MAE = (min(low_price) - entry_price) / entry_price * 10000`;
+- `close_return = (last_close - entry_price) / entry_price * 10000`.
+
+Для short/sell:
+
+- `MFE = (entry_price - min(low_price)) / entry_price * 10000`;
+- `MAE = (entry_price - max(high_price)) / entry_price * 10000`;
+- `close_return = (entry_price - last_close) / entry_price * 10000`.
+
+Затем:
+
+- `theoretical_pnl_bps = close_return - fee_bps - slippage_bps`;
+- `theoretical_pnl_rub = entry_price * lot_qty * theoretical_pnl_bps / 10000`;
+- `would_profit = theoretical_pnl_bps > 0`;
+- `tp_hit = MFE >= take_profit_bps`;
+- `sl_hit = MAE <= -stop_loss_bps`.
+
+Результат сохраняется в `counterfactual_result`:
+
+```json
+{
+  "source_event_type": "blocked_candidate",
+  "candidate_id": "uuid",
+  "order_intent_id": null,
+  "instrument_id": "MOEX:SBER",
+  "strategy_id": "baseline",
+  "blocker_code": "spread_too_wide",
+  "cancel_reason_code": null,
+  "fee_bps_assumed": "2.0",
+  "slippage_bps_assumed": "2.0",
+  "mfe_5m_bps": "100.0000",
+  "mae_5m_bps": "-50.0000",
+  "mfe_10m_bps": "150.0000",
+  "mae_10m_bps": "-50.0000",
+  "mfe_15m_bps": "200.0000",
+  "mae_15m_bps": "-50.0000",
+  "would_profit_5m": true,
+  "would_profit_10m": true,
+  "would_profit_15m": true,
+  "result_payload": {
+    "algorithm": "mfe_mae_directional_close_after_fees_slippage_v1",
+    "windows": {
+      "5": {
+        "tp_hit": true,
+        "sl_hit": false,
+        "theoretical_pnl_bps": "76.0000",
+        "theoretical_pnl_rub": "7.6000"
+      }
+    }
+  }
+}
+```
+
 ## Hourly report
 
 Hourly report строится при закрытии `micro_session`.
@@ -434,6 +507,36 @@ Hourly report строится при закрытии `micro_session`.
 - latency histograms;
 - список risk events.
 
+Формат `report_payload`:
+
+```json
+{
+  "format": "hourly_report_v1",
+  "estimated_slippage": "0.2000",
+  "replace_count": 0,
+  "posted_count": 1,
+  "filled_count": 1,
+  "broker_error_count": 0,
+  "risk_blockers": {
+    "spread_too_wide": 1
+  },
+  "stale_market_data_incidents": 0,
+  "latency_ms": {
+    "count": 1,
+    "p50": "120.0000",
+    "p95": "120.0000"
+  },
+  "funnel": {
+    "candidates": 1,
+    "blockers": 1,
+    "approved": 0,
+    "posted": 1,
+    "filled": 1,
+    "profitable": 1
+  }
+}
+```
+
 ## Daily report
 
 Daily report строится `report-worker` по `trading_date`.
@@ -447,6 +550,122 @@ Daily report строится `report-worker` по `trading_date`.
 5. `counterfactual` - outcomes blocked/cancelled cases через 5/10/15 минут после комиссий и slippage assumptions.
 6. `session segmentation` - morning/main/evening/weekend.
 7. `infra health` - reconnects, stale data, broker/API errors, rate limit pressure.
+
+### Day trend classification v1
+
+Алгоритм:
+
+1. Берем closed `market_candle` за `trading_date`.
+2. Для каждого `instrument_id` считаем доходность от первого `open_price` до последнего `close_price`.
+3. Считаем равновзвешенное среднее по инструментам.
+4. Если среднее `>= +25 bps`, классификация `long_bias`.
+5. Если среднее `<= -25 bps`, классификация `short_bias`.
+6. Иначе `mixed_flat`.
+
+Алгоритм детерминированный и сохраняет `instrument_returns_bps` в `report_payload.trend`.
+
+### Daily report JSON
+
+`daily_report.report_payload`:
+
+```json
+{
+  "format": "daily_report_v1",
+  "trend": {
+    "market_regime": "long_bias",
+    "average_return_bps": "175.0000",
+    "instrument_returns_bps": {
+      "MOEX:GAZP": "150.0000",
+      "MOEX:SBER": "200.0000"
+    },
+    "algorithm": "daily_first_open_to_last_close_equal_weight_v1"
+  },
+  "summary_by_session_type": {
+    "weekday_main": {
+      "signal_count": 10,
+      "entry_count": 7,
+      "exit_count": 3,
+      "blocked_count": 4
+    }
+  },
+  "summary_by_instrument": {},
+  "summary_by_timeframe": {},
+  "blocker_ranking": [
+    {
+      "reason_code": "spread_too_wide",
+      "count": 3
+    }
+  ],
+  "execution_quality": {
+    "posted_count": 6,
+    "filled_count": 4,
+    "reject_count": 1,
+    "cancel_count": 1,
+    "replace_count": 0,
+    "fill_ratio": "0.6667"
+  },
+  "missed_opportunity_summary": {
+    "would_profit_5m": 2,
+    "would_profit_10m": 3,
+    "would_profit_15m": 3,
+    "total_counterfactuals": 5
+  },
+  "strategy_state_time_distribution_seconds": {
+    "candidate": 20.0,
+    "wait": 3400.0
+  },
+  "funnel": {
+    "candidates": 10,
+    "blockers": 4,
+    "approved": 6,
+    "posted": 6,
+    "filled": 4,
+    "profitable": 2
+  }
+}
+```
+
+### Celery tasks
+
+Канонические task names:
+
+- `report_worker.build_hourly_report`
+- `report_worker.build_daily_report`
+- `report_worker.rebuild_reports_for_date`
+- `report_worker.run_counterfactual_analysis_for_date`
+
+Задачи берут `DATABASE_URL` или Postgres env/secrets через `trading_common.db.config`.
+Redis используется как Celery broker/result backend через:
+
+- `CELERY_BROKER_URL`
+- `CELERY_RESULT_BACKEND`
+
+Hourly scheduling не должен опираться на distant future Celery `eta/countdown`.
+`trade-core` закрывает micro-session и ставит ближайшую задачу отчета.
+
+### CLI
+
+Ручные команды:
+
+```bash
+python scripts/run_hourly_report.py --micro-session-id 2026-06-12:weekday_main:1000 --strategy-id baseline
+python scripts/run_daily_report.py --trading-date 2026-06-12 --strategy-id baseline
+python scripts/run_counterfactual.py --trading-date 2026-06-12 --strategy-id baseline
+```
+
+### Frontend read models
+
+Read models формируются из materialized report rows:
+
+- `hourly_report.report_payload`;
+- `daily_report.report_payload`;
+- `counterfactual_result.result_payload`.
+
+Python helpers:
+
+- `hourly_report_read_model`;
+- `daily_report_read_model`;
+- `counterfactual_read_model`.
 
 ## Metrics
 
