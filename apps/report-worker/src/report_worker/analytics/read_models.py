@@ -25,6 +25,7 @@ def hourly_report_read_model(report: HourlyReport) -> dict[str, object]:
         "blocked_count": report.blocked_count,
         "fill_ratio": _optional_str(report.fill_ratio),
         "payload": report.report_payload,
+        "html": _payload_html(report.report_payload),
     }
 
 
@@ -43,6 +44,7 @@ def daily_report_read_model(report: DailyReport) -> dict[str, object]:
         "blocked_count": report.blocked_count,
         "fill_ratio": _optional_str(report.fill_ratio),
         "payload": report.report_payload,
+        "html": _payload_html(report.report_payload),
     }
 
 
@@ -68,8 +70,14 @@ def counterfactual_read_model(result: CounterfactualResult) -> dict[str, object]
         "would_profit_10m": result.would_profit_10m,
         "would_profit_15m": result.would_profit_15m,
         "payload": result.result_payload,
+        "html": _payload_html(result.result_payload),
     }
 
 
 def _optional_str(value: object | None) -> str | None:
     return str(value) if value is not None else None
+
+
+def _payload_html(payload: dict[str, object]) -> str | None:
+    html = payload.get("html_output")
+    return html if isinstance(html, str) else None

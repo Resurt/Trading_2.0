@@ -52,11 +52,12 @@ WebSocket snapshot channels для dashboard/orders/market/reports. `frontend`
 
 - `apps/trade-core` - долгоживущий Python service skeleton.
 - `apps/api` - FastAPI BFF для управления, read models, отчетов и WebSocket snapshots.
-- `apps/report-worker` - Celery/report worker skeleton без задач.
+- `apps/report-worker` - Celery/report worker для hourly/daily/counterfactual analytics.
 - `apps/frontend` - Vue 3 + Vite dark-theme операторский UI.
 - `packages/common` - общие enums и dataclasses.
 - `tests` - smoke tests для импортов Python-пакетов.
-- `scripts` - место для CLI и вспомогательных скриптов следующих шагов.
+- `scripts` - вспомогательные скрипты совместимости.
+- `tools/reports` - CLI для hourly/daily/counterfactual отчетов вне FastAPI.
 
 ## Локальные проверки
 

@@ -222,7 +222,11 @@ celery -A report_worker.tasks worker --loglevel=INFO
 Ручной запуск отчетов без FastAPI:
 
 ```powershell
-python scripts/run_hourly_report.py --micro-session-id 2026-06-12:weekday_main:1000 --strategy-id baseline
-python scripts/run_daily_report.py --trading-date 2026-06-12 --strategy-id baseline
-python scripts/run_counterfactual.py --trading-date 2026-06-12 --strategy-id baseline
+python tools/reports/build_hourly_report.py --date 2026-06-12 --strategy-id baseline --force-rebuild
+python tools/reports/build_daily_report.py --date 2026-06-12 --strategy-id baseline --force-rebuild
+python tools/reports/run_counterfactual_analysis.py --date 2026-06-12 --strategy-id baseline --force-rebuild
 ```
+
+Фильтры CLI: `--instrument`, `--timeframe`, `--session-type`,
+`--strategy-version`, `--force-rebuild`. HTML preview можно получить через
+`--output-format html` или вместе с JSON через `--output-format both`.

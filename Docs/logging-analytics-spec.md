@@ -791,3 +791,79 @@ Dashboard files:
 - `real_order_block_reason_code`.
 
 В `historical_replay` и `shadow` execution layer сохраняет pseudo-order lifecycle без реального broker call. Эти записи пригодны для funnels и counterfactual analysis, но не должны интерпретироваться как реальное execution quality.
+
+## Reporting analytics v2
+
+Аналитика отчетов реализуется в `report_worker.analytics` и запускается только из
+`report-worker` Celery tasks или CLI scripts. FastAPI не считает тяжелые отчеты
+inline и не использует `BackgroundTasks` для этих расчетов.
+
+Canonical Celery tasks:
+
+- `report_worker.build_hourly_report`
+- `report_worker.build_daily_report`
+- `report_worker.rebuild_reports_for_date`
+- `report_worker.run_counterfactual_analysis_for_date`
+
+Canonical CLI scripts:
+
+```bash
+python tools/reports/build_hourly_report.py --date 2026-06-13 --strategy-id baseline
+python tools/reports/build_daily_report.py --date 2026-06-13 --strategy-id baseline --force-rebuild
+python tools/reports/run_counterfactual_analysis.py --date 2026-06-13 --strategy-id baseline
+```
+
+Общие CLI filters:
+
+- `--date`
+- `--instrument`
+- `--timeframe`
+- `--session-type`
+- `--strategy-version`
+- `--force-rebuild`
+
+Daily report `market_regime` v2:
+
+- `trend_up` - first-open to last-close return >= +25 bps.
+- `trend_down` - first-open to last-close return <= -25 bps.
+- `choppy` - absolute return is flat, but intraday range >= 80 bps.
+- `flat` - all other cases.
+
+Классификация считается отдельно по `instrument_id + timeframe` и затем
+агрегируется в daily summary. Payload хранит `regime_by_instrument_timeframe`,
+`scope_returns_bps`, `scope_range_bps` и объяснение алгоритма.
+
+Candidate funnel v2:
+
+```text
+created -> passed_gates -> blocked -> order_intent -> posted -> filled -> exited
+```
+
+Blocker ranking v2 хранит:
+
+- количество срабатываний;
+- missed gross/net PnL по counterfactual;
+- avoided loss;
+- false positive rate по горизонту 15 минут;
+- counterfactual count.
+
+Canceled-order analytics v2 считается отдельным блоком daily report и группирует
+отмены по `cancel_reason_code`, включая missed gross/net PnL и avoided loss.
+
+Counterfactual scenarios v2:
+
+- `blocked-as-if-entered`
+- `kept-limit-order`
+- `aggressive-fill`
+
+Горизонты остаются `+5m`, `+10m`, `+15m`. Для каждого окна сохраняются MFE/MAE,
+gross PnL и net PnL. Комиссия параметризуется через `AnalyticsAssumptions`;
+default для акций: `0.05%` на сторону, то есть `10 bps` round trip. Slippage
+остается отдельным допущением.
+
+Frontend outputs:
+
+- JSON остается основным structured payload в `hourly_report.report_payload`,
+  `daily_report.report_payload`, `counterfactual_result.result_payload`;
+- HTML preview хранится в `html_output` внутри payload и возвращается read models
+  как поле `html`.

@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import cast
 from uuid import uuid4
 
-from sqlalchemy import create_engine, delete
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
 from report_worker.analytics import (
@@ -21,7 +21,6 @@ from trading_common.db.models import (
     BlockerEvent,
     BrokerOrder,
     CounterfactualResult,
-    DailyReport,
     FillEvent,
     MarketCandle,
     OrderIntent,
@@ -84,9 +83,10 @@ def test_day_trend_classification_is_reproducible() -> None:
         }
     )
 
-    assert trend.market_regime == "long_bias"
+    assert trend.market_regime == "trend_up"
     assert trend.instrument_returns_bps["MOEX:SBER"] == Decimal("200.0000")
     assert trend.instrument_returns_bps["MOEX:GAZP"] == Decimal("150.0000")
+    assert trend.regime_by_scope["MOEX:SBER"] == "trend_up"
 
 
 def test_counterfactual_mfe_mae_and_theoretical_pnl() -> None:
@@ -141,6 +141,13 @@ def test_counterfactual_mfe_mae_and_theoretical_pnl() -> None:
     assert analysis.windows[5].tp_hit is True
     assert analysis.windows[5].sl_hit is False
     assert analysis.windows[15].would_profit is True
+    assert analysis.windows[15].gross_pnl_bps == Decimal("200.0000")
+    assert analysis.windows[15].net_pnl_bps == Decimal("196.0000")
+    assert set(analysis.scenarios) == {
+        "blocked-as-if-entered",
+        "kept-limit-order",
+        "aggressive-fill",
+    }
 
 
 def test_report_service_builds_hourly_daily_and_counterfactual_reports() -> None:
@@ -342,16 +349,31 @@ def test_report_service_builds_hourly_daily_and_counterfactual_reports() -> None
         assert len(counterfactuals) == 2
         assert (
             counterfactuals[0].result_payload["algorithm"]
-            == "mfe_mae_directional_close_after_fees_slippage_v1"
+            == "counterfactual_mfe_mae_realistic_scenarios_v2"
         )
-        assert daily.market_regime == "long_bias"
+        assert "scenarios" in counterfactuals[0].result_payload
+        assert counterfactuals[0].pnl_net is not None
+        assert daily.market_regime == "trend_up"
         funnel = cast(dict[str, object], daily.report_payload["funnel"])
         execution_quality = cast(dict[str, object], daily.report_payload["execution_quality"])
         assert funnel["candidates"] == 1
+        assert funnel["created"] == 1
+        assert funnel["order_intent"] == 1
         assert execution_quality["cancel_count"] == 1
+        assert "html_output" in daily.report_payload
+        blocker_ranking = cast(list[dict[str, object]], daily.report_payload["blocker_ranking"])
+        assert blocker_ranking[0]["blocker_code"] == "spread_too_wide"
+        cancel_analytics = cast(dict[str, object], daily.report_payload["canceled_order_analytics"])
+        assert cancel_analytics["cancelled_intent_count"] == 1
 
-        session.execute(delete(CounterfactualResult))
-        session.execute(delete(DailyReport))
+        same_counterfactuals = service.run_counterfactual_analysis_for_date(
+            trading_date=date(2026, 6, 12),
+            strategy_id="baseline",
+            force_rebuild=False,
+        )
+        assert len(same_counterfactuals) == 2
+        assert session.scalar(select(func.count()).select_from(CounterfactualResult)) == 2
+
         rebuilt_daily = service.rebuild_reports_for_date(
             trading_date=date(2026, 6, 12),
             strategy_id="baseline",
@@ -362,5 +384,136 @@ def test_report_service_builds_hourly_daily_and_counterfactual_reports() -> None
             rebuilt_daily.report_payload["missed_opportunity_summary"],
         )
         assert missed_opportunity["total_counterfactuals"] == 2
+
+    engine.dispose()
+
+
+def test_daily_report_handles_empty_data_deterministically() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        service = ReportAnalyticsService(session)
+        first = service.build_daily_report(
+            trading_date=date(2026, 6, 14),
+            strategy_id="baseline",
+        )
+        second = service.build_daily_report(
+            trading_date=date(2026, 6, 14),
+            strategy_id="baseline",
+            force_rebuild=False,
+        )
+
+        assert first.daily_report_id == second.daily_report_id
+        assert first.market_regime == "flat"
+        assert first.report_payload["funnel"] == second.report_payload["funnel"]
+        assert first.report_payload["missed_opportunity_summary"] == {
+            "would_profit_5m": 0,
+            "would_profit_10m": 0,
+            "would_profit_15m": 0,
+            "missed_gross_pnl": "0.0000",
+            "missed_net_pnl": "0.0000",
+            "avoided_loss": "0.0000",
+            "total_counterfactuals": 0,
+        }
+
+    engine.dispose()
+
+
+def test_weekend_filtered_daily_report_and_canceled_counterfactual() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    now = utc(2026, 6, 13, 8)
+    weekend_context = {
+        "calendar_date": date(2026, 6, 13),
+        "trading_date": date(2026, 6, 13),
+        "session_type": "weekend",
+        "session_phase": "continuous_trading",
+        "micro_session_id": "2026-06-13:weekend:0800",
+        "broker_trading_status": "normal_trading",
+    }
+
+    with Session(engine) as session:
+        request_order_id = uuid4()
+        order_intent_id = uuid4()
+        session.add(
+            OrderIntent(
+                **weekend_context,
+                order_intent_id=order_intent_id,
+                candidate_id=None,
+                instrument_id="MOEX:SBER",
+                timeframe="5m",
+                strategy_id="baseline",
+                strategy_version=2,
+                side="buy",
+                order_action="place",
+                order_type="limit",
+                lot_qty=10,
+                intended_price=Decimal("100"),
+                time_in_force="day",
+                request_order_id=request_order_id,
+                idempotency_key="weekend-cancelled",
+                execution_policy_version=1,
+                status="cancelled",
+                cancel_reason_code="stale_order",
+                reject_reason_code=None,
+                created_ts=now,
+                submitted_ts=now,
+                terminal_ts=now + timedelta(minutes=1),
+                intent_payload={},
+            )
+        )
+        for minute, close_price in (
+            (5, Decimal("101")),
+            (10, Decimal("102")),
+            (15, Decimal("103")),
+        ):
+            session.add(
+                MarketCandle(
+                    **weekend_context,
+                    instrument_id="MOEX:SBER",
+                    timeframe="5m",
+                    open_ts_utc=now + timedelta(minutes=minute - 5),
+                    close_ts_utc=now + timedelta(minutes=minute),
+                    exchange_open_ts=now + timedelta(minutes=minute - 5),
+                    exchange_close_ts=now + timedelta(minutes=minute),
+                    open_price=Decimal("100"),
+                    high_price=close_price,
+                    low_price=Decimal("99.8"),
+                    close_price=close_price,
+                    volume_lots=Decimal("100"),
+                    is_closed=True,
+                    source="test",
+                    candle_payload={},
+                )
+            )
+        session.flush()
+
+        service = ReportAnalyticsService(session)
+        counterfactuals = service.run_counterfactual_analysis_for_date(
+            trading_date=date(2026, 6, 13),
+            strategy_id="baseline",
+            instrument_id="MOEX:SBER",
+            timeframe="5m",
+            session_type="weekend",
+            strategy_version=2,
+        )
+        daily = service.build_daily_report(
+            trading_date=date(2026, 6, 13),
+            strategy_id="baseline",
+            instrument_id="MOEX:SBER",
+            timeframe="5m",
+            session_type="weekend",
+            strategy_version=2,
+        )
+
+        assert len(counterfactuals) == 1
+        assert counterfactuals[0].cancel_reason_code == "stale_order"
+        assert counterfactuals[0].source_event_type == "cancelled_order"
+        assert counterfactuals[0].would_profit_15m is True
+        assert daily.session_type == "weekend"
+        assert daily.market_regime == "trend_up"
+        cancel_analytics = cast(dict[str, object], daily.report_payload["canceled_order_analytics"])
+        assert cancel_analytics["cancelled_intent_count"] == 1
 
     engine.dispose()

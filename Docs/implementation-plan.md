@@ -301,6 +301,27 @@
 - daily report содержит market regime, candidate funnel, blocker ranking, execution quality, counterfactual, session segmentation, infra health;
 - counterfactual windows 5/10/15 минут сохраняются в PostgreSQL.
 
+### Статус шага 09
+
+Статус: выполнено как расширяемый analytics foundation.
+
+Зафиксировано:
+
+- сервисный слой `report_worker.analytics.ReportAnalyticsService` используется и
+  Celery tasks, и CLI scripts;
+- heavy reports не исполняются в FastAPI;
+- daily regime v2: `trend_up`, `trend_down`, `flat`, `choppy` по
+  `instrument_id + timeframe`;
+- candidate funnel v2: `created -> passed_gates -> blocked -> order_intent ->
+  posted -> filled -> exited`;
+- blocker ranking считает count, missed gross/net PnL, avoided loss и false
+  positive rate;
+- отдельная аналитика отмененных заявок считается по `cancel_reason_code`;
+- counterfactual scenarios: `blocked-as-if-entered`, `kept-limit-order`,
+  `aggressive-fill`;
+- default commission для акций: `0.05%` на сторону;
+- новые CLI scripts находятся в `tools/reports/`.
+
 ## Шаг 10 - FastAPI BFF
 
 Цель: реализовать backend-for-frontend.
