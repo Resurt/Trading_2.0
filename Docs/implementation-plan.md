@@ -198,6 +198,8 @@
 - `session_run_closed`;
 - enqueue report task.
 
+Реализация шага зафиксирована в `Docs/session-manager.md`.
+
 Критерии готовности:
 
 - покрыт старт внутри неполного часа;

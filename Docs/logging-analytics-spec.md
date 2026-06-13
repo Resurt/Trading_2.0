@@ -252,7 +252,9 @@ analytics_context:
 - `no_edge_after_costs`
 - `risk_budget_exceeded`
 - `session_forbidden`
+- `phase_forbidden`
 - `order_type_forbidden`
+- `weekend_broker_mode`
 - `max_drawdown_reached`
 - `open_order_conflict`
 - `position_limit_reached`

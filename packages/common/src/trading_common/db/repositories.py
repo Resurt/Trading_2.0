@@ -14,6 +14,7 @@ from trading_common.db.models import (
     OrderIntent,
     SessionRun,
     StrategyConfig,
+    StrategyStateEvent,
 )
 
 
@@ -135,6 +136,39 @@ class SessionRunRepository:
         run.close_reason_code = close_reason_code
         self._session.flush()
         return run
+
+    def mark_freeze(self, run_id: UUID, *, freeze_started_at: datetime) -> SessionRun:
+        run = self.get(run_id)
+        if run is None:
+            msg = f"SessionRun not found: {run_id}"
+            raise LookupError(msg)
+        if run.freeze_started_at is None:
+            run.freeze_started_at = freeze_started_at
+        if run.status == "open":
+            run.status = "freezing"
+        self._session.flush()
+        return run
+
+    def request_report(self, run_id: UUID, *, requested_at: datetime) -> SessionRun:
+        run = self.get(run_id)
+        if run is None:
+            msg = f"SessionRun not found: {run_id}"
+            raise LookupError(msg)
+        run.report_requested_at = requested_at
+        self._session.flush()
+        return run
+
+
+class StrategyStateEventRepository:
+    """Append-only helpers for `strategy_state_event` rows."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def create(self, event: StrategyStateEvent) -> StrategyStateEvent:
+        self._session.add(event)
+        self._session.flush()
+        return event
 
 
 class OrderRepository:

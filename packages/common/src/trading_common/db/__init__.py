@@ -6,6 +6,7 @@ from trading_common.db.repositories import (
     OrderRepository,
     SessionRunRepository,
     StrategyConfigRepository,
+    StrategyStateEventRepository,
 )
 from trading_common.db.service import DatabaseService
 
@@ -16,4 +17,5 @@ __all__ = [
     "OrderRepository",
     "SessionRunRepository",
     "StrategyConfigRepository",
+    "StrategyStateEventRepository",
 ]
