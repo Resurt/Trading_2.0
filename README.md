@@ -21,6 +21,9 @@
 - `Docs/architecture.md`
 - `Docs/implementation-plan.md`
 - `Docs/logging-analytics-spec.md`
+- `Docs/logging_analytics_architecture.md`
+- `Docs/logging_analytics_event_taxonomy.md`
+- `Docs/logging_analytics_rollout_plan.md`
 - `Docs/database-schema.md`
 - `Docs/broker-gateway.md`
 - `Docs/session-manager.md`
