@@ -6,6 +6,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from trading_common import LaunchModePolicy, RuntimeMode
+
 FULL_ACCESS_TOKEN_FILE_ENV = "TBANK_FULL_ACCESS_TOKEN_FILE"
 READONLY_TOKEN_FILE_ENV = "TBANK_READONLY_TOKEN_FILE"
 FULL_ACCESS_TOKEN_ENV = "TBANK_FULL_ACCESS_TOKEN"
@@ -76,4 +78,35 @@ def load_tbank_tokens(*, allow_legacy_dev_token: bool = True) -> TBankTokenBundl
     return TBankTokenBundle(
         full_access_token=full_access_token,
         readonly_token=readonly_token,
+    )
+
+
+def load_tbank_tokens_for_launch(policy: LaunchModePolicy) -> TBankTokenBundle:
+    """Load and validate tokens according to the controlled launch policy."""
+
+    if policy.mode is RuntimeMode.PRODUCTION:
+        tokens = load_tbank_tokens_from_files()
+    else:
+        tokens = load_tbank_tokens(allow_legacy_dev_token=True)
+    if policy.requires_full_access_token and not tokens.full_access_token:
+        msg = f"{policy.mode.value} mode requires a full-access T-Bank token"
+        raise RuntimeError(msg)
+    if policy.requires_readonly_token and not (
+        tokens.readonly_token or tokens.full_access_token
+    ):
+        msg = f"{policy.mode.value} mode requires a readonly or full-access T-Bank token"
+        raise RuntimeError(msg)
+    return tokens
+
+
+def load_tbank_tokens_from_files() -> TBankTokenBundle:
+    """Load production tokens from secret files only, without env value fallback."""
+
+    return TBankTokenBundle(
+        full_access_token=_read_secret_file(
+            os.getenv(FULL_ACCESS_TOKEN_FILE_ENV, DEFAULT_FULL_ACCESS_TOKEN_FILE)
+        ),
+        readonly_token=_read_secret_file(
+            os.getenv(READONLY_TOKEN_FILE_ENV, DEFAULT_READONLY_TOKEN_FILE)
+        ),
     )

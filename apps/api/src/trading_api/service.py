@@ -6,12 +6,14 @@ import os
 
 import uvicorn
 
-from trading_api.app import create_fastapi_app, create_identity, runtime_mode_from_env
+from trading_api.app import create_fastapi_app, create_identity
+from trading_common import LaunchModePolicy
 from trading_common.observability import configure_json_logging
 
 
 def main() -> None:
-    runtime_mode = runtime_mode_from_env(os.getenv("TRADING_RUNTIME_MODE"))
+    launch_policy = LaunchModePolicy.from_env()
+    runtime_mode = launch_policy.mode
     identity = create_identity(runtime_mode)
     configure_json_logging(service=identity.service)
     uvicorn.run(

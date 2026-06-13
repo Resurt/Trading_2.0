@@ -6,6 +6,8 @@ import os
 from dataclasses import dataclass
 from enum import StrEnum
 
+from trading_common import LaunchModePolicy, RuntimeMode
+
 
 class TBankEnvironment(StrEnum):
     """Supported T-Invest API environments."""
@@ -49,4 +51,32 @@ class TBankBrokerConfig:
             live_target=os.getenv("TBANK_LIVE_TARGET", LIVE_TARGET),
             sandbox_target=os.getenv("TBANK_SANDBOX_TARGET", SANDBOX_TARGET),
             max_retry_attempts=int(os.getenv("TBANK_MAX_RETRY_ATTEMPTS", "3")),
+        )
+
+    @classmethod
+    def from_launch_policy(cls, policy: LaunchModePolicy) -> TBankBrokerConfig:
+        """Derive broker target from the controlled launch mode."""
+
+        if policy.mode is RuntimeMode.HISTORICAL_REPLAY:
+            msg = "historical_replay mode does not use a T-Bank broker target"
+            raise RuntimeError(msg)
+        environment = (
+            TBankEnvironment.SANDBOX
+            if policy.mode is RuntimeMode.SANDBOX
+            else TBankEnvironment.LIVE
+        )
+        return cls.from_env().with_environment(environment)
+
+    def with_environment(self, environment: TBankEnvironment) -> TBankBrokerConfig:
+        return TBankBrokerConfig(
+            environment=environment,
+            app_name=self.app_name,
+            live_target=self.live_target,
+            sandbox_target=self.sandbox_target,
+            max_retry_attempts=self.max_retry_attempts,
+            backoff_initial_seconds=self.backoff_initial_seconds,
+            backoff_multiplier=self.backoff_multiplier,
+            backoff_max_seconds=self.backoff_max_seconds,
+            stream_ping_timeout_seconds=self.stream_ping_timeout_seconds,
+            stream_ping_interval_seconds=self.stream_ping_interval_seconds,
         )

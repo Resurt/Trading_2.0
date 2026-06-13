@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  backend-quality:
+    name: Backend lint, type check and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Python dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+      - name: Backend tests
+        run: python -m pytest
+      - name: Ruff lint
+        run: python -m ruff check .
+      - name: Mypy type check
+        run: python -m mypy
+
+  frontend-quality:
+    name: Frontend type check, tests and build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/frontend/package-lock.json
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Type check
+        run: npm run typecheck
+      - name: Unit tests
+        run: npm run test:unit
+      - name: Production build
+        run: npm run build
+
+  migration-check:
+    name: Alembic migration check
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: trading_2_0
+          POSTGRES_USER: trading_app
+          POSTGRES_PASSWORD: ci_postgres_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U trading_app -d trading_2_0"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+psycopg://trading_app:ci_postgres_password@localhost:5432/trading_2_0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Python dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+      - name: Upgrade migrations
+        run: python -m alembic upgrade head
+      - name: Check downgrade and re-upgrade
+        run: python -m alembic downgrade -1 && python -m alembic upgrade head
+
+  smoke-build:
+    name: Compose and controlled launch smoke build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Python dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+      - name: Prepare placeholder compose secrets
+        run: |
+          mkdir -p secrets
+          printf 'ci_postgres_password' > secrets/postgres_password
+          printf 'ci_grafana_password' > secrets/grafana_admin_password
+          printf 'ci_tbank_full_access_placeholder' > secrets/tbank_full_access_token
+          printf 'ci_tbank_readonly_placeholder' > secrets/tbank_readonly_token
+      - name: Validate compose config
+        run: docker compose config --quiet
+      - name: Replay smoke
+        run: python scripts/run_replay_harness.py
+      - name: Sandbox dry-run smoke
+        run: python scripts/run_sandbox_smoke.py --dry-run

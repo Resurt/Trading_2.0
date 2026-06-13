@@ -34,7 +34,7 @@ from trading_api.schemas import (
     StrategyConfigUpdateRequest,
     WebSocketEnvelope,
 )
-from trading_common import AppIdentity, RuntimeMode, ServiceHealth, ServiceName
+from trading_common import AppIdentity, RuntimeMode, ServiceHealth, ServiceName, parse_runtime_mode
 from trading_common.db.config import build_database_url_from_env
 from trading_common.db.service import DatabaseService
 from trading_common.http_health import CONTENT_TYPE_TEXT, render_health, render_metrics
@@ -46,9 +46,7 @@ RoleDep = Annotated[ApiRole, Depends(role_from_header)]
 def runtime_mode_from_env(value: str | None) -> RuntimeMode:
     """Parse runtime mode for local service startup."""
 
-    if value is None:
-        return RuntimeMode.HISTORICAL_REPLAY
-    return RuntimeMode(value)
+    return parse_runtime_mode(value)
 
 
 def create_identity(runtime_mode: RuntimeMode = RuntimeMode.HISTORICAL_REPLAY) -> AppIdentity:

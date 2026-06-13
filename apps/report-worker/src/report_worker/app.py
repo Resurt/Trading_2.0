@@ -1,15 +1,13 @@
 """Report-worker application boundary and health identity."""
 
-from trading_common import AppIdentity, RuntimeMode, ServiceHealth, ServiceName
+from trading_common import AppIdentity, RuntimeMode, ServiceHealth, ServiceName, parse_runtime_mode
 from trading_common.models import HealthStatus
 
 
 def runtime_mode_from_env(value: str | None) -> RuntimeMode:
     """Parse runtime mode for local service startup."""
 
-    if value is None:
-        return RuntimeMode.HISTORICAL_REPLAY
-    return RuntimeMode(value)
+    return parse_runtime_mode(value)
 
 
 def create_identity(runtime_mode: RuntimeMode = RuntimeMode.HISTORICAL_REPLAY) -> AppIdentity:

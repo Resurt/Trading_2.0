@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-import os
-
-from report_worker.app import create_identity, runtime_mode_from_env
+from report_worker.app import create_identity
+from trading_common import LaunchModePolicy
 from trading_common.http_health import run_health_server
 from trading_common.models import HealthStatus, ServiceHealth
 from trading_common.observability import configure_json_logging
 
 
 def main() -> None:
-    runtime_mode = runtime_mode_from_env(os.getenv("TRADING_RUNTIME_MODE"))
+    launch_policy = LaunchModePolicy.from_env()
+    runtime_mode = launch_policy.mode
     identity = create_identity(runtime_mode)
     configure_json_logging(service=identity.service)
     run_health_server(

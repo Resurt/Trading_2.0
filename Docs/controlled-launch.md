@@ -1,0 +1,83 @@
+# Controlled Launch
+
+Этот документ фиксирует правила доведения робота до controlled launch. Production не является режимом по умолчанию и не включается без явного подтверждения.
+
+## Launch modes
+
+| Mode | Market data | Execution | Broker target | Для чего |
+| --- | --- | --- | --- | --- |
+| `historical_replay` | исторические candles/events | pseudo-orders, без broker calls | `none` | детерминированная проверка rollovers, blockers, reports и counterfactual |
+| `sandbox` | T-Bank sandbox | реальные sandbox orders | `sandbox-invest-public-api.tbank.ru:443` | smoke broker adapter и инфраструктуры без реальных денег |
+| `shadow` | live market data | pseudo-orders, без `PostOrder`/`CancelOrder` | live readonly stream/unary | проверка сигналов, risk gates, analytics spine и dashboard на реальном рынке |
+| `production` | live market data | real broker orders | `invest-public-api.tbank.ru:443` | live trading после checklist |
+
+`TRADING_RUNTIME_MODE` по умолчанию равен `historical_replay`.
+
+Production требует:
+
+```text
+TRADING_RUNTIME_MODE=production
+TRADING_PRODUCTION_CONFIRM=I_UNDERSTAND_LIVE_ORDERS
+```
+
+Без `TRADING_PRODUCTION_CONFIRM` сервис должен упасть на startup, а не стартовать в опасном полу-состоянии.
+
+## Safety gates
+
+- `LaunchModePolicy` находится в `trading_common.launch_modes`.
+- `DefaultExecutionEngine` принимает `launch_policy`.
+- В `historical_replay` и `shadow` создается `order_intent`, но `BrokerGateway.post_order()` не вызывается.
+- Pseudo-order пишет `broker_order` со статусом `pseudo_posted`, `real_broker_call=false` и `reason_code`.
+- Cancel в pseudo mode пишет `cancel_reason_code`, `cancel_payload` и не вызывает `BrokerGateway.cancel_order()`.
+- `sandbox` разрешает broker calls только через sandbox config.
+- `production` разрешает broker calls только после явного подтверждения и production checklist.
+
+## Replay harness
+
+`trade_core.replay.ReplayHarness` воспроизводит:
+
+- closed candles через `BarEngine`;
+- `SessionSnapshot` через `HourlyMicroSessionManager`;
+- blocker events;
+- cancelled-order events;
+- counterfactual sources через подключаемый callback.
+
+Локальная проверка:
+
+```powershell
+python scripts/run_replay_harness.py
+```
+
+Ожидаемые признаки:
+
+- `session_rollover_verified=true`;
+- `blocker_pipeline_verified=true`;
+- `counterfactual_pipeline_verified=true`.
+
+## Sandbox smoke
+
+Sandbox smoke проверяет wiring, endpoint и secret policy. Dry-run не требует реального токена:
+
+```powershell
+python scripts/run_sandbox_smoke.py --dry-run
+```
+
+Sandbox results нельзя использовать как прямую оценку real execution quality. Это проверка инфраструктуры и adapter lifecycle.
+
+## Shadow mode
+
+Shadow mode использует live market data, но execution остается pseudo:
+
+- strategy/risk работают штатно;
+- `order_intent` и causal events сохраняются;
+- reports/counterfactual строятся как в production;
+- реальные `PostOrder`/`CancelOrder` запрещены policy.
+
+## CI gates
+
+GitHub Actions workflow `.github/workflows/ci.yml` содержит jobs:
+
+- `backend-quality` - pytest, ruff, mypy;
+- `frontend-quality` - Vue typecheck, unit tests, build;
+- `migration-check` - Alembic upgrade/downgrade/upgrade на PostgreSQL;
+- `smoke-build` - compose config, replay smoke, sandbox dry-run smoke.

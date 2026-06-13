@@ -21,6 +21,7 @@ from trade_core.strategy.models import (
     OrderIntentRequest,
     OrderLifecycleResult,
 )
+from trading_common import LaunchModePolicy, RuntimeMode
 from trading_common.db.models import BrokerOrder, OrderIntent
 from trading_common.db.repositories import OrderRepository
 from trading_common.observability import DomainEventType
@@ -34,10 +35,14 @@ class DefaultExecutionEngine:
         *,
         broker_gateway: BrokerGateway,
         orders: OrderRepository,
+        launch_policy: LaunchModePolicy | None = None,
         clock: CallableClock | None = None,
     ) -> None:
         self._broker_gateway = broker_gateway
         self._orders = orders
+        self._launch_policy = launch_policy or LaunchModePolicy.from_mode(
+            RuntimeMode.HISTORICAL_REPLAY
+        )
         self._clock = clock or _utcnow
 
     def create_order_intent(self, request: OrderIntentRequest) -> OrderIntent:
@@ -86,11 +91,16 @@ class DefaultExecutionEngine:
                 "timeframe": request.candidate.timeframe.value,
                 "signal_fingerprint": request.candidate.signal_fingerprint,
                 "condition_payload": request.candidate.condition_payload,
+                "launch_mode": self._launch_policy.mode.value,
+                "order_submission_mode": self._launch_policy.order_submission_mode,
             },
         )
         return self._orders.create_intent_idempotent(intent)
 
     async def post_order(self, intent: OrderIntent) -> OrderLifecycleResult:
+        if not self._launch_policy.allows_real_orders:
+            return self._post_pseudo_order(intent)
+
         account_id = _required_payload_str(intent.intent_payload, "account_id")
         request = OrderPlacementRequest(
             account_id=account_id,
@@ -144,6 +154,15 @@ class DefaultExecutionEngine:
         if not cancel_payload:
             msg = "cancel_payload must explain the machine-readable cancellation context"
             raise ValueError(msg)
+
+        if not self._launch_policy.allows_real_orders:
+            return self._cancel_pseudo_order(
+                intent,
+                account_id=account_id,
+                cancel_reason_code=cancel_reason_code,
+                cancel_payload=cancel_payload,
+                exchange_order_id=exchange_order_id,
+            )
 
         requested_at = self._clock()
         self._orders.update_intent_status(
@@ -211,6 +230,92 @@ class DefaultExecutionEngine:
         )
         post_result = await self.post_order(replacement_intent)
         return cancel_result, post_result
+
+    def _post_pseudo_order(self, intent: OrderIntent) -> OrderLifecycleResult:
+        observed_at = self._clock()
+        reason_code = self._launch_policy.real_order_block_reason_code
+        self._orders.update_intent_status(
+            intent,
+            status="pseudo_submitted",
+            submitted_ts=observed_at,
+            payload_patch={
+                "launch_mode": self._launch_policy.mode.value,
+                "order_submission_mode": self._launch_policy.order_submission_mode,
+                "real_broker_call": False,
+                "reason_code": reason_code,
+            },
+        )
+        response = BrokerUnaryResponse(
+            method_name="PseudoPostOrder",
+            data={
+                "broker_status": "pseudo_posted",
+                "real_broker_call": False,
+                "launch_mode": self._launch_policy.mode.value,
+                "reason_code": reason_code,
+            },
+            headers={},
+        )
+        broker_order = self._upsert_broker_order(
+            intent=intent,
+            response=response,
+            observed_at=observed_at,
+            default_status="pseudo_posted",
+            lifecycle_seq_increment=1,
+            posted_at=observed_at,
+        )
+        return _lifecycle_result(intent=intent, broker_order=broker_order, response=response)
+
+    def _cancel_pseudo_order(
+        self,
+        intent: OrderIntent,
+        *,
+        account_id: str,
+        cancel_reason_code: CancelReasonCode,
+        cancel_payload: Mapping[str, object],
+        exchange_order_id: str | None,
+    ) -> OrderLifecycleResult:
+        requested_at = self._clock()
+        self._orders.update_intent_status(
+            intent,
+            status="cancel_requested",
+            cancel_reason_code=cancel_reason_code.value,
+            payload_patch={
+                "cancel_reason_code": cancel_reason_code.value,
+                "cancel_payload": dict(cancel_payload),
+                "launch_mode": self._launch_policy.mode.value,
+                "order_submission_mode": self._launch_policy.order_submission_mode,
+                "real_broker_call": False,
+                "account_id": account_id,
+            },
+        )
+        observed_at = self._clock()
+        self._orders.update_intent_status(
+            intent,
+            status="cancelled",
+            terminal_ts=observed_at,
+            payload_patch={"cancel_requested_at": requested_at.isoformat()},
+        )
+        response = BrokerUnaryResponse(
+            method_name="PseudoCancelOrder",
+            data={
+                "exchange_order_id": exchange_order_id,
+                "broker_status": "cancelled",
+                "real_broker_call": False,
+                "launch_mode": self._launch_policy.mode.value,
+                "cancel_reason_code": cancel_reason_code.value,
+            },
+            headers={},
+        )
+        broker_order = self._upsert_broker_order(
+            intent=intent,
+            response=response,
+            observed_at=observed_at,
+            default_status="cancelled",
+            lifecycle_seq_increment=1,
+            cancelled_at=observed_at,
+            exchange_order_id=exchange_order_id,
+        )
+        return _lifecycle_result(intent=intent, broker_order=broker_order, response=response)
 
     def _upsert_broker_order(
         self,
@@ -337,7 +442,7 @@ def _lifecycle_result(
 
 
 def _broker_event_type(status: str) -> str:
-    if status == "posted":
+    if status in {"posted", "pseudo_posted"}:
         return DomainEventType.BROKER_ORDER_POSTED.value
     if status == "cancelled":
         return DomainEventType.BROKER_ORDER_CANCELLED.value

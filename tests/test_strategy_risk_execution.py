@@ -39,6 +39,7 @@ from trade_core.strategy import (
     StrategyState,
     TradeSide,
 )
+from trading_common import LaunchModePolicy, RuntimeMode
 from trading_common.db.base import Base
 from trading_common.db.models import BlockerEvent, RiskEvent, StrategyStateEvent
 from trading_common.db.repositories import (
@@ -273,6 +274,7 @@ def test_execution_engine_posts_and_cancels_with_explicit_reason_code() -> None:
         execution = DefaultExecutionEngine(
             broker_gateway=cast(BrokerGateway, fake_gateway),
             orders=OrderRepository(session),
+            launch_policy=LaunchModePolicy.from_mode(RuntimeMode.SANDBOX),
         )
         intent = execution.create_order_intent(
             OrderIntentRequest(

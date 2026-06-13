@@ -145,6 +145,8 @@ services:
       HOST: 0.0.0.0
       PORT: 8001
       TRADING_RUNTIME_MODE: ${TRADING_RUNTIME_MODE:-historical_replay}
+      TRADING_PRODUCTION_CONFIRM: ${TRADING_PRODUCTION_CONFIRM:-}
+      TBANK_ENVIRONMENT: ${TBANK_ENVIRONMENT:-sandbox}
       TBANK_FULL_ACCESS_TOKEN_FILE: /run/secrets/tbank_full_access_token
       TBANK_READONLY_TOKEN_FILE: /run/secrets/tbank_readonly_token
     secrets:
@@ -182,6 +184,7 @@ services:
       HOST: 0.0.0.0
       PORT: 8000
       TRADING_RUNTIME_MODE: ${TRADING_RUNTIME_MODE:-historical_replay}
+      TRADING_PRODUCTION_CONFIRM: ${TRADING_PRODUCTION_CONFIRM:-}
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
       POSTGRES_DB: ${POSTGRES_DB:-trading_2_0}
@@ -226,6 +229,7 @@ services:
       HOST: 0.0.0.0
       PORT: 8002
       TRADING_RUNTIME_MODE: ${TRADING_RUNTIME_MODE:-historical_replay}
+      TRADING_PRODUCTION_CONFIRM: ${TRADING_PRODUCTION_CONFIRM:-}
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
       POSTGRES_DB: ${POSTGRES_DB:-trading_2_0}

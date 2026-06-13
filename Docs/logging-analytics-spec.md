@@ -730,3 +730,14 @@ Dashboard files:
 - `risk-blockers.json`
 - `session-rollovers.json`
 - `trading-overview.json`
+
+## Controlled launch context
+
+Для replay/sandbox/shadow/production разборов в analytics payload нужно сохранять:
+
+- `launch_mode`;
+- `order_submission_mode`;
+- `real_broker_call`;
+- `real_order_block_reason_code`.
+
+В `historical_replay` и `shadow` execution layer сохраняет pseudo-order lifecycle без реального broker call. Эти записи пригодны для funnels и counterfactual analysis, но не должны интерпретироваться как реальное execution quality.

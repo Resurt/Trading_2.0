@@ -4,16 +4,14 @@ No broker integration or trading business logic lives here yet. This file only
 declares an importable service skeleton for the monorepo bootstrap step.
 """
 
-from trading_common import AppIdentity, RuntimeMode, ServiceHealth, ServiceName
+from trading_common import AppIdentity, RuntimeMode, ServiceHealth, ServiceName, parse_runtime_mode
 from trading_common.models import HealthStatus
 
 
 def runtime_mode_from_env(value: str | None) -> RuntimeMode:
     """Parse runtime mode for local service startup."""
 
-    if value is None:
-        return RuntimeMode.HISTORICAL_REPLAY
-    return RuntimeMode(value)
+    return parse_runtime_mode(value)
 
 
 def create_identity(runtime_mode: RuntimeMode = RuntimeMode.HISTORICAL_REPLAY) -> AppIdentity:

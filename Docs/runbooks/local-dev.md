@@ -179,9 +179,35 @@ docker compose down -v
 
 ```powershell
 python scripts/check.py
+python scripts/run_replay_harness.py
+python scripts/run_sandbox_smoke.py --dry-run
 ```
 
 На Windows, если PowerShell блокирует `npm.ps1`, используйте `npm.cmd` напрямую из `apps/frontend`.
+
+## Controlled launch modes
+
+Безопасный local default:
+
+```powershell
+$env:TRADING_RUNTIME_MODE = "historical_replay"
+```
+
+Sandbox dry-run:
+
+```powershell
+$env:TRADING_RUNTIME_MODE = "sandbox"
+python scripts/run_sandbox_smoke.py --dry-run
+```
+
+Shadow mode локально должен писать pseudo-orders и не вызывать реальный `PostOrder`:
+
+```powershell
+$env:TRADING_RUNTIME_MODE = "shadow"
+docker compose up -d --build trade-core api report-worker frontend
+```
+
+Production не включать локально без отдельного checklist. Для production требуется `TRADING_PRODUCTION_CONFIRM=I_UNDERSTAND_LIVE_ORDERS`.
 
 ## Report Worker
 

@@ -362,3 +362,30 @@
 - replay проверяет session rollovers, blockers и counterfactual pipeline;
 - shadow mode пишет полную аналитику без реальной отправки ордеров;
 - запуск и инциденты описаны в runbooks.
+
+### Статус шага 12
+
+Статус: выполнено как controlled-launch каркас.
+
+Зафиксировано:
+
+- `LaunchModePolicy` для `historical_replay`, `sandbox`, `shadow`, `production`;
+- production не стартует без `TRADING_PRODUCTION_CONFIRM=I_UNDERSTAND_LIVE_ORDERS`;
+- `DefaultExecutionEngine` в `historical_replay` и `shadow` пишет pseudo-orders без реальных `PostOrder`/`CancelOrder`;
+- replay harness для candles/events, session rollovers, blockers и подключаемого counterfactual callback;
+- sandbox smoke dry-run без реального broker call;
+- CI pipeline: backend lint/type/tests, frontend type/tests/build, migration checks, smoke build;
+- runbooks для local dev, sandbox bring-up, shadow mode, production checklist и двух инцидентов.
+
+Артефакты:
+
+- `Docs/controlled-launch.md`;
+- `Docs/runbooks/local-dev.md`;
+- `Docs/runbooks/sandbox-bring-up.md`;
+- `Docs/runbooks/shadow-mode.md`;
+- `Docs/runbooks/production-checklist.md`;
+- `Docs/runbooks/incident-stream-broken.md`;
+- `Docs/runbooks/incident-report-backlog.md`;
+- `.github/workflows/ci.yml`;
+- `scripts/run_replay_harness.py`;
+- `scripts/run_sandbox_smoke.py`.

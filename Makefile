@@ -1,7 +1,7 @@
 PYTHON ?= python
 NPM ?= npm
 
-.PHONY: lint test up down logs frontend-build migrate migrate-down
+.PHONY: lint test up down logs frontend-build migrate migrate-down replay-smoke sandbox-smoke
 
 lint:
 	$(PYTHON) -m ruff check .
@@ -27,3 +27,9 @@ migrate:
 
 migrate-down:
 	$(PYTHON) -m alembic downgrade -1
+
+replay-smoke:
+	$(PYTHON) scripts/run_replay_harness.py
+
+sandbox-smoke:
+	$(PYTHON) scripts/run_sandbox_smoke.py --dry-run
