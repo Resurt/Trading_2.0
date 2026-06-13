@@ -31,6 +31,13 @@ Set-Content -NoNewline secrets/tbank_readonly_token "paste_readonly_token_here"
 
 Для реального токена замените `paste_*_token_here` вручную. Не вставляйте токены в документы, compose-файлы или `.env`.
 
+T-Bank adapter по умолчанию работает в `sandbox` режиме:
+
+```powershell
+$env:TBANK_ENVIRONMENT = "sandbox"
+$env:TBANK_APP_NAME = "Resurt.Trading_2_0"
+```
+
 ## Запуск стека
 
 ```powershell

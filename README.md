@@ -22,6 +22,7 @@
 - `Docs/implementation-plan.md`
 - `Docs/logging-analytics-spec.md`
 - `Docs/database-schema.md`
+- `Docs/broker-gateway.md`
 - все ADR из `Docs/adr/`
 
 Если в ходе задачи меняется архитектурное решение, нужно обновить `Docs/` и соответствующий ADR в том же шаге.
