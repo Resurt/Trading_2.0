@@ -40,8 +40,8 @@
       "id": 2,
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum(rate(broker_post_order_latency_seconds_bucket[5m])) by (le, service, broker_method))",
-          "legendFormat": "p95 {{service}} {{broker_method}}",
+          "expr": "histogram_quantile(0.95, sum(rate(broker_post_order_latency_seconds_bucket[5m])) by (le, service, status))",
+          "legendFormat": "p95 {{service}} {{status}}",
           "refId": "A"
         }
       ],

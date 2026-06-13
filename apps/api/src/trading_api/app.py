@@ -39,6 +39,7 @@ from trading_common.db.config import build_database_url_from_env
 from trading_common.db.service import DatabaseService
 from trading_common.http_health import CONTENT_TYPE_TEXT, render_health, render_metrics
 from trading_common.models import HealthStatus
+from trading_common.observability import TradingMetrics
 
 RoleDep = Annotated[ApiRole, Depends(role_from_header)]
 
@@ -91,6 +92,7 @@ def create_fastapi_app(
     app.state.database = database
     app.state.report_task_client = report_task_client or CeleryReportTaskClient.from_env()
     app.state.robot_control = RobotControlState()
+    app.state.metrics = TradingMetrics(identity)
 
     @app.get("/health", tags=["health"])
     def get_health() -> Response:
@@ -100,9 +102,11 @@ def create_fastapi_app(
         )
 
     @app.get("/metrics", tags=["health"])
-    def get_metrics() -> Response:
+    def get_metrics(request: Request) -> Response:
+        metrics = _metrics(request)
+        metrics.set_service_health(HealthStatus.OK)
         return Response(
-            content=render_metrics(ServiceHealth(identity=identity, status=HealthStatus.OK)),
+            content=render_metrics(metrics),
             media_type=CONTENT_TYPE_TEXT,
         )
 
@@ -280,6 +284,10 @@ def _robot_control(request: Request) -> RobotControlState:
 
 def _report_task_client(request: Request) -> ReportTaskClient:
     return cast(ReportTaskClient, request.app.state.report_task_client)
+
+
+def _metrics(request: Request) -> TradingMetrics:
+    return cast(TradingMetrics, request.app.state.metrics)
 
 
 def _cors_origins_from_env() -> list[str]:

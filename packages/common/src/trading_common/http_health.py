@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Callable
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Final
@@ -44,13 +45,15 @@ def run_health_server(
     health: ServiceHealth,
     host: str | None = None,
     port: int | None = None,
+    metrics: TradingMetrics | None = None,
+    metrics_sampler: Callable[[TradingMetrics], None] | None = None,
 ) -> None:
     """Run a small blocking HTTP server exposing /health and /metrics."""
 
     bind_host = host if host is not None else os.environ.get("HOST") or "0.0.0.0"
     bind_port = port if port is not None else int(os.getenv("PORT", "8000"))
-    metrics = TradingMetrics(health.identity)
-    metrics.set_service_health(health.status)
+    service_metrics = metrics or TradingMetrics(health.identity)
+    service_metrics.set_service_health(health.status)
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
@@ -58,8 +61,14 @@ def run_health_server(
                 self._write_response(HTTPStatus.OK, CONTENT_TYPE_JSON, render_health(health))
                 return
             if self.path == "/metrics":
-                metrics.set_service_health(health.status)
-                self._write_response(HTTPStatus.OK, CONTENT_TYPE_TEXT, render_metrics(metrics))
+                service_metrics.set_service_health(health.status)
+                if metrics_sampler is not None:
+                    metrics_sampler(service_metrics)
+                self._write_response(
+                    HTTPStatus.OK,
+                    CONTENT_TYPE_TEXT,
+                    render_metrics(service_metrics),
+                )
                 return
             self._write_response(HTTPStatus.NOT_FOUND, CONTENT_TYPE_TEXT, b"not found\n")
 

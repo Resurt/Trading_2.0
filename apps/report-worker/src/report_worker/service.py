@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from report_worker.app import create_identity
+from report_worker.metrics import REPORT_WORKER_METRICS, sample_celery_queue_backlog
 from trading_common import LaunchModePolicy
 from trading_common.http_health import run_health_server
 from trading_common.models import HealthStatus, ServiceHealth
@@ -19,7 +20,9 @@ def main() -> None:
             identity=identity,
             status=HealthStatus.OK,
             detail="report-worker health server is running; Celery tasks are available",
-        )
+        ),
+        metrics=REPORT_WORKER_METRICS,
+        metrics_sampler=sample_celery_queue_backlog,
     )
 
 

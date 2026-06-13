@@ -19,7 +19,7 @@
       "targets": [
         {
           "expr": "market_stream_alive",
-          "legendFormat": "{{stream_name}}",
+          "legendFormat": "{{service}} {{stream_type}} {{instrument}} {{timeframe}}",
           "refId": "A"
         }
       ],
@@ -40,8 +40,8 @@
       "id": 2,
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum(rate(candle_close_delivery_lag_seconds_bucket[5m])) by (le, instrument_id, timeframe))",
-          "legendFormat": "p95 {{instrument_id}} {{timeframe}}",
+          "expr": "histogram_quantile(0.95, sum(rate(candle_close_delivery_lag_seconds_bucket[5m])) by (le, instrument, timeframe))",
+          "legendFormat": "p95 {{instrument}} {{timeframe}}",
           "refId": "A"
         }
       ],

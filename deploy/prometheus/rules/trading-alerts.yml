@@ -1,0 +1,121 @@
+groups:
+  - name: trading-observability
+    rules:
+      - alert: TradingServiceDown
+        expr: trading_service_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Trading service is down"
+          description: "{{ $labels.service }} reports non-ok health."
+
+      - alert: TradingServiceMissingMetrics
+        expr: |
+          absent(trading_service_up{service="trade-core"}) == 1
+          or absent(trading_service_up{service="api"}) == 1
+          or absent(trading_service_up{service="report-worker"}) == 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Trading service metrics are missing"
+          description: "Prometheus is not scraping one of the backend /metrics endpoints."
+
+      - alert: BrokerPostOrderLatencyHigh
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum(rate(broker_post_order_latency_seconds_bucket[5m])) by (le, service)
+          ) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Broker PostOrder p95 latency is high"
+          description: "{{ $labels.service }} broker PostOrder p95 latency is above 2s."
+
+      - alert: MarketStreamDown
+        expr: market_stream_alive == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Market stream is down"
+          description: "{{ $labels.service }} stream {{ $labels.stream_type }} is not alive."
+
+      - alert: MarketStreamStale
+        expr: last_stream_message_age_seconds > 30
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Market stream messages are stale"
+          description: "{{ $labels.service }} stream {{ $labels.stream_type }} has no fresh messages."
+
+      - alert: StreamReconnectSpike
+        expr: sum(increase(stream_reconnect_total[10m])) by (service, stream_type) > 3
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Stream reconnect spike"
+          description: "{{ $labels.service }} stream {{ $labels.stream_type }} reconnected repeatedly."
+
+      - alert: SessionRolloverSlow
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum(rate(session_rollover_duration_seconds_bucket[10m])) by (le, service, session_type)
+          ) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Hourly micro-session rollover is slow"
+          description: "{{ $labels.service }} rollover p95 is above 5s."
+
+      - alert: ReportGenerationFailures
+        expr: sum(increase(report_generation_duration_seconds_count{status="error"}[15m])) by (service) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Report generation failures detected"
+          description: "{{ $labels.service }} produced failed report jobs."
+
+      - alert: CounterfactualJobFailures
+        expr: sum(increase(counterfactual_jobs_total{status="error"}[15m])) by (service) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Counterfactual job failures detected"
+          description: "{{ $labels.service }} produced failed counterfactual jobs."
+
+      - alert: CeleryQueueBacklogHigh
+        expr: celery_queue_backlog{status="ready"} > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Celery report queue backlog is high"
+          description: "{{ $labels.service }} queue backlog is above 100 jobs."
+
+      - alert: RejectedOrdersSpike
+        expr: sum(increase(rejected_orders_total[10m])) by (service, status) > 5
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rejected or canceled orders spike"
+          description: "{{ $labels.service }} has elevated {{ $labels.status }} order outcomes."
+
+      - alert: RiskEventsSpike
+        expr: sum(increase(risk_events_total[10m])) by (service, result) > 20
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Risk/blocker events spike"
+          description: "{{ $labels.service }} has elevated risk result {{ $labels.result }}."

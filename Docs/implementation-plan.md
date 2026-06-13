@@ -271,7 +271,9 @@
 - canonical log schema в `Docs/logging-analytics-spec.md`.
 
 Реализация шага зафиксирована в `Docs/logging-analytics-spec.md` и
-`trading_common.observability`.
+`trading_common.observability`. Операционный observability stack зафиксирован в
+`Docs/observability_runbook.md`, `deploy/prometheus/rules` и
+`deploy/grafana/dashboards/observability-stack.json`.
 
 Критерии готовности:
 

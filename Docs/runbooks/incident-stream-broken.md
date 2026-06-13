@@ -5,8 +5,8 @@
 ## Detect
 
 - `market_stream_alive=0`.
-- `last_closed_candle_age_seconds` растет.
-- `reconnect_total` растет быстрее обычного.
+- `last_stream_message_age_seconds` растет.
+- `stream_reconnect_total` растет быстрее обычного.
 - Dashboard показывает stale market data.
 
 ## Immediate Actions
@@ -23,7 +23,7 @@ Invoke-RestMethod http://localhost:8000/robot/status
 
 ## Evidence
 
-- `run_id`, `micro_session_id`, `instrument_id`, `stream_name`.
+- `run_id`, `micro_session_id`, `instrument`, `stream_type`.
 - Loki logs around reconnect window.
 - `audit_event` reconnect rows.
 - Market candles/status snapshots before and after gap.

@@ -8,6 +8,7 @@ from uuid import uuid4
 from trading_common import RuntimeMode, ServiceName
 from trading_common.models import AppIdentity
 from trading_common.observability import (
+    BOUNDED_PROMETHEUS_LABELS,
     CONTEXT_FIELDS,
     PROMETHEUS_METRIC_NAMES,
     STRICT_DOMAIN_EVENT_TYPES,
@@ -92,26 +93,61 @@ def test_prometheus_metrics_are_registered_and_rendered() -> None:
             runtime_mode=RuntimeMode.HISTORICAL_REPLAY,
         )
     )
-    metrics.observe_broker_post_order_latency(0.12)
-    metrics.observe_order_state_convergence(0.5)
+    metrics.observe_broker_post_order_latency(0.12, status="success")
+    metrics.observe_order_state_convergence(0.5, status="success")
     metrics.observe_candle_close_delivery_lag(
         0.25,
-        instrument_id="MOEX:SBER",
+        instrument="MOEX:SBER",
         timeframe="5m",
     )
-    metrics.observe_session_rollover_duration(0.8, session_type="weekday_main")
-    metrics.inc_reconnect(stream_name="market_data")
-    metrics.inc_rejected_order(reason_code="broker_rejected")
-    metrics.inc_risk_event(reason_code="spread_too_wide")
+    metrics.observe_session_rollover_duration(
+        0.8,
+        session_type="weekday_main",
+        status="success",
+    )
+    metrics.observe_report_generation_duration(1.2, status="success")
+    metrics.inc_stream_reconnect(stream_type="market_data", result="success")
+    metrics.inc_rejected_order(status="broker_rejected")
+    metrics.inc_risk_event(result="spread_too_wide")
+    metrics.inc_counterfactual_job(status="success")
     metrics.set_open_orders(2)
-    metrics.set_active_positions(1, instrument_id="MOEX:SBER")
-    metrics.set_market_stream_alive(True, stream_name="market_data")
-    metrics.set_last_closed_candle_age(3.5, instrument_id="MOEX:SBER", timeframe="5m")
+    metrics.set_active_positions(1, instrument="MOEX:SBER")
+    metrics.set_market_stream_alive(
+        True,
+        stream_type="market_data",
+        instrument="MOEX:SBER",
+        timeframe="5m",
+    )
+    metrics.set_last_stream_message_age(
+        3.5,
+        stream_type="market_data",
+        instrument="MOEX:SBER",
+        timeframe="5m",
+    )
+    metrics.set_celery_queue_backlog(4, status="ready")
 
     rendered = metrics.render().decode("utf-8")
 
     for metric_name in PROMETHEUS_METRIC_NAMES:
         assert metric_name in rendered
-    assert 'reason_code="spread_too_wide"' in rendered
-    assert 'instrument_id="MOEX:SBER"' in rendered
+    assert 'result="spread_too_wide"' in rendered
+    assert 'instrument="MOEX:SBER"' in rendered
     assert 'timeframe="5m"' in rendered
+    assert "runtime_mode=" not in rendered
+    assert "candidate_id=" not in rendered
+    assert "request_order_id=" not in rendered
+
+
+def test_prometheus_labels_are_bounded_for_observability_stack() -> None:
+    assert set(BOUNDED_PROMETHEUS_LABELS) == {
+        "service",
+        "instrument",
+        "timeframe",
+        "session_type",
+        "stream_type",
+        "status",
+        "result",
+    }
+    assert "candidate_id" not in BOUNDED_PROMETHEUS_LABELS
+    assert "request_order_id" not in BOUNDED_PROMETHEUS_LABELS
+    assert "tracking_id" not in BOUNDED_PROMETHEUS_LABELS

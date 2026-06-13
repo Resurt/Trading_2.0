@@ -8,6 +8,7 @@ from typing import TypeVar, cast
 
 from report_worker.analytics import ReportAnalyticsService
 from report_worker.celery_app import celery_app
+from report_worker.metrics import observe_counterfactual_job, observe_report_generation
 from trading_common.db.config import build_database_url_from_env
 from trading_common.db.service import DatabaseService
 
@@ -24,7 +25,7 @@ def build_hourly_report(
     strategy_id: str,
     force_rebuild: bool = True,
 ) -> dict[str, object]:
-    with _database().session_scope() as session:
+    with observe_report_generation(), _database().session_scope() as session:
         service = ReportAnalyticsService(session)
         report = service.build_hourly_report(
             micro_session_id=micro_session_id,
@@ -44,7 +45,7 @@ def build_daily_report(
     strategy_version: int | None = None,
     force_rebuild: bool = True,
 ) -> dict[str, object]:
-    with _database().session_scope() as session:
+    with observe_report_generation(), _database().session_scope() as session:
         service = ReportAnalyticsService(session)
         report = service.build_daily_report(
             trading_date=date.fromisoformat(trading_date),
@@ -69,7 +70,7 @@ def rebuild_reports_for_date(
     strategy_version: int | None = None,
     force_rebuild: bool = True,
 ) -> dict[str, object]:
-    with _database().session_scope() as session:
+    with observe_report_generation(), _database().session_scope() as session:
         service = ReportAnalyticsService(session)
         report = service.rebuild_reports_for_date(
             trading_date=date.fromisoformat(trading_date),
@@ -94,7 +95,7 @@ def run_counterfactual_analysis_for_date(
     strategy_version: int | None = None,
     force_rebuild: bool = True,
 ) -> dict[str, object]:
-    with _database().session_scope() as session:
+    with observe_counterfactual_job(), _database().session_scope() as session:
         service = ReportAnalyticsService(session)
         results = service.run_counterfactual_analysis_for_date(
             trading_date=date.fromisoformat(trading_date),

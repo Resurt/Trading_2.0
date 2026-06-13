@@ -1,0 +1,256 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "targets": [
+        {
+          "expr": "trading_service_up{service=\"trade-core\"}",
+          "legendFormat": "{{service}}",
+          "refId": "A"
+        }
+      ],
+      "title": "a) Health trade-core",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 8,
+        "y": 0
+      },
+      "id": 2,
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(broker_post_order_latency_seconds_bucket[5m])) by (le, service))",
+          "legendFormat": "p95 {{service}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(order_state_convergence_seconds_bucket[5m])) by (le, service))",
+          "legendFormat": "order convergence p95 {{service}}",
+          "refId": "B"
+        }
+      ],
+      "title": "b) Broker/API latency",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 16,
+        "y": 0
+      },
+      "id": 3,
+      "targets": [
+        {
+          "expr": "sum(rate(stream_reconnect_total[5m])) by (service, stream_type)",
+          "legendFormat": "{{service}} {{stream_type}}",
+          "refId": "A"
+        },
+        {
+          "expr": "last_stream_message_age_seconds",
+          "legendFormat": "age {{service}} {{stream_type}} {{instrument}} {{timeframe}}",
+          "refId": "B"
+        }
+      ],
+      "title": "c) Stream reconnects and lag",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 5
+      },
+      "id": 4,
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(session_rollover_duration_seconds_bucket[10m])) by (le, service, session_type))",
+          "legendFormat": "{{service}} {{session_type}}",
+          "refId": "A"
+        }
+      ],
+      "title": "d) Hourly rollover",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 5
+      },
+      "id": 5,
+      "targets": [
+        {
+          "expr": "celery_queue_backlog",
+          "legendFormat": "backlog {{service}} {{status}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(increase(report_generation_duration_seconds_count{status=\"error\"}[1h])) by (service)",
+          "legendFormat": "report failures {{service}}",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(increase(counterfactual_jobs_total{status=\"error\"}[1h])) by (service)",
+          "legendFormat": "counterfactual failures {{service}}",
+          "refId": "C"
+        }
+      ],
+      "title": "e) Report-worker queue and failures",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 5
+      },
+      "id": 6,
+      "targets": [
+        {
+          "expr": "sum(rate(risk_events_total[5m])) by (service, result)",
+          "legendFormat": "{{service}} {{result}}",
+          "refId": "A"
+        }
+      ],
+      "title": "f) Blocker overview",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 11
+      },
+      "id": 7,
+      "targets": [
+        {
+          "expr": "sum(rate(rejected_orders_total[5m])) by (service, status)",
+          "legendFormat": "{{service}} {{status}}",
+          "refId": "A"
+        }
+      ],
+      "title": "g) Rejected/canceled orders",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 11
+      },
+      "id": 8,
+      "targets": [
+        {
+          "expr": "max by (service, stream_type) (market_stream_alive)",
+          "legendFormat": "alive {{service}} {{stream_type}}",
+          "refId": "A"
+        },
+        {
+          "expr": "open_orders",
+          "legendFormat": "open orders {{service}}",
+          "refId": "B"
+        },
+        {
+          "expr": "active_positions",
+          "legendFormat": "positions {{service}} {{instrument}}",
+          "refId": "C"
+        }
+      ],
+      "title": "h) Top infrastructure incidents",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "Loki"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      },
+      "id": 9,
+      "targets": [
+        {
+          "expr": "{job=\"fluent-bit\"} |~ \"ERROR|WARNING|CRITICAL|service_down|stream_gap|report_backlog\"",
+          "refId": "A"
+        }
+      ],
+      "title": "Infrastructure incident log stream",
+      "type": "logs"
+    }
+  ],
+  "preload": false,
+  "schemaVersion": 42,
+  "tags": [
+    "trading-2-0",
+    "observability"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Trading 2.0 Observability Stack",
+  "uid": "trading-2-0-observability-stack",
+  "version": 1
+}

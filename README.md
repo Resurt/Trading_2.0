@@ -29,6 +29,7 @@
 - `Docs/session-manager.md`
 - `Docs/market-data-pipeline.md`
 - `Docs/strategy-risk-execution.md`
+- `Docs/observability_runbook.md`
 - все ADR из `Docs/adr/`
 
 Если в ходе задачи меняется архитектурное решение, нужно обновить `Docs/` и соответствующий ADR в том же шаге.

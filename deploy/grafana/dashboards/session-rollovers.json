@@ -18,8 +18,8 @@
       "id": 1,
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum(rate(session_rollover_duration_seconds_bucket[5m])) by (le, session_type))",
-          "legendFormat": "p95 {{session_type}}",
+          "expr": "histogram_quantile(0.95, sum(rate(session_rollover_duration_seconds_bucket[5m])) by (le, service, session_type, status))",
+          "legendFormat": "p95 {{service}} {{session_type}} {{status}}",
           "refId": "A"
         }
       ],
@@ -40,8 +40,8 @@
       "id": 2,
       "targets": [
         {
-          "expr": "sum(active_positions) by (instrument_id)",
-          "legendFormat": "{{instrument_id}}",
+          "expr": "sum(active_positions) by (service, instrument)",
+          "legendFormat": "{{service}} {{instrument}}",
           "refId": "A"
         }
       ],

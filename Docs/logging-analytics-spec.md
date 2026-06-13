@@ -190,8 +190,8 @@ Loki labels должны быть низкой/ограниченной кард
 - `level`
 - `event_type`
 - `session_type`
-- `session_phase`
-- `instrument_id`
+- `exchange_phase`
+- `instrument`
 - `timeframe`
 
 Запрещено выносить в Loki labels значения с высокой кардинальностью:
@@ -729,35 +729,38 @@ Histograms:
 - `order_state_convergence_seconds`
 - `candle_close_delivery_lag_seconds`
 - `session_rollover_duration_seconds`
+- `report_generation_duration_seconds`
 
 Counters:
 
-- `reconnect_total`
+- `stream_reconnect_total`
 - `rejected_orders_total`
 - `risk_events_total`
+- `counterfactual_jobs_total`
 
 Gauges:
 
 - `open_orders`
 - `active_positions`
 - `market_stream_alive`
-- `last_closed_candle_age_seconds`
+- `last_stream_message_age_seconds`
+- `celery_queue_backlog`
 
-Prometheus labels не должны содержать raw ids или exception text.
+Prometheus labels не должны содержать raw ids, exception text, arbitrary order id,
+candidate id, request id или tracking id. Все такие значения остаются в JSON body логов
+и в нормализованных таблицах PostgreSQL.
 
 ### Prometheus label scheme
 
 Разрешенные bounded labels:
 
 - `service`
-- `runtime_mode`
-- `broker_method`
-- `session_type`
-- `session_phase`
-- `instrument_id`
+- `instrument`
 - `timeframe`
-- `reason_code`
-- `stream_name`
+- `session_type`
+- `stream_type`
+- `status`
+- `result`
 
 Запрещенные labels:
 
@@ -768,12 +771,37 @@ Prometheus labels не должны содержать raw ids или exception 
 - exception text;
 - произвольный free-text reason.
 
+Совместимость: старые helper-вызовы `inc_reconnect(stream_name=...)`,
+`inc_rejected_order(reason_code=...)`, `inc_risk_event(reason_code=...)`,
+`set_active_positions(..., instrument_id=...)` и
+`set_last_closed_candle_age(..., instrument_id=..., timeframe=...)` могут сохраняться
+в коде как aliases, но наружу они должны экспонировать новые metric names и labels.
+
+### Alert rules
+
+Prometheus rule files лежат в `deploy/prometheus/rules/*.yml` и подключаются через
+`deploy/prometheus/prometheus.yml`. Базовый набор alert scenarios:
+
+- `TradingServiceDown`;
+- `TradingServiceMissingMetrics`;
+- `BrokerPostOrderLatencyHigh`;
+- `MarketStreamDown`;
+- `MarketStreamStale`;
+- `StreamReconnectSpike`;
+- `SessionRolloverSlow`;
+- `ReportGenerationFailures`;
+- `CounterfactualJobFailures`;
+- `CeleryQueueBacklogHigh`;
+- `RejectedOrdersSpike`;
+- `RiskEventsSpike`.
+
 ### Grafana dashboards
 
 Provisioning находится в `deploy/grafana/provisioning`.
 
 Dashboard files:
 
+- `observability-stack.json`
 - `broker-api-health.json`
 - `market-data-health.json`
 - `order-execution-quality.json`

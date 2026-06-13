@@ -18,8 +18,8 @@
       "id": 1,
       "targets": [
         {
-          "expr": "sum(rate(risk_events_total[5m])) by (reason_code)",
-          "legendFormat": "{{reason_code}}",
+          "expr": "sum(rate(risk_events_total[5m])) by (service, result)",
+          "legendFormat": "{{service}} {{result}}",
           "refId": "A"
         }
       ],
@@ -40,8 +40,8 @@
       "id": 2,
       "targets": [
         {
-          "expr": "sum(rate(rejected_orders_total[5m])) by (reason_code)",
-          "legendFormat": "{{reason_code}}",
+          "expr": "sum(rate(rejected_orders_total[5m])) by (service, status)",
+          "legendFormat": "{{service}} {{status}}",
           "refId": "A"
         }
       ],
