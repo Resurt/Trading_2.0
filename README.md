@@ -21,6 +21,7 @@
 - `Docs/architecture.md`
 - `Docs/implementation-plan.md`
 - `Docs/logging-analytics-spec.md`
+- `Docs/database-schema.md`
 - все ADR из `Docs/adr/`
 
 Если в ходе задачи меняется архитектурное решение, нужно обновить `Docs/` и соответствующий ADR в том же шаге.
@@ -73,6 +74,7 @@ printf "paste_readonly_token_here" > secrets/tbank_readonly_token
 ```bash
 docker compose up -d --build
 docker compose ps
+python -m alembic upgrade head
 docker compose logs -f --tail=200
 ```
 

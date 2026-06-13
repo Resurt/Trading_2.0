@@ -8,7 +8,11 @@ version = "0.1.0"
 description = "MOEX trading robot monorepo skeleton"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+  "alembic>=1.17,<2.0",
+  "psycopg[binary]>=3.2,<4.0",
+  "SQLAlchemy>=2.0,<3.0",
+]
 
 [project.optional-dependencies]
 dev = [
@@ -65,3 +69,7 @@ files = [
   "packages/common/src",
   "tests",
 ]
+
+[[tool.mypy.overrides]]
+module = ["alembic.*"]
+ignore_missing_imports = true

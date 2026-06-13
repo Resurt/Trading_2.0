@@ -56,6 +56,22 @@ Invoke-WebRequest http://localhost:3000/api/health
 Invoke-WebRequest http://localhost:3100/ready
 ```
 
+## Миграции PostgreSQL
+
+После запуска `postgres` примените схему:
+
+```powershell
+python -m alembic upgrade head
+python -m alembic current
+```
+
+Проверка обратимости последней миграции:
+
+```powershell
+python -m alembic downgrade -1
+python -m alembic upgrade head
+```
+
 ## Локальные адреса
 
 - Frontend: `http://localhost:5173`
