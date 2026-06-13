@@ -64,15 +64,22 @@ def test_json_logging_injects_contextvars_context() -> None:
 def test_strict_event_types_match_required_catalog() -> None:
     assert set(STRICT_DOMAIN_EVENT_TYPES) == {
         "signal_candidate_created",
+        "candidate_stage_result_recorded",
+        "market_context_snapshot_written",
         "blocker_triggered",
         "order_intent_created",
         "broker_order_posted",
         "broker_order_updated",
         "broker_order_cancelled",
+        "order_state_changed",
         "fill_received",
         "strategy_state_changed",
         "risk_event_recorded",
         "session_snapshot_written",
+        "market_status_changed",
+        "bar_closed",
+        "stream_gap_recovery_requested",
+        "stream_gap_recovery_completed",
     }
     assert "request_order_id" in CONTEXT_FIELDS
 

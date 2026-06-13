@@ -119,3 +119,27 @@ any active state -> degraded -> stopped
 - расширить execution policy для stop/stop-limit и partial fill handling;
 - добавить replay harness для детерминированной проверки стратегий на исторических данных;
 - добавить counterfactual job для blocked/cancelled candidates.
+
+## Domain journaling integration
+
+Наблюдаемость торговой возможности строится вокруг `candidate_id`.
+
+Путь записи:
+
+1. `SqlAlchemyStrategyEventStore.record_candidate()` пишет `signal_candidate` и `market_context_snapshot`.
+2. `record_blockers()` пишет `candidate_stage_result` для каждого risk gate.
+3. Для непройденных gate создается `blocker_event` с `blocker_code`, `blocker_family`, `measured_value`, `threshold_value` и `is_final_blocker`.
+4. `DefaultExecutionEngine.create_order_intent()` пишет идемпотентный `order_intent`.
+5. `post_order()` и `cancel_order()` upsert-ят `broker_order`, сохраняют `latency_ms`, `tracking_id`, rate-limit headers и пишут `order_state_event`.
+6. `DefaultReconciliationService` пишет все наблюдаемые broker state transitions в `order_state_event`.
+7. Fills пишутся в `fill_event` только из source-of-truth по собственным ордерам: broker order state/reconciliation payload. Anonymous `market_trade` tape остается рыночным контекстом, а не источником собственных исполнений.
+
+Idempotency:
+
+- `signal_candidate` дедуплицируется по `signal_fingerprint`;
+- `candidate_stage_result` по `candidate_id + stage_seq`;
+- `blocker_event` по `candidate_id + gate_rank + reason_code`;
+- `order_intent` по `request_order_id` и `idempotency_key`;
+- `broker_order` по `request_order_id`;
+- `order_state_event` по `order_intent_id + state_seq + event_type`;
+- `fill_event` по `exchange_order_id + broker_fill_id + trading_date`.

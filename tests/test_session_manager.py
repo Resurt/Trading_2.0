@@ -24,7 +24,7 @@ from trade_core.session.reason_codes import (
     WEEKEND_BROKER_MODE,
 )
 from trading_common.db.base import Base
-from trading_common.db.models import SessionRun, StrategyStateEvent
+from trading_common.db.models import MicroSession, SessionRun, StrategyStateEvent
 from trading_common.enums import SessionPhase, SessionType
 
 MSK = ZoneInfo("Europe/Moscow")
@@ -265,6 +265,11 @@ def test_micro_session_state_is_persisted_to_database() -> None:
         runs = list(
             db_session.execute(select(SessionRun).order_by(SessionRun.started_at)).scalars()
         )
+        micro_session_rows = list(
+            db_session.execute(
+                select(MicroSession).order_by(MicroSession.started_at)
+            ).scalars()
+        )
         event_types = list(
             db_session.execute(
                 select(StrategyStateEvent.event_type).order_by(
@@ -275,7 +280,11 @@ def test_micro_session_state_is_persisted_to_database() -> None:
         )
 
         assert len(runs) == 2
+        assert len(micro_session_rows) == 2
         assert runs[0].status == "closed"
+        assert micro_session_rows[0].status == "closed"
+        assert micro_session_rows[0].rollover_reason_code == HOURLY_ROLLOVER
+        assert micro_session_rows[1].status == "open"
         assert runs[0].freeze_started_at == msk(2026, 6, 12, 10, 59).replace(tzinfo=None)
         assert runs[0].report_requested_at == msk(2026, 6, 12, 11).replace(tzinfo=None)
         assert runs[0].close_reason_code == HOURLY_ROLLOVER

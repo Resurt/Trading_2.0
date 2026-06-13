@@ -33,6 +33,7 @@ from trade_core.infra.tbank.protocols import TBankStreamClient, TBankUnaryClient
 from trade_core.infra.tbank.retry import ExponentialBackoff, retry_async
 from trade_core.infra.tbank.secrets import TBankTokenBundle, load_tbank_tokens
 from trade_core.infra.tbank.streams import StreamSupervisor
+from trading_common.observability import DomainEventType
 from trading_common.telemetry import get_logger, log_event
 
 JsonPayload = dict[str, Any]
@@ -253,7 +254,7 @@ class TBankBrokerGateway:
         log_event(
             logger=LOGGER,
             level="WARNING",
-            event_type="tbank_stream_gap_recovery_required",
+            event_type=DomainEventType.STREAM_GAP_RECOVERY_REQUESTED.value,
             component="tbank.gateway",
             stream_name=stream_name,
             target=self.config.target,

@@ -159,15 +159,22 @@ Legacy aliases `session_phase` and `instrument_id` пока поддержива
 Строгие `event_type` для доменных событий и корреляции логов:
 
 - `signal_candidate_created`
+- `candidate_stage_result_recorded`
+- `market_context_snapshot_written`
 - `blocker_triggered`
 - `order_intent_created`
 - `broker_order_posted`
 - `broker_order_updated`
 - `broker_order_cancelled`
+- `order_state_changed`
 - `fill_received`
 - `strategy_state_changed`
 - `risk_event_recorded`
 - `session_snapshot_written`
+- `market_status_changed`
+- `bar_closed`
+- `stream_gap_recovery_requested`
+- `stream_gap_recovery_completed`
 
 Свободный текст может быть в `message`, но смысл события должен задаваться `event_type` и structured fields.
 

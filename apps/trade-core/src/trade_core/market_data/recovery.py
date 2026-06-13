@@ -17,8 +17,11 @@ from trade_core.broker_gateway import (
 from trade_core.market_data.event_bus import MarketEventBus
 from trade_core.market_data.events import MarketDataEvent, MarketEventType, Timeframe, ensure_utc
 from trade_core.market_data.subscriptions import candle_from_mapping
+from trading_common.observability import DomainEventType
+from trading_common.telemetry import get_logger, log_event
 
 RefreshPositionsHook = Callable[[str], Awaitable[object] | object]
+LOGGER = get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +49,17 @@ class GapRecoveryCoordinator:
 
     async def recover_after_reconnect(self, request: GapRecoveryRequest) -> None:
         started_at = ensure_utc(datetime.now().astimezone())
+        log_event(
+            logger=LOGGER,
+            level="WARNING",
+            event_type=DomainEventType.STREAM_GAP_RECOVERY_REQUESTED.value,
+            component="market_data.recovery",
+            instrument_count=len(request.instruments),
+            timeframes=[timeframe.value for timeframe in request.candle_timeframes],
+            from_ts_utc=request.from_ts_utc.isoformat(),
+            to_ts_utc=request.to_ts_utc.isoformat(),
+            account_id_present=request.account_id is not None,
+        )
         await self._event_bus.publish(
             MarketDataEvent(
                 event_type=MarketEventType.RECOVERY_REQUESTED,
@@ -89,6 +103,15 @@ class GapRecoveryCoordinator:
                     await result
                 positions_refreshed = True
 
+        completed_at = ensure_utc(datetime.now().astimezone())
+        log_event(
+            logger=LOGGER,
+            event_type=DomainEventType.STREAM_GAP_RECOVERY_COMPLETED.value,
+            component="market_data.recovery",
+            recovered_candles=recovered_candles,
+            open_orders_refreshed=open_orders_refreshed,
+            positions_refreshed=positions_refreshed,
+        )
         await self._event_bus.publish(
             MarketDataEvent(
                 event_type=MarketEventType.RECOVERY_COMPLETED,
@@ -97,7 +120,7 @@ class GapRecoveryCoordinator:
                     "open_orders_refreshed": open_orders_refreshed,
                     "positions_refreshed": positions_refreshed,
                 },
-                ts_utc=ensure_utc(datetime.now().astimezone()),
+                ts_utc=completed_at,
                 instrument_id=None,
             )
         )

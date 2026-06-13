@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
+from decimal import Decimal
+from time import perf_counter
 from uuid import uuid4
 
 from trade_core.broker_gateway import (
@@ -22,9 +24,12 @@ from trade_core.strategy.models import (
     OrderLifecycleResult,
 )
 from trading_common import LaunchModePolicy, RuntimeMode
-from trading_common.db.models import BrokerOrder, OrderIntent
+from trading_common.db.models import BrokerOrder, OrderIntent, OrderStateEvent
 from trading_common.db.repositories import OrderRepository
 from trading_common.observability import DomainEventType
+from trading_common.telemetry import bind_context, get_logger, log_event
+
+LOGGER = get_logger(__name__)
 
 
 class DefaultExecutionEngine:
@@ -65,7 +70,9 @@ class DefaultExecutionEngine:
             broker_trading_status=request.session_snapshot.broker_trading_status,
             candidate_id=request.candidate.candidate_id,
             instrument_id=request.candidate.instrument.instrument_id,
+            timeframe=request.candidate.timeframe.value,
             strategy_id=request.candidate.strategy_id,
+            strategy_version=request.candidate.strategy_version,
             side=request.candidate.side.value,
             order_action=request.order_action.value,
             order_type=request.candidate.order_type,
@@ -73,6 +80,7 @@ class DefaultExecutionEngine:
             intended_price=request.candidate.intended_price,
             time_in_force=request.candidate.time_in_force,
             request_order_id=request_order_id,
+            tracking_id=None,
             idempotency_key=idempotency_key,
             execution_policy_version=request.execution_policy_version,
             status="created",
@@ -95,7 +103,14 @@ class DefaultExecutionEngine:
                 "order_submission_mode": self._launch_policy.order_submission_mode,
             },
         )
-        return self._orders.create_intent_idempotent(intent)
+        persisted = self._orders.create_intent_idempotent(intent)
+        _log_order_event(
+            event_type=DomainEventType.ORDER_INTENT_CREATED.value,
+            intent=persisted,
+            stage_name="order_intent_creation",
+            payload={"idempotency_key": persisted.idempotency_key},
+        )
+        return persisted
 
     async def post_order(self, intent: OrderIntent) -> OrderLifecycleResult:
         if not self._launch_policy.allows_real_orders:
@@ -117,6 +132,7 @@ class DefaultExecutionEngine:
                 "execution_policy_version": intent.execution_policy_version,
             },
         )
+        started_at_monotonic = perf_counter()
         response = await self._broker_gateway.post_order(
             request,
             metadata=RequestMetadata(
@@ -125,12 +141,24 @@ class DefaultExecutionEngine:
                 correlation_id=str(intent.order_intent_id),
             ),
         )
+        latency_ms = _elapsed_ms(started_at_monotonic)
         observed_at = self._clock()
+        broker_status = _broker_status(response, "posted")
+        reject_reason_code = _response_str(response.data, "reject_reason_code")
+        terminal_ts = observed_at if broker_status == "rejected" else None
         self._orders.update_intent_status(
             intent,
-            status="submitted",
+            status="rejected" if broker_status == "rejected" else "submitted",
             submitted_ts=observed_at,
-            payload_patch={"last_broker_method": response.method_name},
+            terminal_ts=terminal_ts,
+            reject_reason_code=reject_reason_code,
+            payload_patch={
+                "last_broker_method": response.method_name,
+                "broker_status": broker_status,
+                "broker_latency_ms": str(latency_ms),
+                "tracking_id": _tracking_id(response.headers),
+                "rate_limit": _rate_limit_payload(response.headers),
+            },
         )
         broker_order = self._upsert_broker_order(
             intent=intent,
@@ -138,7 +166,9 @@ class DefaultExecutionEngine:
             observed_at=observed_at,
             default_status="posted",
             lifecycle_seq_increment=1,
-            posted_at=observed_at,
+            posted_at=observed_at if broker_status != "rejected" else None,
+            rejected_at=observed_at if broker_status == "rejected" else None,
+            latency_ms=latency_ms,
         )
         return _lifecycle_result(intent=intent, broker_order=broker_order, response=response)
 
@@ -174,6 +204,7 @@ class DefaultExecutionEngine:
                 "cancel_payload": dict(cancel_payload),
             },
         )
+        started_at_monotonic = perf_counter()
         response = await self._broker_gateway.cancel_order(
             CancelOrderRequest(
                 account_id=account_id,
@@ -191,12 +222,18 @@ class DefaultExecutionEngine:
                 correlation_id=str(intent.order_intent_id),
             ),
         )
+        latency_ms = _elapsed_ms(started_at_monotonic)
         observed_at = self._clock()
         self._orders.update_intent_status(
             intent,
             status="cancelled",
             terminal_ts=observed_at,
-            payload_patch={"cancel_requested_at": requested_at.isoformat()},
+            payload_patch={
+                "cancel_requested_at": requested_at.isoformat(),
+                "broker_latency_ms": str(latency_ms),
+                "tracking_id": _tracking_id(response.headers),
+                "rate_limit": _rate_limit_payload(response.headers),
+            },
         )
         broker_order = self._upsert_broker_order(
             intent=intent,
@@ -206,6 +243,8 @@ class DefaultExecutionEngine:
             lifecycle_seq_increment=1,
             cancelled_at=observed_at,
             exchange_order_id=exchange_order_id,
+            latency_ms=latency_ms,
+            cancel_reason_code=cancel_reason_code.value,
         )
         return _lifecycle_result(intent=intent, broker_order=broker_order, response=response)
 
@@ -262,6 +301,7 @@ class DefaultExecutionEngine:
             default_status="pseudo_posted",
             lifecycle_seq_increment=1,
             posted_at=observed_at,
+            latency_ms=Decimal("0"),
         )
         return _lifecycle_result(intent=intent, broker_order=broker_order, response=response)
 
@@ -314,6 +354,8 @@ class DefaultExecutionEngine:
             lifecycle_seq_increment=1,
             cancelled_at=observed_at,
             exchange_order_id=exchange_order_id,
+            latency_ms=Decimal("0"),
+            cancel_reason_code=cancel_reason_code.value,
         )
         return _lifecycle_result(intent=intent, broker_order=broker_order, response=response)
 
@@ -329,8 +371,11 @@ class DefaultExecutionEngine:
         cancelled_at: datetime | None = None,
         rejected_at: datetime | None = None,
         exchange_order_id: str | None = None,
+        latency_ms: Decimal | int | float | None = None,
+        cancel_reason_code: str | None = None,
     ) -> BrokerOrder:
         existing = self._orders.get_broker_order_by_request_order_id(intent.request_order_id)
+        previous_status = existing.broker_status if existing is not None else None
         lifecycle_seq = (
             existing.lifecycle_seq if existing is not None else 0
         ) + lifecycle_seq_increment
@@ -338,6 +383,7 @@ class DefaultExecutionEngine:
             response.data,
             "status",
         )
+        actual_status = status or default_status
         broker_order = BrokerOrder(
             calendar_date=intent.calendar_date,
             trading_date=intent.trading_date,
@@ -346,26 +392,107 @@ class DefaultExecutionEngine:
             micro_session_id=intent.micro_session_id,
             broker_trading_status=intent.broker_trading_status,
             order_intent_id=intent.order_intent_id,
+            candidate_id=intent.candidate_id,
+            instrument_id=intent.instrument_id,
+            timeframe=intent.timeframe,
             request_order_id=intent.request_order_id,
             exchange_order_id=exchange_order_id
             or _response_str(response.data, "exchange_order_id")
             or _response_str(response.data, "order_id"),
-            broker_status=status or default_status,
+            tracking_id=_tracking_id(response.headers),
+            broker_status=actual_status,
             lifecycle_seq=lifecycle_seq,
+            latency_ms=_decimal_or_none(latency_ms),
             posted_at=posted_at or (existing.posted_at if existing is not None else None),
             cancelled_at=cancelled_at,
             rejected_at=rejected_at,
             reject_reason_code=_response_str(response.data, "reject_reason_code"),
-            broker_tracking_id=_response_str(response.headers, "x-tracking-id"),
+            broker_tracking_id=_tracking_id(response.headers),
             last_observed_at=observed_at,
             broker_payload={
-                "event_type": _broker_event_type(default_status),
+                "event_type": _broker_event_type(actual_status),
                 "method_name": response.method_name,
                 "data": _json_payload(response.data),
                 "headers": _json_payload(response.headers),
+                "latency_ms": str(latency_ms) if latency_ms is not None else None,
+                "rate_limit": _rate_limit_payload(response.headers),
             },
         )
-        return self._orders.upsert_broker_order_state(broker_order)
+        persisted = self._orders.upsert_broker_order_state(broker_order)
+        self._record_order_state_event(
+            intent=intent,
+            broker_order=persisted,
+            response=response,
+            observed_at=observed_at,
+            previous_state=previous_status,
+            latency_ms=_decimal_or_none(latency_ms),
+            cancel_reason_code=cancel_reason_code,
+        )
+        return persisted
+
+    def _record_order_state_event(
+        self,
+        *,
+        intent: OrderIntent,
+        broker_order: BrokerOrder,
+        response: BrokerUnaryResponse,
+        observed_at: datetime,
+        previous_state: str | None,
+        latency_ms: Decimal | None,
+        cancel_reason_code: str | None,
+    ) -> OrderStateEvent:
+        event_type = _broker_event_type(broker_order.broker_status)
+        event = self._orders.create_order_state_event_idempotent(
+            OrderStateEvent(
+                calendar_date=intent.calendar_date,
+                trading_date=intent.trading_date,
+                session_type=intent.session_type,
+                session_phase=intent.session_phase,
+                micro_session_id=intent.micro_session_id,
+                broker_trading_status=intent.broker_trading_status,
+                ts_utc=observed_at,
+                exchange_ts=observed_at,
+                received_ts=observed_at,
+                candidate_id=intent.candidate_id,
+                order_intent_id=intent.order_intent_id,
+                broker_order_id=broker_order.broker_order_id,
+                instrument_id=intent.instrument_id,
+                timeframe=intent.timeframe,
+                request_order_id=intent.request_order_id,
+                exchange_order_id=broker_order.exchange_order_id,
+                tracking_id=broker_order.tracking_id or broker_order.broker_tracking_id,
+                state_seq=broker_order.lifecycle_seq,
+                previous_state=previous_state,
+                new_state=broker_order.broker_status,
+                event_type=event_type,
+                reason_code=cancel_reason_code or broker_order.reject_reason_code,
+                cancel_reason_code=cancel_reason_code,
+                reject_reason_code=broker_order.reject_reason_code,
+                latency_ms=latency_ms,
+                state_payload={
+                    "broker_method": response.method_name,
+                    "broker_data": _json_payload(response.data),
+                    "broker_headers": _json_payload(response.headers),
+                    "rate_limit": _rate_limit_payload(response.headers),
+                },
+            )
+        )
+        _log_order_event(
+            event_type=event_type,
+            intent=intent,
+            stage_name="broker_order_state",
+            latency_ms=latency_ms,
+            tracking_id=event.tracking_id,
+            exchange_order_id=event.exchange_order_id,
+            payload={
+                "previous_state": previous_state,
+                "new_state": broker_order.broker_status,
+                "cancel_reason_code": cancel_reason_code,
+                "reject_reason_code": broker_order.reject_reason_code,
+                "rate_limit": _rate_limit_payload(response.headers),
+            },
+        )
+        return event
 
 
 type CallableClock = Callable[[], datetime]
@@ -416,6 +543,43 @@ def _response_str(payload: Mapping[str, object], key: str) -> str | None:
     return str(value) if value is not None and str(value) else None
 
 
+def _broker_status(response: BrokerUnaryResponse, default_status: str) -> str:
+    return (
+        _response_str(response.data, "broker_status")
+        or _response_str(response.data, "status")
+        or default_status
+    )
+
+
+def _tracking_id(headers: Mapping[str, object]) -> str | None:
+    return _response_str(headers, "x_tracking_id") or _response_str(headers, "x-tracking-id")
+
+
+def _rate_limit_payload(headers: Mapping[str, object]) -> dict[str, object | None]:
+    return {
+        "limit": _response_str(headers, "x_ratelimit_limit")
+        or _response_str(headers, "x-ratelimit-limit"),
+        "remaining": _response_str(headers, "x_ratelimit_remaining")
+        or _response_str(headers, "x-ratelimit-remaining"),
+        "reset": _response_str(headers, "x_ratelimit_reset")
+        or _response_str(headers, "x-ratelimit-reset"),
+    }
+
+
+def _elapsed_ms(started_at_monotonic: float) -> Decimal:
+    return Decimal(str((perf_counter() - started_at_monotonic) * 1000)).quantize(
+        Decimal("0.0001")
+    )
+
+
+def _decimal_or_none(value: Decimal | int | float | None) -> Decimal | None:
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return value
+    return Decimal(str(value))
+
+
 def _json_payload(payload: Mapping[str, object]) -> dict[str, object]:
     return dict(payload)
 
@@ -447,3 +611,37 @@ def _broker_event_type(status: str) -> str:
     if status == "cancelled":
         return DomainEventType.BROKER_ORDER_CANCELLED.value
     return DomainEventType.BROKER_ORDER_UPDATED.value
+
+
+def _log_order_event(
+    *,
+    event_type: str,
+    intent: OrderIntent,
+    stage_name: str,
+    payload: Mapping[str, object],
+    latency_ms: Decimal | None = None,
+    tracking_id: str | None = None,
+    exchange_order_id: str | None = None,
+) -> None:
+    with bind_context(
+        session_type=intent.session_type,
+        exchange_phase=intent.session_phase,
+        micro_session_id=intent.micro_session_id,
+        instrument=intent.instrument_id,
+        timeframe=intent.timeframe,
+        strategy_id=intent.strategy_id,
+        strategy_version=str(intent.strategy_version) if intent.strategy_version else None,
+        candidate_id=str(intent.candidate_id) if intent.candidate_id else None,
+        order_intent_id=str(intent.order_intent_id),
+        request_order_id=str(intent.request_order_id),
+        exchange_order_id=exchange_order_id,
+        tracking_id=tracking_id,
+    ):
+        log_event(
+            logger=LOGGER,
+            event_type=event_type,
+            component="execution.engine",
+            stage_name=stage_name,
+            latency_ms=latency_ms,
+            details=dict(payload),
+        )

@@ -27,6 +27,7 @@ from trade_core.strategy import (
     ConfigDrivenStrategyConfig,
     ConfigDrivenStrategyEngine,
     DefaultExecutionEngine,
+    DefaultReconciliationService,
     DefaultRiskEngine,
     OrderIntentRequest,
     PortfolioSnapshot,
@@ -41,9 +42,20 @@ from trade_core.strategy import (
 )
 from trading_common import LaunchModePolicy, RuntimeMode
 from trading_common.db.base import Base
-from trading_common.db.models import BlockerEvent, RiskEvent, StrategyStateEvent
+from trading_common.db.models import (
+    BlockerEvent,
+    CandidateStageResult,
+    FillEvent,
+    MarketContextSnapshot,
+    OrderStateEvent,
+    RiskEvent,
+    StrategyStateEvent,
+)
 from trading_common.db.repositories import (
+    AnalyticsReadRepository,
     BlockerEventRepository,
+    CandidateStageResultRepository,
+    MarketContextSnapshotRepository,
     OrderRepository,
     RiskEventRepository,
     SignalCandidateRepository,
@@ -235,7 +247,11 @@ class FakeBrokerGateway:
         return BrokerUnaryResponse(
             method_name="PostOrder",
             data={"exchange_order_id": "exchange-1", "broker_status": "posted"},
-            headers={"x-tracking-id": "tracking-post"},
+            headers={
+                "x-tracking-id": "tracking-post",
+                "x-ratelimit-limit": "100",
+                "x-ratelimit-remaining": "99",
+            },
         )
 
     async def cancel_order(
@@ -263,6 +279,56 @@ class FakeBrokerGateway:
         metadata: object | None = None,
     ) -> BrokerUnaryResponse:
         return BrokerUnaryResponse(method_name="GetOrders", data={"orders": []})
+
+
+class RejectingBrokerGateway(FakeBrokerGateway):
+    async def post_order(
+        self,
+        request: OrderPlacementRequest,
+        metadata: object | None = None,
+    ) -> BrokerUnaryResponse:
+        self.posted.append(request)
+        return BrokerUnaryResponse(
+            method_name="PostOrder",
+            data={
+                "exchange_order_id": "exchange-rejected",
+                "broker_status": "rejected",
+                "reject_reason_code": "insufficient_balance",
+            },
+            headers={"x-tracking-id": "tracking-reject"},
+        )
+
+
+class PartialFillReconciliationGateway(FakeBrokerGateway):
+    async def reconcile_order_state(
+        self,
+        request: OrderStateRequest,
+        metadata: object | None = None,
+    ) -> BrokerUnaryResponse:
+        return BrokerUnaryResponse(
+            method_name="GetOrderState",
+            data={
+                "exchange_order_id": "exchange-partial",
+                "broker_status": "partially_filled",
+                "fills": [
+                    {
+                        "broker_fill_id": "fill-1",
+                        "exchange_order_id": "exchange-partial",
+                        "side": "buy",
+                        "lot_qty": 1,
+                        "price": "100.10",
+                        "commission": "0.30",
+                        "commission_gross": "0.30",
+                        "commission_net": "0.30",
+                        "slippage_bp": "1.20",
+                        "pnl_gross": "2.00",
+                        "pnl_net": "1.70",
+                        "exchange_ts": utc(2026, 6, 12, 7, 1).isoformat(),
+                    }
+                ],
+            },
+            headers={"x-tracking-id": "tracking-partial"},
+        )
 
 
 def test_execution_engine_posts_and_cancels_with_explicit_reason_code() -> None:
@@ -301,6 +367,97 @@ def test_execution_engine_posts_and_cancels_with_explicit_reason_code() -> None:
         assert intent.cancel_reason_code == CancelReasonCode.STALE_ORDER.value
         assert fake_gateway.posted[0].request_order_id == intent.request_order_id
         assert fake_gateway.cancelled[0].payload["cancel_reason_code"] == "stale_order"
+        state_events = list(
+            session.execute(
+                select(OrderStateEvent).order_by(OrderStateEvent.state_seq)
+            ).scalars()
+        )
+        assert [event.new_state for event in state_events] == ["posted", "cancelled"]
+        assert state_events[0].tracking_id == "tracking-post"
+        assert state_events[1].cancel_reason_code == CancelReasonCode.STALE_ORDER.value
+        assert state_events[0].latency_ms is not None
+
+    engine.dispose()
+
+
+def test_reconciliation_records_partial_fill_as_source_of_truth_execution_event() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    fake_gateway = PartialFillReconciliationGateway()
+
+    with Session(engine) as session:
+        orders = OrderRepository(session)
+        execution = DefaultExecutionEngine(
+            broker_gateway=cast(BrokerGateway, fake_gateway),
+            orders=orders,
+            launch_policy=LaunchModePolicy.from_mode(RuntimeMode.HISTORICAL_REPLAY),
+        )
+        candidate_decision = candidate()
+        intent = execution.create_order_intent(
+            OrderIntentRequest(
+                candidate=candidate_decision,
+                session_snapshot=snapshot(),
+                account_id="account-1",
+            )
+        )
+        reconciliation = DefaultReconciliationService(
+            broker_gateway=cast(BrokerGateway, fake_gateway),
+            orders=orders,
+        )
+
+        result = asyncio.run(
+            reconciliation.reconcile_order(
+                account_id="account-1",
+                request_order_id=intent.request_order_id,
+            )
+        )
+        fill = session.execute(select(FillEvent)).scalar_one()
+        state_event = session.execute(select(OrderStateEvent)).scalar_one()
+        assert candidate_decision.candidate_id is not None
+        journey = AnalyticsReadRepository(session).get_candidate_journey(
+            candidate_decision.candidate_id
+        )
+
+        assert result.updated_order_count == 1
+        assert result.payload["fill_count"] == 1
+        assert intent.status == "partially_filled"
+        assert fill.broker_fill_id == "fill-1"
+        assert fill.pnl_net == Decimal("1.700000")
+        assert state_event.new_state == "partially_filled"
+        assert state_event.tracking_id == "tracking-partial"
+        assert journey.fills[0].broker_fill_id == "fill-1"
+
+    engine.dispose()
+
+
+def test_execution_engine_records_rejected_order_reason() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    fake_gateway = RejectingBrokerGateway()
+
+    with Session(engine) as session:
+        execution = DefaultExecutionEngine(
+            broker_gateway=cast(BrokerGateway, fake_gateway),
+            orders=OrderRepository(session),
+            launch_policy=LaunchModePolicy.from_mode(RuntimeMode.SANDBOX),
+        )
+        intent = execution.create_order_intent(
+            OrderIntentRequest(
+                candidate=candidate(),
+                session_snapshot=snapshot(),
+                account_id="account-1",
+            )
+        )
+
+        result = asyncio.run(execution.post_order(intent))
+        state_event = session.execute(select(OrderStateEvent)).scalar_one()
+
+        assert result.broker_status == "rejected"
+        assert intent.status == "rejected"
+        assert intent.reject_reason_code == "insufficient_balance"
+        assert state_event.new_state == "rejected"
+        assert state_event.reject_reason_code == "insufficient_balance"
+        assert state_event.tracking_id == "tracking-reject"
 
     engine.dispose()
 
@@ -315,6 +472,8 @@ def test_deterministic_blocked_candidate_persists_causal_events() -> None:
             blockers=BlockerEventRepository(session),
             risk_events=RiskEventRepository(session),
             state_events=StrategyStateEventRepository(session),
+            candidate_stages=CandidateStageResultRepository(session),
+            market_contexts=MarketContextSnapshotRepository(session),
         )
         risk = DefaultRiskEngine()
         raw_candidate = candidate()
@@ -358,15 +517,31 @@ def test_deterministic_blocked_candidate_persists_causal_events() -> None:
 
         final_blocker = next(row for row in blocker_rows if row.is_final_blocker)
         stored_blocker_count = session.scalar(select(func.count()).select_from(BlockerEvent))
+        stored_stage_count = session.scalar(
+            select(func.count()).select_from(CandidateStageResult)
+        )
+        stored_context_count = session.scalar(
+            select(func.count()).select_from(MarketContextSnapshot)
+        )
         stored_risk_count = session.scalar(select(func.count()).select_from(RiskEvent))
         stored_state_count = session.scalar(select(func.count()).select_from(StrategyStateEvent))
+        journey = AnalyticsReadRepository(session).get_candidate_journey(
+            persisted_candidate.candidate_id
+        )
 
         assert persisted_candidate.candidate_status == "blocked"
         assert final_blocker.reason_code == BlockerCode.SPREAD_TOO_WIDE.value
+        assert final_blocker.blocker_code == BlockerCode.SPREAD_TOO_WIDE.value
+        assert final_blocker.measured_value == Decimal("35.00000000")
+        assert stored_stage_count == len(decision.blockers)
+        assert stored_context_count == 1
         assert len(risk_rows) == 1
         assert state_row.new_state == StrategyState.BLOCKED.value
         assert stored_blocker_count == len(blocker_rows)
         assert stored_risk_count == len(risk_rows)
         assert stored_state_count == 1
+        assert journey.candidate is not None
+        assert journey.stage_results[1].blocker_code == BlockerCode.SPREAD_TOO_WIDE.value
+        assert journey.blockers[0].is_final_blocker
 
     engine.dispose()

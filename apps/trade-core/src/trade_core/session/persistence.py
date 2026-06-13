@@ -11,8 +11,15 @@ from uuid import UUID, uuid4
 from sqlalchemy.orm import Session
 
 from trade_core.session.models import JsonObject, SessionEventContext
-from trading_common.db.models import SessionRun, StrategyStateEvent
-from trading_common.db.repositories import SessionRunRepository, StrategyStateEventRepository
+from trading_common.db.models import MicroSession, SessionRun, StrategyStateEvent
+from trading_common.db.repositories import (
+    MicroSessionRepository,
+    SessionRunRepository,
+    StrategyStateEventRepository,
+)
+from trading_common.telemetry import bind_context, get_logger, log_event
+
+LOGGER = get_logger(__name__)
 
 
 class SessionStateStore(Protocol):
@@ -77,6 +84,7 @@ class SqlAlchemySessionStateStore:
         strategy_version: int,
     ) -> None:
         self._session_runs = SessionRunRepository(session)
+        self._micro_sessions = MicroSessionRepository(session)
         self._state_events = StrategyStateEventRepository(session)
         self._strategy_id = strategy_id
         self._strategy_version = strategy_version
@@ -91,7 +99,7 @@ class SqlAlchemySessionStateStore:
         freeze_starts_at: datetime,
         source_snapshot: Mapping[str, object],
     ) -> UUID:
-        run = self._session_runs.create(
+        run = self._session_runs.create_idempotent(
             SessionRun(
                 **context.as_db_values(),
                 strategy_id=self._strategy_id,
@@ -110,6 +118,27 @@ class SqlAlchemySessionStateStore:
                 },
             )
         )
+        self._micro_sessions.create_idempotent(
+            MicroSession(
+                **context.as_db_values(),
+                run_id=run.run_id,
+                strategy_id=self._strategy_id,
+                strategy_version=self._strategy_version,
+                instrument_id=None,
+                timeframe=None,
+                status="open",
+                started_at=observed_at,
+                ended_at=None,
+                freeze_started_at=None,
+                rollover_reason_code=None,
+                snapshot_payload={
+                    "planned_start_at": planned_start_at.isoformat(),
+                    "planned_end_at": planned_end_at.isoformat(),
+                    "freeze_starts_at": freeze_starts_at.isoformat(),
+                    "source_snapshot": dict(source_snapshot),
+                },
+            )
+        )
         self._record_state_event(
             context=context,
             observed_at=observed_at,
@@ -118,6 +147,12 @@ class SqlAlchemySessionStateStore:
             new_state="open",
             reason_code=None,
             payload={"run_id": str(run.run_id)},
+        )
+        _log_session_event(
+            context=context,
+            event_type="micro_session_opened",
+            observed_at=observed_at,
+            payload={"run_id": str(run.run_id), "planned_end_at": planned_end_at.isoformat()},
         )
         return run.run_id
 
@@ -129,6 +164,10 @@ class SqlAlchemySessionStateStore:
         freeze_started_at: datetime,
     ) -> None:
         self._session_runs.mark_freeze(run_id, freeze_started_at=freeze_started_at)
+        self._micro_sessions.mark_freeze(
+            context.micro_session_id,
+            freeze_started_at=freeze_started_at,
+        )
         self._record_state_event(
             context=context,
             observed_at=freeze_started_at,
@@ -136,6 +175,12 @@ class SqlAlchemySessionStateStore:
             previous_state="open",
             new_state="freezing",
             reason_code="hour_boundary_freeze",
+            payload={"run_id": str(run_id)},
+        )
+        _log_session_event(
+            context=context,
+            event_type="micro_session_freeze_started",
+            observed_at=freeze_started_at,
             payload={"run_id": str(run_id)},
         )
 
@@ -157,6 +202,16 @@ class SqlAlchemySessionStateStore:
             reason_code=reason_code,
             payload={"run_id": str(run_id), "snapshot": dict(snapshot_payload)},
         )
+        _log_session_event(
+            context=context,
+            event_type="session_snapshot_written",
+            observed_at=observed_at,
+            payload={
+                "run_id": str(run_id),
+                "reason_code": reason_code,
+                "snapshot": dict(snapshot_payload),
+            },
+        )
 
     def close_micro_session(
         self,
@@ -171,6 +226,12 @@ class SqlAlchemySessionStateStore:
             ended_at=ended_at,
             close_reason_code=close_reason_code,
         )
+        self._micro_sessions.close(
+            context.micro_session_id,
+            ended_at=ended_at,
+            rollover_reason_code=close_reason_code,
+            snapshot_payload={"close_reason_code": close_reason_code},
+        )
         self._record_state_event(
             context=context,
             observed_at=ended_at,
@@ -179,6 +240,12 @@ class SqlAlchemySessionStateStore:
             new_state="closed",
             reason_code=close_reason_code,
             payload={"run_id": str(run_id)},
+        )
+        _log_session_event(
+            context=context,
+            event_type="micro_session_closed",
+            observed_at=ended_at,
+            payload={"run_id": str(run_id), "close_reason_code": close_reason_code},
         )
 
     def request_report(
@@ -197,6 +264,12 @@ class SqlAlchemySessionStateStore:
             previous_state="closed",
             new_state="report_requested",
             reason_code=None,
+            payload={"run_id": str(run_id), "report": dict(report_payload)},
+        )
+        _log_session_event(
+            context=context,
+            event_type="report_requested",
+            observed_at=requested_at,
             payload={"run_id": str(run_id), "report": dict(report_payload)},
         )
 
@@ -226,6 +299,27 @@ class SqlAlchemySessionStateStore:
                 reason_code=reason_code,
                 state_payload=dict(payload),
             )
+        )
+
+
+def _log_session_event(
+    *,
+    context: SessionEventContext,
+    event_type: str,
+    observed_at: datetime,
+    payload: Mapping[str, object],
+) -> None:
+    with bind_context(
+        session_type=context.session_type.value,
+        exchange_phase=context.session_phase.value,
+        micro_session_id=context.micro_session_id,
+    ):
+        log_event(
+            logger=LOGGER,
+            event_type=event_type,
+            component="session.persistence",
+            exchange_ts=observed_at,
+            details=dict(payload),
         )
 
 

@@ -144,6 +144,12 @@ class SessionRunRepository:
         self._session.flush()
         return run
 
+    def create_idempotent(self, run: SessionRun) -> SessionRun:
+        existing = self.get_by_micro_session_id(run.micro_session_id)
+        if existing is not None:
+            return existing
+        return self.create(run)
+
     def get(self, run_id: UUID) -> SessionRun | None:
         return self._session.get(SessionRun, run_id)
 
@@ -201,6 +207,12 @@ class MicroSessionRepository:
         self._session.flush()
         return micro_session
 
+    def create_idempotent(self, micro_session: MicroSession) -> MicroSession:
+        existing = self.get(micro_session.micro_session_id)
+        if existing is not None:
+            return existing
+        return self.create(micro_session)
+
     def get(self, micro_session_id: str) -> MicroSession | None:
         return self._session.get(MicroSession, micro_session_id)
 
@@ -234,6 +246,18 @@ class MicroSessionRepository:
         self._session.flush()
         return micro_session
 
+    def mark_freeze(self, micro_session_id: str, *, freeze_started_at: datetime) -> MicroSession:
+        micro_session = self.get(micro_session_id)
+        if micro_session is None:
+            msg = f"MicroSession not found: {micro_session_id}"
+            raise LookupError(msg)
+        if micro_session.freeze_started_at is None:
+            micro_session.freeze_started_at = freeze_started_at
+        if micro_session.status == "open":
+            micro_session.status = "freezing"
+        self._session.flush()
+        return micro_session
+
 
 class StrategyStateEventRepository:
     """Append-only helpers for `strategy_state_event` rows."""
@@ -258,8 +282,22 @@ class SignalCandidateRepository:
         self._session.flush()
         return candidate
 
+    def create_idempotent(self, candidate: SignalCandidate) -> SignalCandidate:
+        existing = self.get_by_fingerprint(candidate.signal_fingerprint)
+        if existing is not None:
+            return existing
+        return self.create(candidate)
+
     def get(self, candidate_id: UUID) -> SignalCandidate | None:
         return self._session.get(SignalCandidate, candidate_id)
+
+    def get_by_fingerprint(self, signal_fingerprint: str | None) -> SignalCandidate | None:
+        if not signal_fingerprint:
+            return None
+        stmt = select(SignalCandidate).where(
+            SignalCandidate.signal_fingerprint == signal_fingerprint
+        )
+        return self._session.execute(stmt).scalars().first()
 
     def update_status(self, candidate_id: UUID, status: str) -> SignalCandidate:
         candidate = self.get(candidate_id)
@@ -282,6 +320,23 @@ class CandidateStageResultRepository:
         self._session.flush()
         return result
 
+    def create_idempotent(self, result: CandidateStageResult) -> CandidateStageResult:
+        existing = self.get_by_candidate_stage(result.candidate_id, result.stage_seq)
+        if existing is not None:
+            return existing
+        return self.create(result)
+
+    def get_by_candidate_stage(
+        self,
+        candidate_id: UUID,
+        stage_seq: int,
+    ) -> CandidateStageResult | None:
+        stmt = select(CandidateStageResult).where(
+            CandidateStageResult.candidate_id == candidate_id,
+            CandidateStageResult.stage_seq == stage_seq,
+        )
+        return self._session.execute(stmt).scalars().first()
+
     def list_for_candidate(self, candidate_id: UUID) -> list[CandidateStageResult]:
         stmt = (
             select(CandidateStageResult)
@@ -301,6 +356,18 @@ class BlockerEventRepository:
         self._session.add(event)
         self._session.flush()
         return event
+
+    def create_idempotent(self, event: BlockerEvent) -> BlockerEvent:
+        if event.candidate_id is not None:
+            stmt = select(BlockerEvent).where(
+                BlockerEvent.candidate_id == event.candidate_id,
+                BlockerEvent.gate_rank == event.gate_rank,
+                BlockerEvent.reason_code == event.reason_code,
+            )
+            existing = self._session.execute(stmt).scalars().first()
+            if existing is not None:
+                return existing
+        return self.create(event)
 
 
 class RiskEventRepository:
@@ -387,6 +454,17 @@ class MarketContextSnapshotRepository:
         self._session.add(snapshot)
         self._session.flush()
         return snapshot
+
+    def create_idempotent(self, snapshot: MarketContextSnapshot) -> MarketContextSnapshot:
+        if snapshot.candidate_id is not None:
+            stmt = select(MarketContextSnapshot).where(
+                MarketContextSnapshot.candidate_id == snapshot.candidate_id,
+                MarketContextSnapshot.snapshot_kind == snapshot.snapshot_kind,
+            )
+            existing = self._session.execute(stmt).scalars().first()
+            if existing is not None:
+                return existing
+        return self.create(snapshot)
 
     def latest_for_candidate(self, candidate_id: UUID) -> MarketContextSnapshot | None:
         stmt = (
@@ -484,6 +562,7 @@ class OrderRepository:
         existing.tracking_id = order.tracking_id
         existing.broker_status = order.broker_status
         existing.lifecycle_seq = order.lifecycle_seq
+        existing.latency_ms = order.latency_ms
         existing.posted_at = order.posted_at
         existing.cancelled_at = order.cancelled_at
         existing.rejected_at = order.rejected_at
@@ -499,6 +578,21 @@ class OrderRepository:
         self._session.flush()
         return event
 
+    def create_order_state_event_idempotent(
+        self,
+        event: OrderStateEvent,
+    ) -> OrderStateEvent:
+        if event.order_intent_id is not None:
+            stmt = select(OrderStateEvent).where(
+                OrderStateEvent.order_intent_id == event.order_intent_id,
+                OrderStateEvent.state_seq == event.state_seq,
+                OrderStateEvent.event_type == event.event_type,
+            )
+            existing = self._session.execute(stmt).scalars().first()
+            if existing is not None:
+                return existing
+        return self.create_order_state_event(event)
+
     def list_order_state_events(self, order_intent_id: UUID) -> list[OrderStateEvent]:
         stmt = (
             select(OrderStateEvent)
@@ -506,6 +600,19 @@ class OrderRepository:
             .order_by(OrderStateEvent.state_seq, OrderStateEvent.ts_utc)
         )
         return list(self._session.execute(stmt).scalars())
+
+    def create_fill_event_idempotent(self, event: FillEvent) -> FillEvent:
+        stmt = select(FillEvent).where(
+            FillEvent.exchange_order_id == event.exchange_order_id,
+            FillEvent.broker_fill_id == event.broker_fill_id,
+            FillEvent.trading_date == event.trading_date,
+        )
+        existing = self._session.execute(stmt).scalars().first()
+        if existing is not None:
+            return existing
+        self._session.add(event)
+        self._session.flush()
+        return event
 
 
 class AnalyticsReadRepository:

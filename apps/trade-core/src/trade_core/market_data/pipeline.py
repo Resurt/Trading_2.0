@@ -19,8 +19,11 @@ from trade_core.market_data.events import (
 from trade_core.market_data.persistence import SqlAlchemyMarketDataStore
 from trade_core.market_data.read_models import MarketReadModelStore
 from trade_core.session.models import SessionEventContext
+from trading_common.observability import DomainEventType
+from trading_common.telemetry import bind_context, get_logger, log_event
 
 SessionContextProvider = Callable[[str], SessionEventContext]
+LOGGER = get_logger(__name__)
 
 
 class MarketDataPipeline:
@@ -70,8 +73,19 @@ class MarketDataPipeline:
             TradingStatusTick,
         ):
             self._read_models.apply_trading_status(event.payload)
+            context = self._session_context_provider(event.payload.instrument_id)
+            _log_market_event(
+                event_type=DomainEventType.MARKET_STATUS_CHANGED.value,
+                component="market_data.pipeline",
+                context=context,
+                instrument_id=event.payload.instrument_id,
+                payload={
+                    "trading_status": event.payload.trading_status,
+                    "api_trade_available": event.payload.api_trade_available,
+                    "source": "broker_trading_status",
+                },
+            )
             if self._store is not None:
-                context = self._session_context_provider(event.payload.instrument_id)
                 self._store.save_status(tick=event.payload, context=context)
         elif event.event_type is MarketEventType.MARKET_TRADE and isinstance(
             event.payload,
@@ -110,8 +124,20 @@ class MarketDataPipeline:
 
     async def _publish_closed_bar(self, bar: Bar) -> None:
         self._read_models.apply_bar(bar)
+        context = self._session_context_provider(bar.instrument_id)
+        _log_market_event(
+            event_type=DomainEventType.BAR_CLOSED.value,
+            component="bar_engine",
+            context=context,
+            instrument_id=bar.instrument_id,
+            timeframe=bar.timeframe.value,
+            payload={
+                "open_ts_utc": bar.open_ts_utc.isoformat(),
+                "close_ts_utc": bar.close_ts_utc.isoformat(),
+                "source_candle_count": bar.source_candle_count,
+            },
+        )
         if self._store is not None:
-            context = self._session_context_provider(bar.instrument_id)
             self._store.save_bar(bar=bar, context=context)
         await self._event_bus.publish(
             MarketDataEvent(
@@ -120,4 +146,28 @@ class MarketDataPipeline:
                 ts_utc=bar.close_ts_utc,
                 instrument_id=bar.instrument_id,
             )
+        )
+
+
+def _log_market_event(
+    *,
+    event_type: str,
+    component: str,
+    context: SessionEventContext,
+    instrument_id: str,
+    payload: dict[str, object],
+    timeframe: str | None = None,
+) -> None:
+    with bind_context(
+        session_type=context.session_type.value,
+        exchange_phase=context.session_phase.value,
+        micro_session_id=context.micro_session_id,
+        instrument=instrument_id,
+        timeframe=timeframe,
+    ):
+        log_event(
+            logger=LOGGER,
+            event_type=event_type,
+            component=component,
+            details=payload,
         )

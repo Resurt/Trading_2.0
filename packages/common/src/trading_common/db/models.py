@@ -184,6 +184,7 @@ class SignalCandidate(Base, SessionContextMixin, EventTimestampMixin):
     __table_args__ = (
         Index("ix_signal_candidate_trading_date", "trading_date", "session_type"),
         Index("ix_signal_candidate_instrument", "instrument_id", "timeframe"),
+        Index("ux_signal_candidate_fingerprint", "signal_fingerprint", unique=True),
         Index(
             "ix_signal_candidate_scope",
             "instrument_id",
@@ -229,6 +230,13 @@ class MarketContextSnapshot(Base, SessionContextMixin, EventTimestampMixin):
     __tablename__ = "market_context_snapshot"
     __table_args__ = (
         Index("ix_market_context_candidate", "candidate_id"),
+        Index(
+            "ux_market_context_candidate_kind",
+            "candidate_id",
+            "snapshot_kind",
+            "trading_date",
+            unique=True,
+        ),
         Index(
             "ix_market_context_scope",
             "instrument_id",
@@ -277,6 +285,12 @@ class CandidateStageResult(Base, SessionContextMixin, EventTimestampMixin):
 
     __tablename__ = "candidate_stage_result"
     __table_args__ = (
+        UniqueConstraint(
+            "candidate_id",
+            "stage_seq",
+            "trading_date",
+            name="uq_candidate_stage_result_candidate_seq",
+        ),
         Index("ix_candidate_stage_candidate", "candidate_id", "stage_seq"),
         Index("ix_candidate_stage_blocker", "trading_date", "blocker_code"),
         Index(
@@ -324,6 +338,13 @@ class BlockerEvent(Base, SessionContextMixin, EventTimestampMixin):
 
     __tablename__ = "blocker_event"
     __table_args__ = (
+        UniqueConstraint(
+            "candidate_id",
+            "gate_rank",
+            "reason_code",
+            "trading_date",
+            name="uq_blocker_event_candidate_gate_reason",
+        ),
         Index("ix_blocker_event_candidate", "candidate_id"),
         Index("ix_blocker_event_reason", "trading_date", "reason_code"),
         Index("ix_blocker_event_blocker_code", "trading_date", "blocker_code"),
@@ -459,6 +480,7 @@ class BrokerOrder(Base, SessionContextMixin):
     tracking_id: Mapped[str | None] = mapped_column(String(128))
     broker_status: Mapped[str] = mapped_column(String(64), nullable=False)
     lifecycle_seq: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    latency_ms: Mapped[Decimal | None] = mapped_column(Numeric(20, 4))
     posted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -473,6 +495,13 @@ class OrderStateEvent(Base, SessionContextMixin, EventTimestampMixin):
 
     __tablename__ = "order_state_event"
     __table_args__ = (
+        UniqueConstraint(
+            "order_intent_id",
+            "state_seq",
+            "event_type",
+            "trading_date",
+            name="uq_order_state_event_intent_seq_type",
+        ),
         Index("ix_order_state_candidate", "candidate_id"),
         Index("ix_order_state_intent_seq", "order_intent_id", "state_seq"),
         Index("ix_order_state_request_order_id", "request_order_id"),
