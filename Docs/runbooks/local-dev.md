@@ -103,6 +103,30 @@ WebSocket каналы:
 - `ws://localhost:8000/ws/market`
 - `ws://localhost:8000/ws/reports`
 
+Для Vite frontend API должен разрешать локальный origin:
+
+```powershell
+$env:CORS_ALLOW_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173"
+```
+
+## Frontend
+
+Локальный запуск:
+
+```powershell
+cd apps/frontend
+npm.cmd run dev
+```
+
+Проверки:
+
+```powershell
+cd apps/frontend
+npm.cmd run typecheck
+npm.cmd run test:unit
+npm.cmd run build
+```
+
 ## Миграции PostgreSQL
 
 После запуска `postgres` примените схему:

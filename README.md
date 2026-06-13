@@ -41,14 +41,16 @@ dashboards provisioning для production-like observability. `report-worker`
 содержит Celery task pipeline, hourly/daily reports, counterfactual analytics и
 ручные CLI-скрипты для запуска отчетов вне FastAPI. `api` содержит FastAPI BFF
 с REST endpoints для управления, live read models, отчетов, strategy config и
-WebSocket snapshot channels для dashboard/orders/market/reports.
+WebSocket snapshot channels для dashboard/orders/market/reports. `frontend`
+содержит Vue 3 dark-theme UI для live dashboard, reports, settings и diagnostics
+с Pinia stores, REST snapshots и WebSocket snapshot channels.
 
 ## Каркас репозитория
 
 - `apps/trade-core` - долгоживущий Python service skeleton.
 - `apps/api` - FastAPI BFF для управления, read models, отчетов и WebSocket snapshots.
 - `apps/report-worker` - Celery/report worker skeleton без задач.
-- `apps/frontend` - Vue 3 + Vite dark-theme shell.
+- `apps/frontend` - Vue 3 + Vite dark-theme операторский UI.
 - `packages/common` - общие enums и dataclasses.
 - `tests` - smoke tests для импортов Python-пакетов.
 - `scripts` - место для CLI и вспомогательных скриптов следующих шагов.
@@ -60,6 +62,8 @@ python -m pytest
 python -m ruff check .
 python -m mypy
 cd apps/frontend && npm run build
+cd apps/frontend && npm run typecheck
+cd apps/frontend && npm run test:unit
 ```
 
 На Windows, если PowerShell блокирует `npm.ps1`, используйте `npm.cmd`.

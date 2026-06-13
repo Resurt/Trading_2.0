@@ -177,3 +177,51 @@ UI должен определить tokens:
 - disabled.
 
 Интерфейс должен быть плотным, читаемым и удобным для повторяющейся операторской работы.
+
+## Реализация шага 11
+
+Фактическая реализация находится в `apps/frontend/src`.
+
+Карта страниц:
+
+- `LiveDashboardView` - live состояние робота, сессии, рынка, стакана, позиций, заявок и risk events.
+- `ReportsView` - фильтры, rebuild daily report, daily/hourly reports, blocker ranking, counterfactual missed opportunities и summary charts.
+- `SettingsView` - strategy config по session template, risk limits, active instruments/timeframes и secret status без значений секретов.
+- `DiagnosticsView` - WebSocket/API degraded states, correlation search и cancelled/rejected order reason codes.
+
+Ключевые компоненты:
+
+- `DataPanel` - базовая рабочая панель.
+- `MetricTile` - компактная метрика.
+- `StatusPill` - readable label + machine-readable code.
+- `EmptyState` - пустое или degraded состояние.
+- `MiniBars` - простые summary charts без тяжелой chart-библиотеки.
+- `OrderBookWidget` - top-of-book и lightweight depth summary.
+- `SignalReasonCard` - текущий candidate/blocker с reason code.
+- `RiskEventsList` - последние candidate/blocker события.
+
+Pinia stores:
+
+- `robot` - `/robot/status`, `/session/current`, `/signals/current`, `/ws/dashboard`, start/stop commands.
+- `market` - `/market/overview`, `/ws/market`, selected instrument и top-of-book read model.
+- `portfolio` - `/positions`, `/orders/open`, `/ws/orders`.
+- `reports` - `/reports/hourly`, `/reports/daily`, `/reports/counterfactual`, `/reports/daily/run`, `/ws/reports`.
+
+Live widgets:
+
+- balance;
+- session type / phase / broker trading status;
+- current micro-session и countdown до rollover;
+- strategy state;
+- current signal/candidate/blocker;
+- spread / mid price / market quality;
+- top-of-book и order book summary;
+- recent market trades tape;
+- positions;
+- active orders;
+- recent risk events;
+- degraded flags;
+- latest hourly report;
+- freshness timestamps.
+
+REST используется для initial snapshot/history. WebSocket используется для snapshot/live обновлений. Текущий BFF WebSocket пока отправляет snapshot и закрывает соединение; frontend отображает это как `snapshot_closed`, а не как ошибку.

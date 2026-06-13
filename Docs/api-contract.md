@@ -18,6 +18,9 @@
 
 Если заголовок не передан, роль считается `observer`. Команды `POST /robot/start`, `POST /robot/stop`, `POST /reports/daily/run` и `PUT /config/strategy` требуют `operator` или `admin`.
 
+Для локального Vue frontend BFF разрешает CORS origins из `CORS_ALLOW_ORIGINS`.
+Значение по умолчанию: `http://localhost:5173,http://127.0.0.1:5173`.
+
 ## Read model policy
 
 API читает данные через `BffReadService`, а не напрямую из произвольных таблиц в route handlers.

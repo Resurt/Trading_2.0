@@ -1,0 +1,131 @@
+import { mount } from "@vue/test-utils";
+import { createPinia, setActivePinia } from "pinia";
+import { describe, expect, it } from "vitest";
+
+import LiveDashboardView from "../views/LiveDashboardView.vue";
+import { useMarketStore } from "../stores/market";
+import { usePortfolioStore } from "../stores/portfolio";
+import { useReportsStore } from "../stores/reports";
+import { useRobotStore } from "../stores/robot";
+
+function mountWithStores() {
+  const pinia = createPinia();
+  setActivePinia(pinia);
+  const robot = useRobotStore();
+  const market = useMarketStore();
+  const portfolio = usePortfolioStore();
+  const reports = useReportsStore();
+
+  robot.status = {
+    balance: { currency: "RUB", available: "150000", blocked: "1000" },
+    active_instruments: ["MOEX:SBER"],
+    active_timeframes: ["5m"],
+    strategy_state: "candidate",
+    session_type: "weekday_main",
+    session_phase: "continuous_trading",
+    broker_trading_status: "normal_trading",
+    open_orders_count: 1,
+    active_positions_count: 1,
+    degraded_flags: ["balance_unavailable"],
+    robot_control_state: "start_requested",
+    micro_session_id: "2026-06-13:weekday_main:1000",
+  };
+  robot.signals = [
+    {
+      candidate_id: "candidate-1",
+      instrument_id: "MOEX:SBER",
+      strategy_id: "baseline",
+      timeframe: "5m",
+      side: "buy",
+      signal_type: "entry",
+      candidate_status: "blocked",
+      expected_edge_bps: "12.5",
+      expected_holding_minutes: 5,
+      final_blocker_code: "spread_too_wide",
+      payload: {},
+    },
+  ];
+  market.overview = {
+    generated_at: "2026-06-13T07:10:00Z",
+    instruments: [
+      {
+        instrument_id: "MOEX:SBER",
+        spread: "0.1",
+        mid_price: "100.05",
+        market_quality: "0.92",
+        best_bid: "100",
+        best_ask: "100.1",
+        recent_market_trades: [],
+        order_book_summary: {
+          best_bid_qty_lots: "10",
+          best_ask_qty_lots: "12",
+          bid_depth_lots: "100",
+          ask_depth_lots: "120",
+        },
+      },
+    ],
+  };
+  portfolio.positions = [
+    {
+      instrument_id: "MOEX:SBER",
+      account_id: "acc",
+      position_side: "long",
+      qty_lots: 10,
+      avg_price: "99",
+      market_price: "100",
+      unrealized_pnl: "10",
+      realised_pnl: "0",
+      snapshot_ts: "2026-06-13T07:10:00Z",
+    },
+  ];
+  portfolio.openOrders = [
+    {
+      order_intent_id: "intent-1",
+      request_order_id: "request-1",
+      exchange_order_id: "exchange-1",
+      instrument_id: "MOEX:SBER",
+      side: "buy",
+      order_type: "limit",
+      lot_qty: 10,
+      intended_price: "100",
+      broker_status: "working",
+      cancel_reason_code: null,
+      reject_reason_code: null,
+      last_observed_at: "2026-06-13T07:10:00Z",
+    },
+  ];
+  reports.hourlyReports = [
+    {
+      hourly_report_id: "hourly-1",
+      trading_date: "2026-06-13",
+      session_type: "weekday_main",
+      micro_session_id: "2026-06-13:weekday_main:1000",
+      strategy_id: "baseline",
+      instrument_id: "MOEX:SBER",
+      realised_pnl: "10",
+      commission: "1",
+      signal_count: 1,
+      blocked_count: 1,
+      fill_ratio: "0.5",
+      payload: {},
+    },
+  ];
+
+  return mount(LiveDashboardView, {
+    global: {
+      plugins: [pinia],
+    },
+  });
+}
+
+describe("LiveDashboardView", () => {
+  it("renders live widgets with machine-readable reason codes", () => {
+    const wrapper = mountWithStores();
+
+    expect(wrapper.find('[data-testid="live-dashboard"]').exists()).toBe(true);
+    expect(wrapper.text()).toContain("MOEX:SBER");
+    expect(wrapper.text()).toContain("spread_too_wide");
+    expect(wrapper.text()).toContain("weekday_main");
+    expect(wrapper.text()).toContain("request-1");
+  });
+});

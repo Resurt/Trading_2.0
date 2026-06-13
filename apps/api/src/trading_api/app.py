@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from datetime import UTC, date, datetime
 from typing import Annotated, cast
@@ -9,6 +10,7 @@ from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Query, Request, Response, WebSocket
 from fastapi.encoders import jsonable_encoder
+from fastapi.middleware.cors import CORSMiddleware
 
 from trading_api.auth import require_role, role_from_header
 from trading_api.read_service import BffReadService
@@ -79,6 +81,13 @@ def create_fastapi_app(
             "FastAPI backend-for-frontend for live trading state, management, "
             "reports and WebSocket dashboard channels."
         ),
+    )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins_from_env(),
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "PUT"],
+        allow_headers=["Accept", "Content-Type", "X-API-Role"],
     )
     app.state.identity = identity
     app.state.database = database
@@ -273,6 +282,14 @@ def _robot_control(request: Request) -> RobotControlState:
 
 def _report_task_client(request: Request) -> ReportTaskClient:
     return cast(ReportTaskClient, request.app.state.report_task_client)
+
+
+def _cors_origins_from_env() -> list[str]:
+    raw_origins = os.getenv(
+        "CORS_ALLOW_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173",
+    )
+    return [origin.strip() for origin in raw_origins.split(",") if origin.strip()]
 
 
 def _dashboard_payload(websocket: WebSocket) -> dict[str, object]:

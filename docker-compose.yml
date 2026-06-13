@@ -189,6 +189,7 @@ services:
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
+      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
     secrets:
       - postgres_password
     ports:

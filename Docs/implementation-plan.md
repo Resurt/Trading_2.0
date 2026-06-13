@@ -333,6 +333,8 @@
 - REST/WebSocket clients;
 - drill-down по blocker/cancel/reject events.
 
+Реализация шага зафиксирована в `Docs/frontend-dashboard-spec.md` и `apps/frontend/src`.
+
 Критерии готовности:
 
 - интерфейс работает на mock data;

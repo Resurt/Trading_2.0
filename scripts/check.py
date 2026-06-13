@@ -24,6 +24,8 @@ def main() -> None:
     run([sys.executable, "-m", "pytest"])
     run([sys.executable, "-m", "ruff", "check", "."])
     run([sys.executable, "-m", "mypy"])
+    run([npm_command(), "run", "typecheck"], cwd=FRONTEND)
+    run([npm_command(), "run", "test:unit"], cwd=FRONTEND)
     run([npm_command(), "run", "build"], cwd=FRONTEND)
 
 
