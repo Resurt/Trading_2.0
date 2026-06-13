@@ -1,0 +1,25 @@
+:root {
+  color-scheme: dark;
+
+  --color-background: #080b10;
+  --color-surface: #101720;
+  --color-surface-elevated: #172231;
+  --color-text-primary: #edf4ff;
+  --color-text-secondary: #aebbd0;
+  --color-text-muted: #7e8da3;
+  --color-border: #283445;
+  --color-success: #3dcc8e;
+  --color-warning: #f3b64b;
+  --color-danger: #ef6461;
+  --color-info: #5ba7ff;
+  --color-long: #47c78f;
+  --color-short: #ff6b7a;
+  --color-flat: #98a4b6;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --radius-panel: 8px;
+}

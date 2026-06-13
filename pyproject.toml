@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trading-2-0"
+version = "0.1.0"
+description = "MOEX trading robot monorepo skeleton"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "mypy>=1.10",
+  "pytest>=8.2",
+  "ruff>=0.5",
+]
+
+[tool.setuptools.packages.find]
+where = [
+  "apps/trade-core/src",
+  "apps/api/src",
+  "apps/report-worker/src",
+  "packages/common/src",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [
+  "apps/trade-core/src",
+  "apps/api/src",
+  "apps/report-worker/src",
+  "packages/common/src",
+]
+addopts = "-q"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = [
+  "apps/trade-core/src",
+  "apps/api/src",
+  "apps/report-worker/src",
+  "packages/common/src",
+  "tests",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+mypy_path = [
+  "apps/trade-core/src",
+  "apps/api/src",
+  "apps/report-worker/src",
+  "packages/common/src",
+]
+files = [
+  "apps/trade-core/src",
+  "apps/api/src",
+  "apps/report-worker/src",
+  "packages/common/src",
+  "tests",
+]

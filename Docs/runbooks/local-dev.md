@@ -6,14 +6,33 @@ Run the local stack with fake/dev secrets and no real trading keys.
 
 ## Expected Commands
 
-These commands will be implemented during repository bootstrap and compose setup:
+Commands available after the repository bootstrap:
+
+```bash
+make test
+make lint
+make frontend-build
+```
+
+The compose commands are placeholders until step 02:
 
 ```bash
 make up
 make logs
-make test
-make lint
 make down
+```
+
+On Windows, use `npm.cmd` if PowerShell blocks `npm.ps1`:
+
+```powershell
+cd apps/frontend
+npm.cmd run build
+```
+
+Single-command local smoke check:
+
+```powershell
+python scripts/check.py
 ```
 
 ## Secret Policy
