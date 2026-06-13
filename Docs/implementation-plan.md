@@ -312,6 +312,8 @@
 - `/robot/status`;
 - report task trigger endpoints.
 
+Реализация шага зафиксирована в `Docs/api-contract.md` и `apps/api/src/trading_api`.
+
 Критерии готовности:
 
 - API tests покрывают ключевые маршруты;

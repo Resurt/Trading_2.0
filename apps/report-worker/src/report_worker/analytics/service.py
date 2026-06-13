@@ -306,7 +306,13 @@ class ReportAnalyticsService:
         self._session.flush()
         return report
 
-    def rebuild_reports_for_date(self, *, trading_date: date, strategy_id: str) -> DailyReport:
+    def rebuild_reports_for_date(
+        self,
+        *,
+        trading_date: date,
+        strategy_id: str,
+        include_counterfactual: bool = True,
+    ) -> DailyReport:
         runs = self._list(
             select(SessionRun).where(
                 SessionRun.trading_date == trading_date,
@@ -316,6 +322,11 @@ class ReportAnalyticsService:
         for run in runs:
             self.build_hourly_report(
                 micro_session_id=run.micro_session_id,
+                strategy_id=strategy_id,
+            )
+        if include_counterfactual:
+            self.run_counterfactual_analysis_for_date(
+                trading_date=trading_date,
                 strategy_id=strategy_id,
             )
         return self.build_daily_report(trading_date=trading_date, strategy_id=strategy_id)

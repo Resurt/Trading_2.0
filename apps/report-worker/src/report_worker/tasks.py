@@ -41,12 +41,17 @@ def build_daily_report(trading_date: str, strategy_id: str) -> dict[str, object]
 
 
 @report_task(name="report_worker.rebuild_reports_for_date")
-def rebuild_reports_for_date(trading_date: str, strategy_id: str) -> dict[str, object]:
+def rebuild_reports_for_date(
+    trading_date: str,
+    strategy_id: str,
+    include_counterfactual: bool = True,
+) -> dict[str, object]:
     with _database().session_scope() as session:
         service = ReportAnalyticsService(session)
         report = service.rebuild_reports_for_date(
             trading_date=date.fromisoformat(trading_date),
             strategy_id=strategy_id,
+            include_counterfactual=include_counterfactual,
         )
         return service.daily_read_model(report)
 

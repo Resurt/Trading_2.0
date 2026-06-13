@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import cast
 from uuid import uuid4
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, delete
 from sqlalchemy.orm import Session
 
 from report_worker.analytics import (
@@ -20,6 +20,8 @@ from trading_common.db.base import Base
 from trading_common.db.models import (
     BlockerEvent,
     BrokerOrder,
+    CounterfactualResult,
+    DailyReport,
     FillEvent,
     MarketCandle,
     OrderIntent,
@@ -347,5 +349,18 @@ def test_report_service_builds_hourly_daily_and_counterfactual_reports() -> None
         execution_quality = cast(dict[str, object], daily.report_payload["execution_quality"])
         assert funnel["candidates"] == 1
         assert execution_quality["cancel_count"] == 1
+
+        session.execute(delete(CounterfactualResult))
+        session.execute(delete(DailyReport))
+        rebuilt_daily = service.rebuild_reports_for_date(
+            trading_date=date(2026, 6, 12),
+            strategy_id="baseline",
+            include_counterfactual=True,
+        )
+        missed_opportunity = cast(
+            dict[str, object],
+            rebuilt_daily.report_payload["missed_opportunity_summary"],
+        )
+        assert missed_opportunity["total_counterfactuals"] == 2
 
     engine.dispose()

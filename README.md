@@ -39,12 +39,14 @@
 Также добавлены structured JSON logging, Prometheus metrics registry и Grafana
 dashboards provisioning для production-like observability. `report-worker`
 содержит Celery task pipeline, hourly/daily reports, counterfactual analytics и
-ручные CLI-скрипты для запуска отчетов вне FastAPI.
+ручные CLI-скрипты для запуска отчетов вне FastAPI. `api` содержит FastAPI BFF
+с REST endpoints для управления, live read models, отчетов, strategy config и
+WebSocket snapshot channels для dashboard/orders/market/reports.
 
 ## Каркас репозитория
 
 - `apps/trade-core` - долгоживущий Python service skeleton.
-- `apps/api` - FastAPI BFF skeleton без реальных routes.
+- `apps/api` - FastAPI BFF для управления, read models, отчетов и WebSocket snapshots.
 - `apps/report-worker` - Celery/report worker skeleton без задач.
 - `apps/frontend` - Vue 3 + Vite dark-theme shell.
 - `packages/common` - общие enums и dataclasses.

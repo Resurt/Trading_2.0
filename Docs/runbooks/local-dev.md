@@ -63,6 +63,46 @@ Invoke-WebRequest http://localhost:3000/api/health
 Invoke-WebRequest http://localhost:3100/ready
 ```
 
+## FastAPI BFF
+
+OpenAPI доступен локально:
+
+```powershell
+Invoke-WebRequest http://localhost:8000/openapi.json
+```
+
+Swagger UI:
+
+```text
+http://localhost:8000/docs
+```
+
+Чтение состояния не требует роли выше `observer`:
+
+```powershell
+Invoke-RestMethod http://localhost:8000/robot/status
+Invoke-RestMethod http://localhost:8000/session/current
+Invoke-RestMethod http://localhost:8000/market/overview
+```
+
+Команды управления и ручной запуск daily report требуют placeholder role header:
+
+```powershell
+Invoke-RestMethod -Method Post -Headers @{ "X-API-Role" = "operator" } http://localhost:8000/robot/start
+Invoke-RestMethod -Method Post -Headers @{ "X-API-Role" = "operator" } http://localhost:8000/robot/stop
+Invoke-RestMethod -Method Post -Headers @{ "X-API-Role" = "operator" } `
+  -ContentType "application/json" `
+  -Body '{"trading_date":"2026-06-13","strategy_id":"baseline","include_counterfactual":true}' `
+  http://localhost:8000/reports/daily/run
+```
+
+WebSocket каналы:
+
+- `ws://localhost:8000/ws/dashboard`
+- `ws://localhost:8000/ws/orders`
+- `ws://localhost:8000/ws/market`
+- `ws://localhost:8000/ws/reports`
+
 ## Миграции PostgreSQL
 
 После запуска `postgres` примените схему:

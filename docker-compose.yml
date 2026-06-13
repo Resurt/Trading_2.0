@@ -182,10 +182,23 @@ services:
       HOST: 0.0.0.0
       PORT: 8000
       TRADING_RUNTIME_MODE: ${TRADING_RUNTIME_MODE:-historical_replay}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-trading_2_0}
+      POSTGRES_USER: ${POSTGRES_USER:-trading_app}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+    secrets:
+      - postgres_password
     ports:
       - "${API_PORT:-8000}:8000"
     depends_on:
       trade-core:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     healthcheck:
       test:
@@ -212,11 +225,20 @@ services:
       HOST: 0.0.0.0
       PORT: 8002
       TRADING_RUNTIME_MODE: ${TRADING_RUNTIME_MODE:-historical_replay}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-trading_2_0}
+      POSTGRES_USER: ${POSTGRES_USER:-trading_app}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
+    secrets:
+      - postgres_password
     ports:
       - "${REPORT_WORKER_PORT:-8002}:8002"
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
     healthcheck:

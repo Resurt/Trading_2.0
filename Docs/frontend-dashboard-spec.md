@@ -12,6 +12,32 @@ Frontend - это Vue 3 dark-theme интерфейс оператора и ан
 - WebSocket client
 - dark theme design tokens
 
+## BFF источники данных
+
+Frontend должен использовать FastAPI BFF из `Docs/api-contract.md`.
+
+REST endpoints:
+
+- `/robot/status`
+- `/session/current`
+- `/positions`
+- `/orders/open`
+- `/signals/current`
+- `/market/overview`
+- `/reports/hourly`
+- `/reports/daily`
+- `/reports/counterfactual`
+- `/config/strategy`
+
+WebSocket channels:
+
+- `/ws/dashboard`
+- `/ws/orders`
+- `/ws/market`
+- `/ws/reports`
+
+Команды управления и ручной запуск отчетов должны отправлять placeholder role header `X-API-Role: operator` до внедрения полноценной auth-модели.
+
 ## Общий layout
 
 Обязательные зоны:

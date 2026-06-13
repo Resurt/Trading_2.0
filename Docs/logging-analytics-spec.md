@@ -634,6 +634,10 @@ Daily report строится `report-worker` по `trading_date`.
 - `report_worker.rebuild_reports_for_date`
 - `report_worker.run_counterfactual_analysis_for_date`
 
+`report_worker.rebuild_reports_for_date(trading_date, strategy_id, include_counterfactual=True)`
+перестраивает hourly reports по закрытым `session_run`, при необходимости запускает
+counterfactual analysis и затем строит daily report уже с `missed_opportunity_summary`.
+
 Задачи берут `DATABASE_URL` или Postgres env/secrets через `trading_common.db.config`.
 Redis используется как Celery broker/result backend через:
 
