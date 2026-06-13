@@ -3,26 +3,50 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import date, datetime
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from trading_common.db.models import (
     BlockerEvent,
     BrokerOrder,
+    CandidateStageResult,
+    CounterfactualResult,
+    DailyReport,
+    FillEvent,
+    HourlyReport,
     InstrumentRegistry,
     MarketCandle,
+    MarketContextSnapshot,
     MarketStatusSnapshot,
+    MicroSession,
     OrderBookSummary,
     OrderIntent,
+    OrderStateEvent,
     RiskEvent,
     SessionRun,
     SignalCandidate,
     StrategyConfig,
     StrategyStateEvent,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateJourney:
+    """Read model for candidate -> blocker/order/fill/counterfactual analysis."""
+
+    candidate: SignalCandidate | None
+    market_context: tuple[MarketContextSnapshot, ...]
+    stage_results: tuple[CandidateStageResult, ...]
+    blockers: tuple[BlockerEvent, ...]
+    order_intents: tuple[OrderIntent, ...]
+    broker_orders: tuple[BrokerOrder, ...]
+    order_state_events: tuple[OrderStateEvent, ...]
+    fills: tuple[FillEvent, ...]
+    counterfactuals: tuple[CounterfactualResult, ...]
 
 
 class InstrumentRepository:
@@ -166,6 +190,51 @@ class SessionRunRepository:
         return run
 
 
+class MicroSessionRepository:
+    """CRUD helpers for hourly logical `micro_session` rows."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def create(self, micro_session: MicroSession) -> MicroSession:
+        self._session.add(micro_session)
+        self._session.flush()
+        return micro_session
+
+    def get(self, micro_session_id: str) -> MicroSession | None:
+        return self._session.get(MicroSession, micro_session_id)
+
+    def list_open(self, trading_date: date | None = None) -> list[MicroSession]:
+        stmt = select(MicroSession).where(MicroSession.status.in_(("open", "freezing")))
+        if trading_date is not None:
+            stmt = stmt.where(MicroSession.trading_date == trading_date)
+        stmt = stmt.order_by(MicroSession.started_at)
+        return list(self._session.execute(stmt).scalars())
+
+    def close(
+        self,
+        micro_session_id: str,
+        *,
+        ended_at: datetime,
+        rollover_reason_code: str,
+        snapshot_payload: Mapping[str, object] | None = None,
+    ) -> MicroSession:
+        micro_session = self.get(micro_session_id)
+        if micro_session is None:
+            msg = f"MicroSession not found: {micro_session_id}"
+            raise LookupError(msg)
+        micro_session.status = "closed"
+        micro_session.ended_at = ended_at
+        micro_session.rollover_reason_code = rollover_reason_code
+        if snapshot_payload:
+            micro_session.snapshot_payload = {
+                **micro_session.snapshot_payload,
+                **dict(snapshot_payload),
+            }
+        self._session.flush()
+        return micro_session
+
+
 class StrategyStateEventRepository:
     """Append-only helpers for `strategy_state_event` rows."""
 
@@ -200,6 +269,26 @@ class SignalCandidateRepository:
         candidate.candidate_status = status
         self._session.flush()
         return candidate
+
+
+class CandidateStageResultRepository:
+    """Append-only helpers for candidate decision stage results."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def create(self, result: CandidateStageResult) -> CandidateStageResult:
+        self._session.add(result)
+        self._session.flush()
+        return result
+
+    def list_for_candidate(self, candidate_id: UUID) -> list[CandidateStageResult]:
+        stmt = (
+            select(CandidateStageResult)
+            .where(CandidateStageResult.candidate_id == candidate_id)
+            .order_by(CandidateStageResult.stage_seq)
+        )
+        return list(self._session.execute(stmt).scalars())
 
 
 class BlockerEventRepository:
@@ -288,6 +377,42 @@ class MarketDataRepository:
         return summary
 
 
+class MarketContextSnapshotRepository:
+    """Persistence helpers for explainable market context snapshots."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def create(self, snapshot: MarketContextSnapshot) -> MarketContextSnapshot:
+        self._session.add(snapshot)
+        self._session.flush()
+        return snapshot
+
+    def latest_for_candidate(self, candidate_id: UUID) -> MarketContextSnapshot | None:
+        stmt = (
+            select(MarketContextSnapshot)
+            .where(MarketContextSnapshot.candidate_id == candidate_id)
+            .order_by(MarketContextSnapshot.ts_utc.desc())
+        )
+        return self._session.execute(stmt).scalars().first()
+
+    def latest_for_instrument(
+        self,
+        *,
+        instrument_id: str,
+        timeframe: str,
+    ) -> MarketContextSnapshot | None:
+        stmt = (
+            select(MarketContextSnapshot)
+            .where(
+                MarketContextSnapshot.instrument_id == instrument_id,
+                MarketContextSnapshot.timeframe == timeframe,
+            )
+            .order_by(MarketContextSnapshot.ts_utc.desc())
+        )
+        return self._session.execute(stmt).scalars().first()
+
+
 class OrderRepository:
     """Order repositories with request id based idempotency."""
 
@@ -352,7 +477,11 @@ class OrderRepository:
         if order.lifecycle_seq < existing.lifecycle_seq:
             return existing
 
+        existing.candidate_id = order.candidate_id
+        existing.instrument_id = order.instrument_id
+        existing.timeframe = order.timeframe
         existing.exchange_order_id = order.exchange_order_id
+        existing.tracking_id = order.tracking_id
         existing.broker_status = order.broker_status
         existing.lifecycle_seq = order.lifecycle_seq
         existing.posted_at = order.posted_at
@@ -364,3 +493,186 @@ class OrderRepository:
         existing.broker_payload = order.broker_payload
         self._session.flush()
         return existing
+
+    def create_order_state_event(self, event: OrderStateEvent) -> OrderStateEvent:
+        self._session.add(event)
+        self._session.flush()
+        return event
+
+    def list_order_state_events(self, order_intent_id: UUID) -> list[OrderStateEvent]:
+        stmt = (
+            select(OrderStateEvent)
+            .where(OrderStateEvent.order_intent_id == order_intent_id)
+            .order_by(OrderStateEvent.state_seq, OrderStateEvent.ts_utc)
+        )
+        return list(self._session.execute(stmt).scalars())
+
+
+class AnalyticsReadRepository:
+    """Use-case helpers for frontend report screens and analytics jobs."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def get_candidate_journey(self, candidate_id: UUID) -> CandidateJourney:
+        candidate = self._session.get(SignalCandidate, candidate_id)
+        market_context = tuple(
+            self._session.execute(
+                select(MarketContextSnapshot)
+                .where(MarketContextSnapshot.candidate_id == candidate_id)
+                .order_by(MarketContextSnapshot.ts_utc)
+            ).scalars()
+        )
+        stage_results = tuple(
+            self._session.execute(
+                select(CandidateStageResult)
+                .where(CandidateStageResult.candidate_id == candidate_id)
+                .order_by(CandidateStageResult.stage_seq, CandidateStageResult.ts_utc)
+            ).scalars()
+        )
+        blockers = tuple(
+            self._session.execute(
+                select(BlockerEvent)
+                .where(BlockerEvent.candidate_id == candidate_id)
+                .order_by(BlockerEvent.gate_rank, BlockerEvent.ts_utc)
+            ).scalars()
+        )
+        order_intents = tuple(
+            self._session.execute(
+                select(OrderIntent)
+                .where(OrderIntent.candidate_id == candidate_id)
+                .order_by(OrderIntent.created_ts)
+            ).scalars()
+        )
+        request_order_ids = [intent.request_order_id for intent in order_intents]
+
+        broker_order_conditions = [BrokerOrder.candidate_id == candidate_id]
+        order_state_conditions = [OrderStateEvent.candidate_id == candidate_id]
+        fill_conditions = [FillEvent.candidate_id == candidate_id]
+        if request_order_ids:
+            broker_order_conditions.append(BrokerOrder.request_order_id.in_(request_order_ids))
+            order_state_conditions.append(OrderStateEvent.request_order_id.in_(request_order_ids))
+            fill_conditions.append(FillEvent.request_order_id.in_(request_order_ids))
+
+        broker_orders = tuple(
+            self._session.execute(
+                select(BrokerOrder)
+                .where(or_(*broker_order_conditions))
+                .order_by(BrokerOrder.last_observed_at)
+            ).scalars()
+        )
+        order_state_events = tuple(
+            self._session.execute(
+                select(OrderStateEvent)
+                .where(or_(*order_state_conditions))
+                .order_by(OrderStateEvent.state_seq, OrderStateEvent.ts_utc)
+            ).scalars()
+        )
+        fills = tuple(
+            self._session.execute(
+                select(FillEvent)
+                .where(or_(*fill_conditions))
+                .order_by(FillEvent.ts_utc)
+            ).scalars()
+        )
+        counterfactuals = tuple(
+            self._session.execute(
+                select(CounterfactualResult)
+                .where(CounterfactualResult.candidate_id == candidate_id)
+                .order_by(CounterfactualResult.generated_at)
+            ).scalars()
+        )
+
+        return CandidateJourney(
+            candidate=candidate,
+            market_context=market_context,
+            stage_results=stage_results,
+            blockers=blockers,
+            order_intents=order_intents,
+            broker_orders=broker_orders,
+            order_state_events=order_state_events,
+            fills=fills,
+            counterfactuals=counterfactuals,
+        )
+
+    def recent_candidates(
+        self,
+        *,
+        trading_date: date,
+        instrument_id: str | None = None,
+        timeframe: str | None = None,
+        session_type: str | None = None,
+        limit: int = 100,
+    ) -> list[SignalCandidate]:
+        stmt = select(SignalCandidate).where(SignalCandidate.trading_date == trading_date)
+        if instrument_id is not None:
+            stmt = stmt.where(SignalCandidate.instrument_id == instrument_id)
+        if timeframe is not None:
+            stmt = stmt.where(SignalCandidate.timeframe == timeframe)
+        if session_type is not None:
+            stmt = stmt.where(SignalCandidate.session_type == session_type)
+        stmt = stmt.order_by(SignalCandidate.ts_utc.desc()).limit(limit)
+        return list(self._session.execute(stmt).scalars())
+
+    def blocker_ranking(
+        self,
+        *,
+        trading_date: date,
+        session_type: str | None = None,
+        instrument_id: str | None = None,
+        timeframe: str | None = None,
+        limit: int = 20,
+    ) -> list[tuple[str, int]]:
+        stmt = (
+            select(BlockerEvent.blocker_code, func.count())
+            .where(
+                BlockerEvent.trading_date == trading_date,
+                BlockerEvent.blocker_code.is_not(None),
+            )
+            .group_by(BlockerEvent.blocker_code)
+            .order_by(func.count().desc())
+            .limit(limit)
+        )
+        if session_type is not None:
+            stmt = stmt.where(BlockerEvent.session_type == session_type)
+        if instrument_id is not None:
+            stmt = stmt.where(BlockerEvent.instrument_id == instrument_id)
+        if timeframe is not None:
+            stmt = stmt.where(BlockerEvent.timeframe == timeframe)
+        return [(str(code), int(count)) for code, count in self._session.execute(stmt)]
+
+    def list_hourly_reports(
+        self,
+        *,
+        trading_date: date,
+        session_type: str | None = None,
+        instrument_id: str | None = None,
+        timeframe: str | None = None,
+    ) -> list[HourlyReport]:
+        stmt = select(HourlyReport).where(HourlyReport.trading_date == trading_date)
+        if session_type is not None:
+            stmt = stmt.where(HourlyReport.session_type == session_type)
+        if instrument_id is not None:
+            stmt = stmt.where(HourlyReport.instrument_id == instrument_id)
+        if timeframe is not None:
+            stmt = stmt.where(HourlyReport.timeframe == timeframe)
+        stmt = stmt.order_by(HourlyReport.started_at)
+        return list(self._session.execute(stmt).scalars())
+
+    def list_daily_reports(
+        self,
+        *,
+        trading_date: date,
+        session_type: str | None = None,
+        instrument_id: str | None = None,
+        timeframe: str | None = None,
+    ) -> list[DailyReport]:
+        stmt = select(DailyReport).where(DailyReport.trading_date == trading_date)
+        if session_type is not None:
+            stmt = stmt.where(DailyReport.session_type == session_type)
+        if instrument_id is not None:
+            stmt = stmt.where(DailyReport.instrument_id == instrument_id)
+        if timeframe is not None:
+            stmt = stmt.where(DailyReport.timeframe == timeframe)
+        stmt = stmt.order_by(DailyReport.generated_at.desc())
+        return list(self._session.execute(stmt).scalars())

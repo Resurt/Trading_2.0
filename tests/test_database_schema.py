@@ -9,6 +9,7 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import Session
+from tests.fixtures.analytics_seed import seed_candidate_journey
 
 from trading_common.db.base import Base
 from trading_common.db.models import (
@@ -21,8 +22,10 @@ from trading_common.db.models import (
     StrategyConfig,
 )
 from trading_common.db.repositories import (
+    AnalyticsReadRepository,
     InstrumentRepository,
     MarketDataRepository,
+    MicroSessionRepository,
     OrderRepository,
     SessionRunRepository,
     StrategyConfigRepository,
@@ -38,6 +41,9 @@ PARTITIONED_TABLES = {
     "market_candle",
     "market_status_snapshot",
     "order_book_summary",
+    "market_context_snapshot",
+    "candidate_stage_result",
+    "order_state_event",
 }
 
 
@@ -64,10 +70,14 @@ def test_metadata_contains_required_tables_and_partitioning() -> None:
         "instrument_registry",
         "strategy_config",
         "session_run",
+        "micro_session",
+        "market_context_snapshot",
         "signal_candidate",
+        "candidate_stage_result",
         "blocker_event",
         "order_intent",
         "broker_order",
+        "order_state_event",
         "fill_event",
         "risk_event",
         "position_snapshot",
@@ -352,5 +362,60 @@ def test_repository_crud_and_order_idempotency() -> None:
         assert duplicate_candle is candle
         assert candle.high_price == Decimal("302.00")
         assert summary.instrument_id == "MOEX:SBER"
+
+    engine.dispose()
+
+
+def test_deep_analytics_candidate_journey_helpers() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        seed_ids = seed_candidate_journey(session)
+        analytics = AnalyticsReadRepository(session)
+        micro_sessions = MicroSessionRepository(session)
+        orders = OrderRepository(session)
+
+        journey = analytics.get_candidate_journey(seed_ids.candidate_id)
+
+        assert journey.candidate is not None
+        assert journey.candidate.candidate_status == "blocked"
+        assert len(journey.market_context) == 1
+        assert journey.stage_results[0].stage_name == "risk_gate"
+        assert journey.stage_results[0].blocker_code == "spread_too_wide"
+        assert journey.blockers[0].blocker_family == "market_quality"
+        assert journey.order_intents[0].request_order_id == seed_ids.request_order_id
+        assert journey.broker_orders[0].tracking_id == "tracking-fixture"
+        assert journey.order_state_events[0].cancel_reason_code == "spread_too_wide"
+        assert journey.fills[0].pnl_net == Decimal("3.900000")
+        assert journey.counterfactuals[0].pnl_net == Decimal("3.500000")
+
+        ranking = analytics.blocker_ranking(trading_date=date(2026, 6, 13))
+        assert ranking == [("spread_too_wide", 1)]
+
+        recent_candidates = analytics.recent_candidates(
+            trading_date=date(2026, 6, 13),
+            instrument_id="MOEX:SBER",
+            timeframe="5m",
+        )
+        assert [candidate.candidate_id for candidate in recent_candidates] == [
+            seed_ids.candidate_id
+        ]
+
+        open_micro_sessions = micro_sessions.list_open(date(2026, 6, 13))
+        assert [item.micro_session_id for item in open_micro_sessions] == [
+            seed_ids.micro_session_id
+        ]
+        closed_micro_session = micro_sessions.close(
+            seed_ids.micro_session_id,
+            ended_at=datetime(2026, 6, 13, 11, 0, tzinfo=UTC),
+            rollover_reason_code="hourly_rollover",
+            snapshot_payload={"orders": 1},
+        )
+        assert closed_micro_session.status == "closed"
+        assert closed_micro_session.snapshot_payload["orders"] == 1
+
+        order_state_events = orders.list_order_state_events(seed_ids.order_intent_id)
+        assert [event.state_seq for event in order_state_events] == [1]
 
     engine.dispose()

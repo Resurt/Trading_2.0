@@ -145,6 +145,38 @@ class SessionRun(Base, SessionContextMixin):
     run_payload: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
 
 
+class MicroSession(Base, SessionContextMixin, TimestampMixin):
+    """Physical analytics row for an hourly logical micro-session."""
+
+    __tablename__ = "micro_session"
+    __table_args__ = (
+        Index(
+            "ix_micro_session_scope",
+            "trading_date",
+            "session_type",
+            "instrument_id",
+            "timeframe",
+        ),
+        Index("ix_micro_session_status", "trading_date", "status"),
+    )
+
+    micro_session_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    run_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("session_run.run_id"),
+    )
+    strategy_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    strategy_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    instrument_id: Mapped[str | None] = mapped_column(String(64))
+    timeframe: Mapped[str | None] = mapped_column(String(16))
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="open")
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    freeze_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    rollover_reason_code: Mapped[str | None] = mapped_column(String(64))
+    snapshot_payload: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
+
+
 class SignalCandidate(Base, SessionContextMixin, EventTimestampMixin):
     """Potential trade before blocker/risk/execution gates finish."""
 
@@ -152,6 +184,13 @@ class SignalCandidate(Base, SessionContextMixin, EventTimestampMixin):
     __table_args__ = (
         Index("ix_signal_candidate_trading_date", "trading_date", "session_type"),
         Index("ix_signal_candidate_instrument", "instrument_id", "timeframe"),
+        Index(
+            "ix_signal_candidate_scope",
+            "instrument_id",
+            "timeframe",
+            "trading_date",
+            "session_type",
+        ),
     )
 
     candidate_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
@@ -184,6 +223,102 @@ class SignalCandidate(Base, SessionContextMixin, EventTimestampMixin):
     signal_payload: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
 
 
+class MarketContextSnapshot(Base, SessionContextMixin, EventTimestampMixin):
+    """Feature snapshot used to explain candidates, blockers, and reports."""
+
+    __tablename__ = "market_context_snapshot"
+    __table_args__ = (
+        Index("ix_market_context_candidate", "candidate_id"),
+        Index(
+            "ix_market_context_scope",
+            "instrument_id",
+            "timeframe",
+            "trading_date",
+            "session_type",
+        ),
+        {"postgresql_partition_by": "RANGE (trading_date)"},
+    )
+
+    market_context_snapshot_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    trading_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    candidate_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("signal_candidate.candidate_id"),
+    )
+    instrument_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    timeframe: Mapped[str] = mapped_column(String(16), nullable=False)
+    snapshot_kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    last_price: Mapped[Decimal | None] = mapped_column(PRICE_TYPE)
+    mid_price: Mapped[Decimal | None] = mapped_column(PRICE_TYPE)
+    best_bid_price: Mapped[Decimal | None] = mapped_column(PRICE_TYPE)
+    best_ask_price: Mapped[Decimal | None] = mapped_column(PRICE_TYPE)
+    spread_abs: Mapped[Decimal | None] = mapped_column(PRICE_TYPE)
+    spread_bps: Mapped[Decimal | None] = mapped_column(BPS_TYPE)
+    bid_depth_lots: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    ask_depth_lots: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    book_imbalance: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    market_quality_score: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    candle_age_ms: Mapped[int | None] = mapped_column(Integer)
+    data_freshness_ms: Mapped[int | None] = mapped_column(Integer)
+    feature_snapshot: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
+    explanation_payload: Mapped[JsonPayload] = mapped_column(
+        JSONB_TYPE,
+        nullable=False,
+        default=dict,
+    )
+
+
+class CandidateStageResult(Base, SessionContextMixin, EventTimestampMixin):
+    """Append-only decision journal for every candidate pipeline stage."""
+
+    __tablename__ = "candidate_stage_result"
+    __table_args__ = (
+        Index("ix_candidate_stage_candidate", "candidate_id", "stage_seq"),
+        Index("ix_candidate_stage_blocker", "trading_date", "blocker_code"),
+        Index(
+            "ix_candidate_stage_scope",
+            "instrument_id",
+            "timeframe",
+            "trading_date",
+            "session_type",
+        ),
+        {"postgresql_partition_by": "RANGE (trading_date)"},
+    )
+
+    candidate_stage_result_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    trading_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    candidate_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("signal_candidate.candidate_id"),
+        nullable=False,
+    )
+    instrument_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    timeframe: Mapped[str] = mapped_column(String(16), nullable=False)
+    strategy_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    strategy_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    stage_seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    stage_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    stage_outcome: Mapped[str] = mapped_column(String(32), nullable=False)
+    passed: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    blocker_code: Mapped[str | None] = mapped_column(String(64))
+    blocker_family: Mapped[str | None] = mapped_column(String(64))
+    measured_value: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    threshold_value: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    explanation_payload: Mapped[JsonPayload] = mapped_column(
+        JSONB_TYPE,
+        nullable=False,
+        default=dict,
+    )
+
+
 class BlockerEvent(Base, SessionContextMixin, EventTimestampMixin):
     """Causal gate outcome for blocked and allowed signal candidates."""
 
@@ -191,6 +326,14 @@ class BlockerEvent(Base, SessionContextMixin, EventTimestampMixin):
     __table_args__ = (
         Index("ix_blocker_event_candidate", "candidate_id"),
         Index("ix_blocker_event_reason", "trading_date", "reason_code"),
+        Index("ix_blocker_event_blocker_code", "trading_date", "blocker_code"),
+        Index(
+            "ix_blocker_event_scope",
+            "instrument_id",
+            "timeframe",
+            "trading_date",
+            "session_type",
+        ),
         {"postgresql_partition_by": "RANGE (trading_date)"},
     )
 
@@ -205,12 +348,25 @@ class BlockerEvent(Base, SessionContextMixin, EventTimestampMixin):
         ForeignKey("signal_candidate.candidate_id"),
     )
     instrument_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    timeframe: Mapped[str | None] = mapped_column(String(16))
     strategy_id: Mapped[str] = mapped_column(String(64), nullable=False)
     gate_name: Mapped[str] = mapped_column(String(64), nullable=False)
     gate_rank: Mapped[int] = mapped_column(Integer, nullable=False)
+    stage_seq: Mapped[int | None] = mapped_column(Integer)
+    stage_name: Mapped[str | None] = mapped_column(String(64))
+    stage_outcome: Mapped[str | None] = mapped_column(String(32))
     passed: Mapped[bool] = mapped_column(Boolean, nullable=False)
     reason_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    blocker_code: Mapped[str | None] = mapped_column(String(64))
+    blocker_family: Mapped[str | None] = mapped_column(String(64))
+    measured_value: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    threshold_value: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
     reason_payload: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
+    explanation_payload: Mapped[JsonPayload] = mapped_column(
+        JSONB_TYPE,
+        nullable=False,
+        default=dict,
+    )
     is_final_blocker: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     blocker_rank: Mapped[int | None] = mapped_column(Integer)
     market_quality_score: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
@@ -226,6 +382,14 @@ class OrderIntent(Base, SessionContextMixin):
         UniqueConstraint("request_order_id", name="uq_order_intent_request_order_id"),
         UniqueConstraint("idempotency_key", name="uq_order_intent_idempotency_key"),
         Index("ix_order_intent_lifecycle", "trading_date", "status"),
+        Index("ix_order_intent_candidate", "candidate_id"),
+        Index(
+            "ix_order_intent_scope",
+            "instrument_id",
+            "timeframe",
+            "trading_date",
+            "session_type",
+        ),
     )
 
     order_intent_id: Mapped[UUID] = mapped_column(
@@ -238,7 +402,9 @@ class OrderIntent(Base, SessionContextMixin):
         ForeignKey("signal_candidate.candidate_id"),
     )
     instrument_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    timeframe: Mapped[str | None] = mapped_column(String(16))
     strategy_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    strategy_version: Mapped[int | None] = mapped_column(Integer)
     side: Mapped[str] = mapped_column(String(16), nullable=False)
     order_action: Mapped[str] = mapped_column(String(16), nullable=False, default="place")
     order_type: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -246,6 +412,7 @@ class OrderIntent(Base, SessionContextMixin):
     intended_price: Mapped[Decimal | None] = mapped_column(PRICE_TYPE)
     time_in_force: Mapped[str] = mapped_column(String(32), nullable=False)
     request_order_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    tracking_id: Mapped[str | None] = mapped_column(String(128))
     idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False)
     execution_policy_version: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="created")
@@ -265,6 +432,14 @@ class BrokerOrder(Base, SessionContextMixin):
         UniqueConstraint("request_order_id", name="uq_broker_order_request_order_id"),
         Index("ix_broker_order_exchange_order_id", "exchange_order_id", unique=True),
         Index("ix_broker_order_status", "trading_date", "broker_status"),
+        Index("ix_broker_order_candidate", "candidate_id"),
+        Index(
+            "ix_broker_order_scope",
+            "instrument_id",
+            "timeframe",
+            "trading_date",
+            "session_type",
+        ),
     )
 
     broker_order_id: Mapped[UUID] = mapped_column(
@@ -276,8 +451,12 @@ class BrokerOrder(Base, SessionContextMixin):
         Uuid(as_uuid=True),
         ForeignKey("order_intent.order_intent_id"),
     )
+    candidate_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
+    instrument_id: Mapped[str | None] = mapped_column(String(64))
+    timeframe: Mapped[str | None] = mapped_column(String(16))
     request_order_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
     exchange_order_id: Mapped[str | None] = mapped_column(String(96))
+    tracking_id: Mapped[str | None] = mapped_column(String(128))
     broker_status: Mapped[str] = mapped_column(String(64), nullable=False)
     lifecycle_seq: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     posted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -287,6 +466,53 @@ class BrokerOrder(Base, SessionContextMixin):
     broker_tracking_id: Mapped[str | None] = mapped_column(String(128))
     last_observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     broker_payload: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
+
+
+class OrderStateEvent(Base, SessionContextMixin, EventTimestampMixin):
+    """Append-only broker order state transition event."""
+
+    __tablename__ = "order_state_event"
+    __table_args__ = (
+        Index("ix_order_state_candidate", "candidate_id"),
+        Index("ix_order_state_intent_seq", "order_intent_id", "state_seq"),
+        Index("ix_order_state_request_order_id", "request_order_id"),
+        Index("ix_order_state_exchange_order_id", "exchange_order_id"),
+        Index(
+            "ix_order_state_scope",
+            "instrument_id",
+            "timeframe",
+            "trading_date",
+            "session_type",
+        ),
+        {"postgresql_partition_by": "RANGE (trading_date)"},
+    )
+
+    order_state_event_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    trading_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    candidate_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
+    order_intent_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("order_intent.order_intent_id"),
+    )
+    broker_order_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
+    instrument_id: Mapped[str | None] = mapped_column(String(64))
+    timeframe: Mapped[str | None] = mapped_column(String(16))
+    request_order_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
+    exchange_order_id: Mapped[str | None] = mapped_column(String(96))
+    tracking_id: Mapped[str | None] = mapped_column(String(128))
+    state_seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    previous_state: Mapped[str | None] = mapped_column(String(64))
+    new_state: Mapped[str] = mapped_column(String(64), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    reason_code: Mapped[str | None] = mapped_column(String(64))
+    cancel_reason_code: Mapped[str | None] = mapped_column(String(64))
+    reject_reason_code: Mapped[str | None] = mapped_column(String(64))
+    latency_ms: Mapped[Decimal | None] = mapped_column(Numeric(20, 4))
+    state_payload: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
 
 
 class FillEvent(Base, SessionContextMixin, EventTimestampMixin):
@@ -301,6 +527,14 @@ class FillEvent(Base, SessionContextMixin, EventTimestampMixin):
             name="uq_fill_event_exchange_fill",
         ),
         Index("ix_fill_event_request_order_id", "request_order_id"),
+        Index("ix_fill_event_candidate", "candidate_id"),
+        Index(
+            "ix_fill_event_scope",
+            "instrument_id",
+            "timeframe",
+            "trading_date",
+            "session_type",
+        ),
         {"postgresql_partition_by": "RANGE (trading_date)"},
     )
 
@@ -310,14 +544,23 @@ class FillEvent(Base, SessionContextMixin, EventTimestampMixin):
         default=uuid4,
     )
     trading_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    candidate_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
+    order_intent_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
     request_order_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
     exchange_order_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    tracking_id: Mapped[str | None] = mapped_column(String(128))
     broker_fill_id: Mapped[str] = mapped_column(String(96), nullable=False)
     instrument_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    timeframe: Mapped[str | None] = mapped_column(String(16))
     side: Mapped[str] = mapped_column(String(16), nullable=False)
     lot_qty: Mapped[int] = mapped_column(Integer, nullable=False)
     price: Mapped[Decimal] = mapped_column(PRICE_TYPE, nullable=False)
     commission: Mapped[Decimal] = mapped_column(MONEY_TYPE, nullable=False)
+    commission_gross: Mapped[Decimal | None] = mapped_column(MONEY_TYPE)
+    commission_net: Mapped[Decimal | None] = mapped_column(MONEY_TYPE)
+    slippage_bp: Mapped[Decimal | None] = mapped_column(BPS_TYPE)
+    pnl_gross: Mapped[Decimal | None] = mapped_column(MONEY_TYPE)
+    pnl_net: Mapped[Decimal | None] = mapped_column(MONEY_TYPE)
     liquidity_flag: Mapped[str | None] = mapped_column(String(32))
     fill_payload: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
 
@@ -326,12 +569,23 @@ class RiskEvent(Base, SessionContextMixin, EventTimestampMixin):
     """Risk engine decision or limit observation."""
 
     __tablename__ = "risk_event"
-    __table_args__ = (Index("ix_risk_event_reason", "trading_date", "reason_code"),)
+    __table_args__ = (
+        Index("ix_risk_event_reason", "trading_date", "reason_code"),
+        Index("ix_risk_event_candidate", "candidate_id"),
+        Index(
+            "ix_risk_event_scope",
+            "instrument_id",
+            "timeframe",
+            "trading_date",
+            "session_type",
+        ),
+    )
 
     risk_event_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     candidate_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
     order_intent_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
     instrument_id: Mapped[str | None] = mapped_column(String(64))
+    timeframe: Mapped[str | None] = mapped_column(String(16))
     risk_rule: Mapped[str] = mapped_column(String(64), nullable=False)
     severity: Mapped[str] = mapped_column(String(32), nullable=False)
     reason_code: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -497,6 +751,7 @@ class HourlyReport(Base, SessionContextMixin):
     __table_args__ = (
         UniqueConstraint("micro_session_id", "strategy_id", name="uq_hourly_report_micro_strategy"),
         Index("ix_hourly_report_trading_date", "trading_date", "session_type"),
+        Index("ix_hourly_report_scope", "instrument_id", "timeframe", "trading_date"),
     )
 
     hourly_report_id: Mapped[UUID] = mapped_column(
@@ -510,11 +765,17 @@ class HourlyReport(Base, SessionContextMixin):
     )
     strategy_id: Mapped[str] = mapped_column(String(64), nullable=False)
     instrument_id: Mapped[str | None] = mapped_column(String(64))
+    timeframe: Mapped[str | None] = mapped_column(String(16))
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     ended_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     realised_pnl: Mapped[Decimal | None] = mapped_column(MONEY_TYPE)
     unrealised_pnl: Mapped[Decimal | None] = mapped_column(MONEY_TYPE)
     commission: Mapped[Decimal | None] = mapped_column(MONEY_TYPE)
+    commission_gross: Mapped[Decimal | None] = mapped_column(MONEY_TYPE)
+    commission_net: Mapped[Decimal | None] = mapped_column(MONEY_TYPE)
+    slippage_bp: Mapped[Decimal | None] = mapped_column(BPS_TYPE)
+    pnl_gross: Mapped[Decimal | None] = mapped_column(MONEY_TYPE)
+    pnl_net: Mapped[Decimal | None] = mapped_column(MONEY_TYPE)
     signal_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     entry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     exit_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -535,6 +796,7 @@ class DailyReport(Base):
     __table_args__ = (
         Index("ix_daily_report_trading_date", "trading_date"),
         Index("ix_daily_report_scope", "trading_date", "strategy_id", "session_type"),
+        Index("ix_daily_report_instrument_timeframe", "instrument_id", "timeframe", "trading_date"),
     )
 
     daily_report_id: Mapped[UUID] = mapped_column(
@@ -550,9 +812,15 @@ class DailyReport(Base):
     broker_trading_status: Mapped[str | None] = mapped_column(String(64))
     strategy_id: Mapped[str] = mapped_column(String(64), nullable=False)
     instrument_id: Mapped[str | None] = mapped_column(String(64))
+    timeframe: Mapped[str | None] = mapped_column(String(16))
     market_regime: Mapped[str] = mapped_column(String(32), nullable=False)
     realised_pnl: Mapped[Decimal | None] = mapped_column(MONEY_TYPE)
     commission: Mapped[Decimal | None] = mapped_column(MONEY_TYPE)
+    commission_gross: Mapped[Decimal | None] = mapped_column(MONEY_TYPE)
+    commission_net: Mapped[Decimal | None] = mapped_column(MONEY_TYPE)
+    slippage_bp: Mapped[Decimal | None] = mapped_column(BPS_TYPE)
+    pnl_gross: Mapped[Decimal | None] = mapped_column(MONEY_TYPE)
+    pnl_net: Mapped[Decimal | None] = mapped_column(MONEY_TYPE)
     signal_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     blocked_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     fill_ratio: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
@@ -567,6 +835,13 @@ class CounterfactualResult(Base, SessionContextMixin):
     __table_args__ = (
         Index("ix_counterfactual_candidate", "candidate_id"),
         Index("ix_counterfactual_reason", "trading_date", "blocker_code", "cancel_reason_code"),
+        Index(
+            "ix_counterfactual_scope",
+            "instrument_id",
+            "timeframe",
+            "trading_date",
+            "session_type",
+        ),
         {"postgresql_partition_by": "RANGE (trading_date)"},
     )
 
@@ -580,11 +855,15 @@ class CounterfactualResult(Base, SessionContextMixin):
     order_intent_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
     source_event_type: Mapped[str] = mapped_column(String(32), nullable=False)
     instrument_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    timeframe: Mapped[str | None] = mapped_column(String(16))
     strategy_id: Mapped[str] = mapped_column(String(64), nullable=False)
     blocker_code: Mapped[str | None] = mapped_column(String(64))
     cancel_reason_code: Mapped[str | None] = mapped_column(String(64))
     fee_bps_assumed: Mapped[Decimal] = mapped_column(BPS_TYPE, nullable=False)
     slippage_bps_assumed: Mapped[Decimal] = mapped_column(BPS_TYPE, nullable=False)
+    slippage_bp: Mapped[Decimal | None] = mapped_column(BPS_TYPE)
+    pnl_gross: Mapped[Decimal | None] = mapped_column(MONEY_TYPE)
+    pnl_net: Mapped[Decimal | None] = mapped_column(MONEY_TYPE)
     mfe_5m_bps: Mapped[Decimal | None] = mapped_column(BPS_TYPE)
     mae_5m_bps: Mapped[Decimal | None] = mapped_column(BPS_TYPE)
     mfe_10m_bps: Mapped[Decimal | None] = mapped_column(BPS_TYPE)

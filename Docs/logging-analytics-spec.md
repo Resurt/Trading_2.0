@@ -20,6 +20,10 @@
 
 Сырые технические логи не должны становиться основным аналитическим источником в файлах или PostgreSQL.
 
+## PostgreSQL analytics schema
+
+Каноническое описание таблиц бизнес-фактов, partitioning, ключей корреляции и read-model helpers находится в [logging_analytics_schema.md](logging_analytics_schema.md). Этот документ является детальной схемой для `session_run`, `micro_session`, `signal_candidate`, `candidate_stage_result`, `blocker_event`, `order_intent`, `broker_order`, `order_state_event`, `fill_event`, `market_context_snapshot`, `counterfactual_result`, `hourly_report`, `daily_report` и `audit_event`.
+
 ## JSON structured logging
 
 Технические логи пишутся в JSON через стандартный Python logging.
