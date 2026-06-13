@@ -14,10 +14,10 @@ frontend-build:
 	cd apps/frontend && $(NPM) run build
 
 up:
-	@echo "Docker Compose stack will be implemented in step 02. No services started."
+	docker compose up -d --build
 
 down:
-	@echo "Docker Compose stack will be implemented in step 02. No services stopped."
+	docker compose down
 
 logs:
-	@echo "Docker Compose logs will be available after step 02."
+	docker compose logs -f --tail=200

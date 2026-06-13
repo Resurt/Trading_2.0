@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: Trading 2.0
+    orgId: 1
+    folder: Trading 2.0
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /var/lib/grafana/dashboards

@@ -55,3 +55,33 @@ cd apps/frontend && npm run build
 ```bash
 python scripts/check.py
 ```
+
+## Локальный Docker Compose
+
+Создайте локальные Docker secrets в папке `secrets/` и не коммитьте их:
+
+```bash
+mkdir -p secrets
+printf "local_postgres_password" > secrets/postgres_password
+printf "local_grafana_password" > secrets/grafana_admin_password
+printf "paste_full_access_token_here" > secrets/tbank_full_access_token
+printf "paste_readonly_token_here" > secrets/tbank_readonly_token
+```
+
+Запуск:
+
+```bash
+docker compose up -d --build
+docker compose ps
+docker compose logs -f --tail=200
+```
+
+Локальные адреса:
+
+- frontend: `http://localhost:5173`
+- api health: `http://localhost:8000/health`
+- trade-core health: `http://localhost:8001/health`
+- report-worker health: `http://localhost:8002/health`
+- Prometheus: `http://localhost:9090`
+- Grafana: `http://localhost:3000`
+- Loki: `http://localhost:3100/ready`
