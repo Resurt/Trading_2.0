@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
 from uuid import UUID
 
@@ -9,13 +10,16 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from trading_common.db.models import (
+    BlockerEvent,
     BrokerOrder,
     InstrumentRegistry,
     MarketCandle,
     MarketStatusSnapshot,
     OrderBookSummary,
     OrderIntent,
+    RiskEvent,
     SessionRun,
+    SignalCandidate,
     StrategyConfig,
     StrategyStateEvent,
 )
@@ -174,6 +178,54 @@ class StrategyStateEventRepository:
         return event
 
 
+class SignalCandidateRepository:
+    """Append and update helpers for `signal_candidate` rows."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def create(self, candidate: SignalCandidate) -> SignalCandidate:
+        self._session.add(candidate)
+        self._session.flush()
+        return candidate
+
+    def get(self, candidate_id: UUID) -> SignalCandidate | None:
+        return self._session.get(SignalCandidate, candidate_id)
+
+    def update_status(self, candidate_id: UUID, status: str) -> SignalCandidate:
+        candidate = self.get(candidate_id)
+        if candidate is None:
+            msg = f"SignalCandidate not found: {candidate_id}"
+            raise LookupError(msg)
+        candidate.candidate_status = status
+        self._session.flush()
+        return candidate
+
+
+class BlockerEventRepository:
+    """Append-only helpers for causal risk blocker events."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def create(self, event: BlockerEvent) -> BlockerEvent:
+        self._session.add(event)
+        self._session.flush()
+        return event
+
+
+class RiskEventRepository:
+    """Append-only helpers for risk decisions and limit events."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def create(self, event: RiskEvent) -> RiskEvent:
+        self._session.add(event)
+        self._session.flush()
+        return event
+
+
 class MarketDataRepository:
     """Persistence helpers for market candles and lightweight market snapshots."""
 
@@ -246,11 +298,43 @@ class OrderRepository:
         stmt = select(OrderIntent).where(OrderIntent.request_order_id == request_order_id)
         return self._session.execute(stmt).scalar_one_or_none()
 
+    def get_intent_by_idempotency_key(self, idempotency_key: str) -> OrderIntent | None:
+        stmt = select(OrderIntent).where(OrderIntent.idempotency_key == idempotency_key)
+        return self._session.execute(stmt).scalar_one_or_none()
+
     def create_intent_idempotent(self, intent: OrderIntent) -> OrderIntent:
         existing = self.get_intent_by_request_order_id(intent.request_order_id)
         if existing is not None:
             return existing
+        existing_by_key = self.get_intent_by_idempotency_key(intent.idempotency_key)
+        if existing_by_key is not None:
+            return existing_by_key
         self._session.add(intent)
+        self._session.flush()
+        return intent
+
+    def update_intent_status(
+        self,
+        intent: OrderIntent,
+        *,
+        status: str,
+        submitted_ts: datetime | None = None,
+        terminal_ts: datetime | None = None,
+        cancel_reason_code: str | None = None,
+        reject_reason_code: str | None = None,
+        payload_patch: Mapping[str, object] | None = None,
+    ) -> OrderIntent:
+        intent.status = status
+        if submitted_ts is not None:
+            intent.submitted_ts = submitted_ts
+        if terminal_ts is not None:
+            intent.terminal_ts = terminal_ts
+        if cancel_reason_code is not None:
+            intent.cancel_reason_code = cancel_reason_code
+        if reject_reason_code is not None:
+            intent.reject_reason_code = reject_reason_code
+        if payload_patch:
+            intent.intent_payload = {**intent.intent_payload, **dict(payload_patch)}
         self._session.flush()
         return intent
 

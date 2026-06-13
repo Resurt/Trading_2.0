@@ -249,6 +249,8 @@
 - order intent lifecycle;
 - cancel/reject reason codes.
 
+Реализация шага зафиксирована в `Docs/strategy-risk-execution.md`.
+
 Критерии готовности:
 
 - каждая заблокированная или отмененная попытка имеет reason code;
