@@ -24,6 +24,7 @@
 - `Docs/database-schema.md`
 - `Docs/broker-gateway.md`
 - `Docs/session-manager.md`
+- `Docs/market-data-pipeline.md`
 - все ADR из `Docs/adr/`
 
 Если в ходе задачи меняется архитектурное решение, нужно обновить `Docs/` и соответствующий ADR в том же шаге.
@@ -31,9 +32,9 @@
 ## Текущее состояние
 
 На этом этапе зафиксирована документация проекта, создан monorepo-каркас, добавлены
-инфраструктурный compose-стек, схема PostgreSQL, BrokerGateway для T-Bank и
-сессионная модель с hourly micro-sessions. Бизнес-логика торговой стратегии еще
-не реализуется.
+инфраструктурный compose-стек, схема PostgreSQL, BrokerGateway для T-Bank,
+сессионная модель с hourly micro-sessions и market data pipeline с bar engine.
+Бизнес-логика торговой стратегии еще не реализуется.
 
 ## Каркас репозитория
 

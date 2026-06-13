@@ -225,6 +225,8 @@
 - bar engine для 5m/10m/15m closed bars;
 - market state calculators.
 
+Реализация шага зафиксирована в `Docs/market-data-pipeline.md`.
+
 Критерии готовности:
 
 - replay tests воспроизводят бары детерминированно;

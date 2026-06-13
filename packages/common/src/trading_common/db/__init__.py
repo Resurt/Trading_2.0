@@ -3,6 +3,7 @@
 from trading_common.db.base import Base
 from trading_common.db.repositories import (
     InstrumentRepository,
+    MarketDataRepository,
     OrderRepository,
     SessionRunRepository,
     StrategyConfigRepository,
@@ -14,6 +15,7 @@ __all__ = [
     "Base",
     "DatabaseService",
     "InstrumentRepository",
+    "MarketDataRepository",
     "OrderRepository",
     "SessionRunRepository",
     "StrategyConfigRepository",

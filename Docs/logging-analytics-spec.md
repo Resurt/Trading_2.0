@@ -140,6 +140,9 @@ analytics_context:
 - `fill_event`
 - `risk_event`
 - `position_snapshot`
+- `market_candle`
+- `market_status_snapshot`
+- `order_book_summary`
 - `strategy_state_event`
 - `hourly_report`
 - `daily_report`

@@ -46,6 +46,15 @@ risk_event
 position_snapshot
   keyed by micro-session + instrument + account + snapshot_ts
 
+market_candle
+  closed candles and bars by instrument + timeframe + UTC bucket
+
+market_status_snapshot
+  broker status/info observations by instrument + ts_utc
+
+order_book_summary
+  lightweight book summaries by instrument + ts_utc
+
 hourly_report
   one report per micro_session_id + strategy_id
 
@@ -70,6 +79,9 @@ audit_event
 | `fill_event` | Исполнения и частичные исполнения. |
 | `risk_event` | Решения risk engine и нарушения лимитов. |
 | `position_snapshot` | Снимки позиции на границах micro-session и risk events. |
+| `market_candle` | Закрытые свечи и бары с UTC/exchange timestamps. |
+| `market_status_snapshot` | Нормализованные status/info snapshots. |
+| `order_book_summary` | Lightweight агрегаты стакана без хранения полного стакана на каждый тик. |
 | `strategy_state_event` | Переходы состояния стратегии для replay/diagnostics. |
 | `hourly_report` | Агрегат по закрытой micro-session. |
 | `daily_report` | Дневной агрегат по `trading_date`. |
@@ -85,6 +97,9 @@ audit_event
 - `blocker_event` - много gate-level событий на каждого `signal_candidate`.
 - `strategy_state_event` - поток state transitions для replay.
 - `counterfactual_result` - тяжелая аналитика blocked/cancelled cases по датам.
+- `market_candle` - поток свечей и закрытых баров для replay и калибровки.
+- `market_status_snapshot` - поток broker status/info observations.
+- `order_book_summary` - частые lightweight snapshots стакана без полного raw book.
 
 В стартовой миграции создаются default partitions:
 
@@ -93,14 +108,18 @@ audit_event
 - `blocker_event_default`
 - `strategy_state_event_default`
 - `counterfactual_result_default`
+- `market_candle_default`
+- `market_status_snapshot_default`
+- `order_book_summary_default`
 
 Следующие миграции могут добавлять месячные или дневные partitions без изменения application layer.
 
 ## Миграции
 
-Текущая миграция:
+Текущие миграции:
 
 - `20260613_0001_initial_postgres_schema.py`
+- `20260613_0002_market_data_tables.py`
 
 Команды:
 

@@ -11,6 +11,9 @@ from sqlalchemy.orm import Session
 from trading_common.db.models import (
     BrokerOrder,
     InstrumentRegistry,
+    MarketCandle,
+    MarketStatusSnapshot,
+    OrderBookSummary,
     OrderIntent,
     SessionRun,
     StrategyConfig,
@@ -169,6 +172,68 @@ class StrategyStateEventRepository:
         self._session.add(event)
         self._session.flush()
         return event
+
+
+class MarketDataRepository:
+    """Persistence helpers for market candles and lightweight market snapshots."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def get_candle(
+        self,
+        *,
+        instrument_id: str,
+        timeframe: str,
+        open_ts_utc: datetime,
+    ) -> MarketCandle | None:
+        stmt = select(MarketCandle).where(
+            MarketCandle.instrument_id == instrument_id,
+            MarketCandle.timeframe == timeframe,
+            MarketCandle.open_ts_utc == open_ts_utc,
+        )
+        return self._session.execute(stmt).scalars().first()
+
+    def upsert_candle(self, candle: MarketCandle) -> MarketCandle:
+        existing = self.get_candle(
+            instrument_id=candle.instrument_id,
+            timeframe=candle.timeframe,
+            open_ts_utc=candle.open_ts_utc,
+        )
+        if existing is None:
+            self._session.add(candle)
+            self._session.flush()
+            return candle
+
+        existing.close_ts_utc = candle.close_ts_utc
+        existing.exchange_open_ts = candle.exchange_open_ts
+        existing.exchange_close_ts = candle.exchange_close_ts
+        existing.open_price = candle.open_price
+        existing.high_price = candle.high_price
+        existing.low_price = candle.low_price
+        existing.close_price = candle.close_price
+        existing.volume_lots = candle.volume_lots
+        existing.is_closed = candle.is_closed
+        existing.source = candle.source
+        existing.candle_payload = candle.candle_payload
+        existing.calendar_date = candle.calendar_date
+        existing.trading_date = candle.trading_date
+        existing.session_type = candle.session_type
+        existing.session_phase = candle.session_phase
+        existing.micro_session_id = candle.micro_session_id
+        existing.broker_trading_status = candle.broker_trading_status
+        self._session.flush()
+        return existing
+
+    def save_status_snapshot(self, snapshot: MarketStatusSnapshot) -> MarketStatusSnapshot:
+        self._session.add(snapshot)
+        self._session.flush()
+        return snapshot
+
+    def save_order_book_summary(self, summary: OrderBookSummary) -> OrderBookSummary:
+        self._session.add(summary)
+        self._session.flush()
+        return summary
 
 
 class OrderRepository:

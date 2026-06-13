@@ -14,12 +14,15 @@ from trading_common.db.base import Base
 from trading_common.db.models import (
     BrokerOrder,
     InstrumentRegistry,
+    MarketCandle,
+    OrderBookSummary,
     OrderIntent,
     SessionRun,
     StrategyConfig,
 )
 from trading_common.db.repositories import (
     InstrumentRepository,
+    MarketDataRepository,
     OrderRepository,
     SessionRunRepository,
     StrategyConfigRepository,
@@ -32,6 +35,9 @@ PARTITIONED_TABLES = {
     "blocker_event",
     "strategy_state_event",
     "counterfactual_result",
+    "market_candle",
+    "market_status_snapshot",
+    "order_book_summary",
 }
 
 
@@ -70,6 +76,9 @@ def test_metadata_contains_required_tables_and_partitioning() -> None:
         "daily_report",
         "counterfactual_result",
         "audit_event",
+        "market_candle",
+        "market_status_snapshot",
+        "order_book_summary",
     }
 
     assert required_tables <= set(Base.metadata.tables)
@@ -96,6 +105,7 @@ def test_alembic_upgrade_and_downgrade_on_sqlite(tmp_path: Path) -> None:
         assert "instrument_registry" in table_names
         assert "order_intent" in table_names
         assert "counterfactual_result" in table_names
+        assert "market_candle" in table_names
         assert list(tickers) == ["GAZP", "LKOH", "SBER"]
 
     command.downgrade(config, "base")
@@ -115,6 +125,7 @@ def test_repository_crud_and_order_idempotency() -> None:
         strategy_configs = StrategyConfigRepository(session)
         session_runs = SessionRunRepository(session)
         orders = OrderRepository(session)
+        market_data = MarketDataRepository(session)
 
         instrument = instruments.upsert(
             InstrumentRegistry(
@@ -276,5 +287,70 @@ def test_repository_crud_and_order_idempotency() -> None:
         assert fresh_update is broker_order
         assert broker_order.broker_status == "cancelled"
         assert broker_order.lifecycle_seq == 2
+
+        candle = market_data.upsert_candle(
+            MarketCandle(
+                **context_values(),
+                instrument_id="MOEX:SBER",
+                timeframe="5m",
+                open_ts_utc=now,
+                close_ts_utc=now,
+                exchange_open_ts=now,
+                exchange_close_ts=now,
+                open_price=Decimal("300.00"),
+                high_price=Decimal("301.00"),
+                low_price=Decimal("299.50"),
+                close_price=Decimal("300.50"),
+                volume_lots=Decimal("10"),
+                is_closed=True,
+                source="test",
+                candle_payload={},
+            )
+        )
+        duplicate_candle = market_data.upsert_candle(
+            MarketCandle(
+                **context_values(),
+                instrument_id="MOEX:SBER",
+                timeframe="5m",
+                open_ts_utc=now,
+                close_ts_utc=now,
+                exchange_open_ts=now,
+                exchange_close_ts=now,
+                open_price=Decimal("300.00"),
+                high_price=Decimal("302.00"),
+                low_price=Decimal("299.50"),
+                close_price=Decimal("301.50"),
+                volume_lots=Decimal("12"),
+                is_closed=True,
+                source="test",
+                candle_payload={"updated": True},
+            )
+        )
+        summary = market_data.save_order_book_summary(
+            OrderBookSummary(
+                **context_values(),
+                ts_utc=now,
+                exchange_ts=now,
+                received_ts=now,
+                instrument_id="MOEX:SBER",
+                depth_levels=2,
+                best_bid_price=Decimal("300.00"),
+                best_bid_qty_lots=Decimal("5"),
+                best_ask_price=Decimal("300.10"),
+                best_ask_qty_lots=Decimal("4"),
+                mid_price=Decimal("300.05"),
+                spread_abs=Decimal("0.10"),
+                spread_bps=Decimal("3.3330"),
+                bid_depth_lots=Decimal("10"),
+                ask_depth_lots=Decimal("8"),
+                book_imbalance=Decimal("0.1111"),
+                market_quality_score=Decimal("0.9000"),
+                summary_payload={},
+            )
+        )
+
+        assert duplicate_candle is candle
+        assert candle.high_price == Decimal("302.00")
+        assert summary.instrument_id == "MOEX:SBER"
 
     engine.dispose()

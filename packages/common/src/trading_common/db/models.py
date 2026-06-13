@@ -375,6 +375,96 @@ class PositionSnapshot(Base, SessionContextMixin):
     snapshot_payload: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
 
 
+class MarketCandle(Base, SessionContextMixin):
+    """Closed or explicitly marked forming market candle for analytics and replay."""
+
+    __tablename__ = "market_candle"
+    __table_args__ = (
+        UniqueConstraint(
+            "instrument_id",
+            "timeframe",
+            "open_ts_utc",
+            "trading_date",
+            name="uq_market_candle_bucket",
+        ),
+        Index("ix_market_candle_lookup", "instrument_id", "timeframe", "open_ts_utc"),
+        {"postgresql_partition_by": "RANGE (trading_date)"},
+    )
+
+    market_candle_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    trading_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    instrument_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    timeframe: Mapped[str] = mapped_column(String(16), nullable=False)
+    open_ts_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    close_ts_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    exchange_open_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    exchange_close_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    open_price: Mapped[Decimal] = mapped_column(PRICE_TYPE, nullable=False)
+    high_price: Mapped[Decimal] = mapped_column(PRICE_TYPE, nullable=False)
+    low_price: Mapped[Decimal] = mapped_column(PRICE_TYPE, nullable=False)
+    close_price: Mapped[Decimal] = mapped_column(PRICE_TYPE, nullable=False)
+    volume_lots: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False)
+    is_closed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    candle_payload: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
+
+
+class MarketStatusSnapshot(Base, SessionContextMixin, EventTimestampMixin):
+    """Broker market status observation normalized for analytics."""
+
+    __tablename__ = "market_status_snapshot"
+    __table_args__ = (
+        Index("ix_market_status_instrument_ts", "instrument_id", "ts_utc"),
+        {"postgresql_partition_by": "RANGE (trading_date)"},
+    )
+
+    market_status_snapshot_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    trading_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    instrument_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    trading_status: Mapped[str] = mapped_column(String(64), nullable=False)
+    api_trade_available: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    status_payload: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
+
+
+class OrderBookSummary(Base, SessionContextMixin, EventTimestampMixin):
+    """Lightweight order book aggregate; full tick-level book is not stored."""
+
+    __tablename__ = "order_book_summary"
+    __table_args__ = (
+        Index("ix_order_book_summary_instrument_ts", "instrument_id", "ts_utc"),
+        {"postgresql_partition_by": "RANGE (trading_date)"},
+    )
+
+    order_book_summary_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    trading_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    instrument_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    depth_levels: Mapped[int] = mapped_column(Integer, nullable=False)
+    best_bid_price: Mapped[Decimal | None] = mapped_column(PRICE_TYPE)
+    best_bid_qty_lots: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    best_ask_price: Mapped[Decimal | None] = mapped_column(PRICE_TYPE)
+    best_ask_qty_lots: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    mid_price: Mapped[Decimal | None] = mapped_column(PRICE_TYPE)
+    spread_abs: Mapped[Decimal | None] = mapped_column(PRICE_TYPE)
+    spread_bps: Mapped[Decimal | None] = mapped_column(BPS_TYPE)
+    bid_depth_lots: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False)
+    ask_depth_lots: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False)
+    book_imbalance: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    market_quality_score: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    summary_payload: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
+
+
 class StrategyStateEvent(Base, SessionContextMixin, EventTimestampMixin):
     """Strategy state transition event for replay and diagnostics."""
 
