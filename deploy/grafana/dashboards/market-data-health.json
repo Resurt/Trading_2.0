@@ -1,0 +1,62 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "panels": [
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "targets": [
+        {
+          "expr": "market_stream_alive",
+          "legendFormat": "{{stream_name}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Market Stream Alive",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "id": 2,
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(candle_close_delivery_lag_seconds_bucket[5m])) by (le, instrument_id, timeframe))",
+          "legendFormat": "p95 {{instrument_id}} {{timeframe}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Candle Delivery Lag p95",
+      "type": "timeseries"
+    }
+  ],
+  "schemaVersion": 42,
+  "tags": ["trading-2-0", "market-data"],
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "Market Data Health",
+  "uid": "trading-market-data-health",
+  "version": 1
+}

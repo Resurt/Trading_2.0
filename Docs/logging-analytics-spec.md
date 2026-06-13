@@ -26,12 +26,28 @@
 
 Контекст должен автоматически прокидываться через `contextvars`, `LoggerAdapter` или logging filters.
 
+Реализация шага 08:
+
+- общий пакет: `trading_common.observability`;
+- контекст: `contextvars` через `log_context(...)`;
+- formatter: `JsonLogFormatter`;
+- filter: `LogContextFilter`;
+- настройка stdout JSON logs: `configure_json_logging(service=...)`;
+- endpoint `/metrics`: `TradingMetrics` + Prometheus exposition format.
+
+### Canonical log schema
+
+Каждая строка technical log должна быть валидным JSON object.
+
 Минимальные поля, где применимо:
 
 - `ts_utc`
 - `exchange_tz_ts`
 - `level`
+- `logger`
 - `service`
+- `event_type`
+- `message`
 - `run_id`
 - `session_type`
 - `session_phase`
@@ -52,11 +68,94 @@
 - `latency_ms`
 - `tracking_id`
 - `rate_limit_remaining`
-- `event_type`
+- `rate_limit_limit`
+- `rate_limit_reset`
 - `error_code`
 - `error_message`
+- `cancel_reason_code`
+- `reject_reason_code`
 
 Технический лог может быть неполным для событий, где части контекста еще нет. Но если контекст известен, он должен быть прокинут.
+
+Каноническая структура:
+
+```json
+{
+  "ts_utc": "2026-06-13T10:00:00.000000+00:00",
+  "level": "INFO",
+  "logger": "trade_core.execution",
+  "service": "trade-core",
+  "event_type": "broker_order_posted",
+  "message": "broker order posted",
+  "run_id": "uuid",
+  "session_type": "weekday_main",
+  "session_phase": "continuous_trading",
+  "micro_session_id": "2026-06-13:weekday_main:1000",
+  "instrument_id": "MOEX:SBER",
+  "timeframe": "5m",
+  "strategy_id": "baseline",
+  "candidate_id": "uuid",
+  "blocker_id": "uuid",
+  "order_intent_id": "uuid",
+  "request_order_id": "uuid",
+  "exchange_order_id": "string",
+  "tracking_id": "string",
+  "rate_limit_limit": 100,
+  "rate_limit_remaining": 99,
+  "rate_limit_reset": "2026-06-13T10:01:00+00:00",
+  "latency_ms": 42,
+  "error_code": null,
+  "error_message": null,
+  "cancel_reason_code": null,
+  "reject_reason_code": null
+}
+```
+
+### Strict event types
+
+Строгие `event_type` для доменных событий и корреляции логов:
+
+- `signal_candidate_created`
+- `blocker_triggered`
+- `order_intent_created`
+- `broker_order_posted`
+- `broker_order_updated`
+- `broker_order_cancelled`
+- `fill_received`
+- `strategy_state_changed`
+- `risk_event_recorded`
+- `session_snapshot_written`
+
+Свободный текст может быть в `message`, но смысл события должен задаваться `event_type` и structured fields.
+
+### Loki labels scheme
+
+Loki labels должны быть низкой/ограниченной кардинальности:
+
+- `job`
+- `environment`
+- `container_name`
+- `source`
+- `service`
+- `level`
+- `event_type`
+- `session_type`
+- `session_phase`
+- `instrument_id`
+- `timeframe`
+
+Запрещено выносить в Loki labels значения с высокой кардинальностью:
+
+- `run_id`
+- `candidate_id`
+- `blocker_id`
+- `order_intent_id`
+- `request_order_id`
+- `exchange_order_id`
+- `tracking_id`
+- exception text
+
+Эти поля остаются внутри JSON body и доступны через log query/parsing, но не индексируются как labels.
 
 ## Канонический контекст domain events
 
@@ -363,8 +462,6 @@ Counters:
 - `reconnect_total`
 - `rejected_orders_total`
 - `risk_events_total`
-- `blocked_candidates_total`
-- `cancelled_orders_total`
 
 Gauges:
 
@@ -372,6 +469,41 @@ Gauges:
 - `active_positions`
 - `market_stream_alive`
 - `last_closed_candle_age_seconds`
-- `current_micro_session_seconds_remaining`
 
 Prometheus labels не должны содержать raw ids или exception text.
+
+### Prometheus label scheme
+
+Разрешенные bounded labels:
+
+- `service`
+- `runtime_mode`
+- `broker_method`
+- `session_type`
+- `session_phase`
+- `instrument_id`
+- `timeframe`
+- `reason_code`
+- `stream_name`
+
+Запрещенные labels:
+
+- raw order ids;
+- candidate ids;
+- blocker ids;
+- request/exchange order ids;
+- exception text;
+- произвольный free-text reason.
+
+### Grafana dashboards
+
+Provisioning находится в `deploy/grafana/provisioning`.
+
+Dashboard files:
+
+- `broker-api-health.json`
+- `market-data-health.json`
+- `order-execution-quality.json`
+- `risk-blockers.json`
+- `session-rollovers.json`
+- `trading-overview.json`

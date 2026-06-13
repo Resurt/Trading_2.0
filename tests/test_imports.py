@@ -19,6 +19,8 @@ def test_service_skeletons_default_to_replay_mode() -> None:
 
 def test_health_and_metrics_payloads_are_renderable() -> None:
     health = trade_core_health()
+    metrics = render_metrics(health)
 
     assert b'"service": "trade-core"' in render_health(health)
-    assert b'trading_service_up{service="trade-core"' in render_metrics(health)
+    assert b"trading_service_up" in metrics
+    assert b'service="trade-core"' in metrics

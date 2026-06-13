@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Final
 
 from trading_common.models import ServiceHealth
+from trading_common.observability.metrics import TradingMetrics
 
 CONTENT_TYPE_JSON: Final = "application/json; charset=utf-8"
 CONTENT_TYPE_TEXT: Final = "text/plain; version=0.0.4; charset=utf-8"
@@ -27,28 +29,15 @@ def render_health(health: ServiceHealth) -> bytes:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
 
 
-def render_metrics(health: ServiceHealth) -> bytes:
-    """Render a tiny Prometheus metrics payload."""
+def render_metrics(target: ServiceHealth | TradingMetrics) -> bytes:
+    """Render Prometheus metrics payload."""
 
-    service = str(health.identity.service)
-    runtime_mode = str(health.identity.runtime_mode)
-    is_up = 1 if str(health.status) == "ok" else 0
-    lines = [
-        "# HELP trading_service_up Service health status exposed by the local skeleton.",
-        "# TYPE trading_service_up gauge",
-        f'trading_service_up{{service="{service}",runtime_mode="{runtime_mode}"}} {is_up}',
-        "# HELP trading_service_info Static service identity information.",
-        "# TYPE trading_service_info gauge",
-        (
-            'trading_service_info{'
-            f'service="{service}",'
-            f'version="{health.identity.version}",'
-            f'runtime_mode="{runtime_mode}"'
-            "} 1"
-        ),
-        "",
-    ]
-    return "\n".join(lines).encode("utf-8")
+    if isinstance(target, ServiceHealth):
+        metrics = TradingMetrics(target.identity)
+        metrics.set_service_health(target.status)
+        return metrics.render()
+    metrics = target
+    return metrics.render()
 
 
 def run_health_server(
@@ -60,6 +49,8 @@ def run_health_server(
 
     bind_host = host if host is not None else os.environ.get("HOST") or "0.0.0.0"
     bind_port = port if port is not None else int(os.getenv("PORT", "8000"))
+    metrics = TradingMetrics(health.identity)
+    metrics.set_service_health(health.status)
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
@@ -67,7 +58,8 @@ def run_health_server(
                 self._write_response(HTTPStatus.OK, CONTENT_TYPE_JSON, render_health(health))
                 return
             if self.path == "/metrics":
-                self._write_response(HTTPStatus.OK, CONTENT_TYPE_TEXT, render_metrics(health))
+                metrics.set_service_health(health.status)
+                self._write_response(HTTPStatus.OK, CONTENT_TYPE_TEXT, render_metrics(metrics))
                 return
             self._write_response(HTTPStatus.NOT_FOUND, CONTENT_TYPE_TEXT, b"not found\n")
 
@@ -82,18 +74,14 @@ def run_health_server(
             self.wfile.write(body)
 
     server = ThreadingHTTPServer((bind_host, bind_port), Handler)
-    print(
-        json.dumps(
-            {
-                "event_type": "service_started",
-                "service": health.identity.service,
-                "runtime_mode": health.identity.runtime_mode,
-                "host": bind_host,
-                "port": bind_port,
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-        ),
-        flush=True,
+    logging.getLogger("trading_common.http_health").info(
+        "service started",
+        extra={
+            "event_type": "service_started",
+            "service": health.identity.service,
+            "runtime_mode": health.identity.runtime_mode,
+            "host": bind_host,
+            "port": bind_port,
+        },
     )
     server.serve_forever()

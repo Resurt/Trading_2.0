@@ -1,0 +1,62 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "panels": [
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(session_rollover_duration_seconds_bucket[5m])) by (le, session_type))",
+          "legendFormat": "p95 {{session_type}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Session Rollover Duration p95",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "id": 2,
+      "targets": [
+        {
+          "expr": "sum(active_positions) by (instrument_id)",
+          "legendFormat": "{{instrument_id}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Active Positions",
+      "type": "timeseries"
+    }
+  ],
+  "schemaVersion": 42,
+  "tags": ["trading-2-0", "sessions"],
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "Session Rollovers",
+  "uid": "trading-session-rollovers",
+  "version": 1
+}

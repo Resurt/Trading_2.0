@@ -23,6 +23,7 @@ from trade_core.strategy.models import (
 )
 from trading_common.db.models import BrokerOrder, OrderIntent
 from trading_common.db.repositories import OrderRepository
+from trading_common.observability import DomainEventType
 
 
 class DefaultExecutionEngine:
@@ -76,6 +77,7 @@ class DefaultExecutionEngine:
             submitted_ts=None,
             terminal_ts=None,
             intent_payload={
+                "event_type": DomainEventType.ORDER_INTENT_CREATED.value,
                 "account_id": request.account_id,
                 "run_id": str(request.run_id) if request.run_id is not None else None,
                 "instrument_uid": request.candidate.instrument.instrument_uid,
@@ -252,6 +254,7 @@ class DefaultExecutionEngine:
             broker_tracking_id=_response_str(response.headers, "x-tracking-id"),
             last_observed_at=observed_at,
             broker_payload={
+                "event_type": _broker_event_type(default_status),
                 "method_name": response.method_name,
                 "data": _json_payload(response.data),
                 "headers": _json_payload(response.headers),
@@ -325,8 +328,17 @@ def _lifecycle_result(
         exchange_order_id=broker_order.exchange_order_id,
         broker_status=broker_order.broker_status,
         payload={
+            "event_type": _broker_event_type(broker_order.broker_status),
             "broker_method": response.method_name,
             "broker_data": _json_payload(response.data),
             "broker_headers": _json_payload(response.headers),
         },
     )
+
+
+def _broker_event_type(status: str) -> str:
+    if status == "posted":
+        return DomainEventType.BROKER_ORDER_POSTED.value
+    if status == "cancelled":
+        return DomainEventType.BROKER_ORDER_CANCELLED.value
+    return DomainEventType.BROKER_ORDER_UPDATED.value

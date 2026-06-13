@@ -26,6 +26,7 @@ from trading_common.db.repositories import (
     SignalCandidateRepository,
     StrategyStateEventRepository,
 )
+from trading_common.observability import DomainEventType
 
 
 class SqlAlchemyStrategyEventStore:
@@ -116,6 +117,7 @@ class SqlAlchemyStrategyEventStore:
             ),
             signal_fingerprint=decision.signal_fingerprint,
             signal_payload={
+                "event_type": DomainEventType.SIGNAL_CANDIDATE_CREATED.value,
                 "order_type": decision.order_type,
                 "lot_qty": decision.lot_qty,
                 "time_in_force": decision.time_in_force,
@@ -153,7 +155,10 @@ class SqlAlchemyStrategyEventStore:
                         gate_rank=blocker.gate_rank,
                         passed=blocker.passed,
                         reason_code=blocker.code.value,
-                        reason_payload=blocker.reason_payload,
+                        reason_payload={
+                            "event_type": DomainEventType.BLOCKER_TRIGGERED.value,
+                            **blocker.reason_payload,
+                        },
                         is_final_blocker=blocker.is_final_blocker,
                         blocker_rank=blocker.gate_rank if not blocker.passed else None,
                         market_quality_score=(
@@ -201,7 +206,10 @@ class SqlAlchemyStrategyEventStore:
                     limit_value=blocker.limit_value,
                     observed_value=blocker.observed_value,
                     action_taken="block_candidate" if blocker.is_final_blocker else "observe",
-                    risk_payload=blocker.reason_payload,
+                    risk_payload={
+                        "event_type": DomainEventType.RISK_EVENT_RECORDED.value,
+                        **blocker.reason_payload,
+                    },
                 )
             )
             for blocker in failed_blockers

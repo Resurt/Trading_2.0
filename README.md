@@ -36,6 +36,8 @@
 инфраструктурный compose-стек, схема PostgreSQL, BrokerGateway для T-Bank,
 сессионная модель с hourly micro-sessions, market data pipeline с bar engine и
 каркас strategy/risk/execution/reconciliation без прибыльной бизнес-логики.
+Также добавлены structured JSON logging, Prometheus metrics registry и Grafana
+dashboards provisioning для production-like observability.
 
 ## Каркас репозитория
 
