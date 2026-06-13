@@ -26,90 +26,129 @@
 
 Контекст должен автоматически прокидываться через `contextvars`, `LoggerAdapter` или logging filters.
 
-Реализация шага 08:
+Реализация foundation:
 
-- общий пакет: `trading_common.observability`;
-- контекст: `contextvars` через `log_context(...)`;
+- основной пакет: `trading_common.telemetry`;
+- совместимый старый импорт: `trading_common.observability`;
+- контекст: `contextvars` через `bind_context(...)` / `log_context(...)`;
 - formatter: `JsonLogFormatter`;
-- filter: `LogContextFilter`;
-- настройка stdout JSON logs: `configure_json_logging(service=...)`;
+- filters: `LogContextFilter` и `RedactionFilter`;
+- настройка stdout JSON logs через `dictConfig`: `configure_logging(...)` или `configure_json_logging(service=...)`;
+- helper API: `get_logger()`, `bind_context()`, `clear_context()`, `log_event(event_type=..., **payload)`;
+- dev text formatter допустим через `TRADING_LOG_FORMAT=text`, production/default path остается JSON в stdout;
 - endpoint `/metrics`: `TradingMetrics` + Prometheus exposition format.
+
+Severity rule: `level` отражает техническую важность записи (`INFO`,
+`WARNING`, `ERROR`), а доменный смысл всегда идет через `event_type`,
+`event_name`, `stage_name` и `payload`. Нельзя кодировать бизнес-смысл только
+через `WARNING`/`ERROR` или free-text `message`.
+
+Redaction rule: `Authorization`, bearer/basic headers, tokens, passwords,
+secrets, API keys и credential-like поля должны редактироваться фильтром до
+попадания в stdout/Loki.
 
 ### Canonical log schema
 
 Каждая строка technical log должна быть валидным JSON object.
 
-Минимальные поля, где применимо:
+Обязательные поля каждой JSON-строки:
 
 - `ts_utc`
-- `exchange_tz_ts`
+- `exchange_ts`
 - `level`
-- `logger`
 - `service`
+- `component`
 - `event_type`
-- `message`
-- `run_id`
+- `event_version`
 - `session_type`
-- `session_phase`
+- `exchange_phase`
 - `micro_session_id`
-- `instrument_id`
+- `instrument`
 - `timeframe`
 - `strategy_id`
+- `strategy_version`
 - `candidate_id`
-- `blocker_id`
-- `signal_id`
 - `order_intent_id`
 - `request_order_id`
 - `exchange_order_id`
-- `position_side`
-- `qty_lots`
-- `price`
-- `commission`
-- `latency_ms`
 - `tracking_id`
-- `rate_limit_remaining`
-- `rate_limit_limit`
-- `rate_limit_reset`
+- `latency_ms`
 - `error_code`
 - `error_message`
-- `cancel_reason_code`
-- `reject_reason_code`
+- `payload`
 
-Технический лог может быть неполным для событий, где части контекста еще нет. Но если контекст известен, он должен быть прокинут.
+Поля присутствуют всегда. Если значение еще неизвестно, оно равно `null`.
+Дополнительные поля совместимости (`logger`, `message`, `run_id`,
+`session_phase`, `instrument_id`, `blocker_id`, `cancel_reason_code`,
+`reject_reason_code`) могут присутствовать сверх обязательной схемы, но новые
+интеграции должны читать канонические `exchange_phase` и `instrument`.
 
 Каноническая структура:
 
 ```json
 {
-  "ts_utc": "2026-06-13T10:00:00.000000+00:00",
+  "ts_utc": "2026-06-13T10:00:00.000000Z",
+  "exchange_ts": "2026-06-13T10:00:00+03:00",
   "level": "INFO",
-  "logger": "trade_core.execution",
   "service": "trade-core",
+  "component": "execution.engine",
   "event_type": "broker_order_posted",
-  "message": "broker order posted",
-  "run_id": "uuid",
+  "event_version": "1",
   "session_type": "weekday_main",
-  "session_phase": "continuous_trading",
+  "exchange_phase": "continuous",
   "micro_session_id": "2026-06-13:weekday_main:1000",
-  "instrument_id": "MOEX:SBER",
+  "instrument": "MOEX:SBER",
   "timeframe": "5m",
   "strategy_id": "baseline",
+  "strategy_version": "v1",
   "candidate_id": "uuid",
-  "blocker_id": "uuid",
   "order_intent_id": "uuid",
   "request_order_id": "uuid",
   "exchange_order_id": "string",
   "tracking_id": "string",
-  "rate_limit_limit": 100,
-  "rate_limit_remaining": 99,
-  "rate_limit_reset": "2026-06-13T10:01:00+00:00",
   "latency_ms": 42,
   "error_code": null,
   "error_message": null,
-  "cancel_reason_code": null,
-  "reject_reason_code": null
+  "payload": {
+    "event_name": "broker order posted",
+    "stage_name": "post_order",
+    "rate_limit_limit": 100,
+    "rate_limit_remaining": 99,
+    "rate_limit_reset": "2026-06-13T10:01:00+00:00"
+  }
 }
 ```
+
+### Python helper API
+
+```python
+from trading_common.telemetry import bind_context, get_logger, log_event
+
+logger = get_logger(__name__)
+
+with bind_context(
+    candidate_id=candidate_id,
+    instrument="MOEX:SBER",
+    timeframe="5m",
+    strategy_version="v1",
+    session_type="weekday_main",
+    exchange_phase="continuous",
+    micro_session_id=micro_session_id,
+    order_intent_id=order_intent_id,
+):
+    log_event(
+        logger=logger,
+        event_type="order_intent_created",
+        component="execution.engine",
+        stage_name="intent_creation",
+        latency_ms=12.5,
+        order_type="limit",
+    )
+```
+
+Legacy aliases `session_phase` and `instrument_id` пока поддерживаются для
+существующего кода, но новый код должен использовать `exchange_phase` и
+`instrument`.
 
 ### Strict event types
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import os
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -11,6 +10,7 @@ from typing import Final
 
 from trading_common.models import ServiceHealth
 from trading_common.observability.metrics import TradingMetrics
+from trading_common.telemetry import log_event
 
 CONTENT_TYPE_JSON: Final = "application/json; charset=utf-8"
 CONTENT_TYPE_TEXT: Final = "text/plain; version=0.0.4; charset=utf-8"
@@ -74,14 +74,13 @@ def run_health_server(
             self.wfile.write(body)
 
     server = ThreadingHTTPServer((bind_host, bind_port), Handler)
-    logging.getLogger("trading_common.http_health").info(
-        "service started",
-        extra={
-            "event_type": "service_started",
-            "service": health.identity.service,
-            "runtime_mode": health.identity.runtime_mode,
-            "host": bind_host,
-            "port": bind_port,
-        },
+    log_event(
+        logger="trading_common.http_health",
+        event_type="service_started",
+        component="http_health",
+        service=health.identity.service,
+        runtime_mode=health.identity.runtime_mode,
+        host=bind_host,
+        port=bind_port,
     )
     server.serve_forever()

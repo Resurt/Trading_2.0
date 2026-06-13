@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 from collections.abc import AsyncIterator, Mapping
 from datetime import datetime
 from decimal import Decimal
@@ -34,9 +33,10 @@ from trade_core.infra.tbank.protocols import TBankStreamClient, TBankUnaryClient
 from trade_core.infra.tbank.retry import ExponentialBackoff, retry_async
 from trade_core.infra.tbank.secrets import TBankTokenBundle, load_tbank_tokens
 from trade_core.infra.tbank.streams import StreamSupervisor
+from trading_common.telemetry import get_logger, log_event
 
 JsonPayload = dict[str, Any]
-LOGGER = logging.getLogger(__name__)
+LOGGER = get_logger(__name__)
 
 
 class TBankBrokerGateway:
@@ -250,9 +250,13 @@ class TBankBrokerGateway:
         )
 
     async def recover_after_stream_gap(self, stream_name: str) -> None:
-        LOGGER.warning(
-            "tbank_stream_gap_recovery_required",
-            extra={"stream_name": stream_name, "target": self.config.target},
+        log_event(
+            logger=LOGGER,
+            level="WARNING",
+            event_type="tbank_stream_gap_recovery_required",
+            component="tbank.gateway",
+            stream_name=stream_name,
+            target=self.config.target,
         )
 
     async def _call_readonly(
@@ -332,12 +336,13 @@ class TBankBrokerGateway:
 
     def _build_response(self, method_name: str, result: UnaryCallResult) -> BrokerUnaryResponse:
         response_headers = capture_response_headers(result.headers)
-        LOGGER.info(
-            "tbank_unary_response_headers",
-            extra={
-                "method_name": method_name,
-                **response_headers.as_log_context(),
-            },
+        log_event(
+            logger=LOGGER,
+            event_type="tbank_unary_response_headers",
+            component="tbank.gateway",
+            tracking_id=response_headers.tracking_id,
+            method_name=method_name,
+            headers=response_headers.as_log_context(),
         )
         return BrokerUnaryResponse(
             method_name=method_name,

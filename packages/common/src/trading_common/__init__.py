@@ -9,7 +9,16 @@ from trading_common.launch_modes import (
     parse_runtime_mode,
 )
 from trading_common.models import AppIdentity, HealthStatus, ServiceHealth, TradingContext
-from trading_common.observability import DomainEventType, TradingMetrics, configure_json_logging
+from trading_common.observability import (
+    DomainEventType,
+    TradingMetrics,
+    bind_context,
+    clear_log_context,
+    configure_json_logging,
+    configure_logging,
+    get_logger,
+    log_event,
+)
 
 __all__ = [
     "AppIdentity",
@@ -26,6 +35,11 @@ __all__ = [
     "TRADING_RUNTIME_MODE_ENV",
     "TradingMetrics",
     "TradingContext",
+    "bind_context",
+    "clear_log_context",
     "configure_json_logging",
+    "configure_logging",
+    "get_logger",
+    "log_event",
     "parse_runtime_mode",
 ]
