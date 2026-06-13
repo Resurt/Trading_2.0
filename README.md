@@ -30,6 +30,7 @@
 - `Docs/market-data-pipeline.md`
 - `Docs/strategy-risk-execution.md`
 - `Docs/observability_runbook.md`
+- `Docs/live-analytics-bff.md`
 - все ADR из `Docs/adr/`
 
 Если в ходе задачи меняется архитектурное решение, нужно обновить `Docs/` и соответствующий ADR в том же шаге.

@@ -255,6 +255,31 @@ const reports = useReportsStore();
         </DataPanel>
 
         <DataPanel>
+          <template #eyebrow>streams</template>
+          <template #title>Stream health / reconnect</template>
+          <dl class="definition-grid">
+            <dt>dashboard</dt>
+            <dd><StatusPill :code="robot.liveConnection" /></dd>
+            <dt>market</dt>
+            <dd><StatusPill :code="market.liveConnection" /></dd>
+            <dt>orders</dt>
+            <dd><StatusPill :code="portfolio.liveConnection" /></dd>
+            <dt>reports</dt>
+            <dd><StatusPill :code="reports.liveConnection" /></dd>
+            <dt>reconnect status</dt>
+            <dd>
+              {{
+                [robot.liveConnection, market.liveConnection, portfolio.liveConnection, reports.liveConnection].includes(
+                  "degraded",
+                )
+                  ? "reconnect attention required"
+                  : "no reconnect pressure"
+              }}
+            </dd>
+          </dl>
+        </DataPanel>
+
+        <DataPanel>
           <template #eyebrow>reports</template>
           <template #title>Latest hourly report</template>
           <dl v-if="reports.latestHourly" class="definition-grid">

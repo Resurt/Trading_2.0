@@ -542,6 +542,19 @@ dd {
   font-size: 13px;
 }
 
+.inline-action {
+  margin-right: var(--space-2);
+  border: 0;
+  background: transparent;
+  color: var(--color-info);
+  cursor: pointer;
+  font: inherit;
+}
+
+.inline-action:hover {
+  color: var(--color-text-primary);
+}
+
 .empty-state {
   padding: var(--space-3);
   border: 1px dashed var(--color-border);

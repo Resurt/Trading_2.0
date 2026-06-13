@@ -1,4 +1,7 @@
 import type {
+  BlockerAnalyticsResponse,
+  CandidateFunnelResponse,
+  CanceledOrderDiagnosticsResponse,
   CounterfactualResponse,
   DailyReportResponse,
   DailyReportRunRequest,
@@ -7,6 +10,8 @@ import type {
   OrderResponse,
   PositionResponse,
   ReportJobResponse,
+  ReportJobStatusResponse,
+  ReportRebuildRequest,
   RobotStatusResponse,
   SessionSnapshotResponse,
   SignalResponse,
@@ -20,7 +25,7 @@ const DEFAULT_WS_BASE_URL = "ws://localhost:8000";
 export const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? DEFAULT_API_BASE_URL;
 export const wsBaseUrl = import.meta.env.VITE_WS_BASE_URL ?? DEFAULT_WS_BASE_URL;
 
-type QueryValue = string | number | boolean | null | undefined;
+export type QueryValue = string | number | boolean | null | undefined;
 
 export function withQuery(path: string, query: Record<string, QueryValue>): string {
   const params = new URLSearchParams();
@@ -66,6 +71,14 @@ export const apiClient = {
     requestJson<DailyReportResponse[]>(withQuery("/reports/daily", query)),
   counterfactualReports: (query: Record<string, QueryValue>) =>
     requestJson<CounterfactualResponse[]>(withQuery("/reports/counterfactual", query)),
+  blockerAnalytics: (query: Record<string, QueryValue>) =>
+    requestJson<BlockerAnalyticsResponse>(withQuery("/analytics/blockers", query)),
+  candidateFunnel: (query: Record<string, QueryValue>) =>
+    requestJson<CandidateFunnelResponse>(withQuery("/analytics/candidate-funnel", query)),
+  canceledOrderDiagnostics: (query: Record<string, QueryValue>) =>
+    requestJson<CanceledOrderDiagnosticsResponse>(withQuery("/analytics/canceled-orders", query)),
+  reportJobStatus: (jobId: string) =>
+    requestJson<ReportJobStatusResponse>(`/reports/jobs/${encodeURIComponent(jobId)}`),
   strategyConfig: (strategyId: string, sessionTemplate: string) =>
     requestJson<StrategyConfigResponse>(
       withQuery("/config/strategy", {
@@ -84,6 +97,12 @@ export const apiClient = {
   rebuildDailyReport: (payload: DailyReportRunRequest) =>
     requestJson<ReportJobResponse>(
       "/reports/daily/run",
+      { method: "POST", body: JSON.stringify(payload) },
+      "operator",
+    ),
+  rebuildReport: (payload: ReportRebuildRequest) =>
+    requestJson<ReportJobResponse>(
+      "/reports/rebuild/run",
       { method: "POST", body: JSON.stringify(payload) },
       "operator",
     ),

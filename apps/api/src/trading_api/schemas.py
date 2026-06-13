@@ -24,6 +24,11 @@ class RobotCommand(StrEnum):
     STOP = "stop"
 
 
+class ReportScope(StrEnum):
+    HOURLY = "hourly"
+    DAILY = "daily"
+
+
 class RobotCommandResponse(BaseModel):
     accepted: bool
     command: RobotCommand
@@ -127,6 +132,7 @@ class HourlyReportResponse(BaseModel):
     micro_session_id: str
     strategy_id: str
     instrument_id: str | None = None
+    timeframe: str | None = None
     realised_pnl: Decimal | None = None
     commission: Decimal | None = None
     signal_count: int
@@ -142,6 +148,7 @@ class DailyReportResponse(BaseModel):
     market_regime: str
     session_type: str | None = None
     instrument_id: str | None = None
+    timeframe: str | None = None
     realised_pnl: Decimal | None = None
     commission: Decimal | None = None
     signal_count: int
@@ -157,9 +164,19 @@ class CounterfactualResponse(BaseModel):
     order_intent_id: UUID | None = None
     source_event_type: str
     instrument_id: str
+    timeframe: str | None = None
     strategy_id: str
     blocker_code: str | None = None
     cancel_reason_code: str | None = None
+    pnl_gross: Decimal | None = None
+    pnl_net: Decimal | None = None
+    slippage_bp: Decimal | None = None
+    mfe_5m_bps: Decimal | None = None
+    mae_5m_bps: Decimal | None = None
+    mfe_10m_bps: Decimal | None = None
+    mae_10m_bps: Decimal | None = None
+    mfe_15m_bps: Decimal | None = None
+    mae_15m_bps: Decimal | None = None
     would_profit_5m: bool | None = None
     would_profit_10m: bool | None = None
     would_profit_15m: bool | None = None
@@ -172,11 +189,89 @@ class DailyReportRunRequest(BaseModel):
     include_counterfactual: bool = True
 
 
+class ReportRebuildRequest(BaseModel):
+    scope: ReportScope = ReportScope.DAILY
+    trading_date: date
+    strategy_id: str
+    micro_session_id: str | None = None
+    instrument_id: str | None = None
+    timeframe: str | None = None
+    session_type: str | None = None
+    strategy_version: int | None = None
+    include_counterfactual: bool = True
+    force_rebuild: bool = True
+
+
 class ReportJobResponse(BaseModel):
     job_id: str
     task_name: str
     status: str
     payload: JsonPayload = Field(default_factory=dict)
+
+
+class ReportJobStatusResponse(BaseModel):
+    job_id: str
+    task_name: str
+    status: str
+    ready: bool
+    successful: bool
+    failed: bool
+    result: JsonPayload | None = None
+    error: str | None = None
+    payload: JsonPayload = Field(default_factory=dict)
+
+
+class BlockerAnalyticsRow(BaseModel):
+    blocker_code: str
+    blocker_family: str | None = None
+    count: int
+    terminal_count: int
+    candidate_count: int
+    measured_value_avg: Decimal | None = None
+    threshold_value_avg: Decimal | None = None
+    missed_pnl_gross: Decimal | None = None
+    missed_pnl_net: Decimal | None = None
+    avoided_loss: Decimal | None = None
+    false_positive_rate: Decimal | None = None
+    explanation_payload: JsonPayload = Field(default_factory=dict)
+
+
+class BlockerAnalyticsResponse(BaseModel):
+    generated_at: datetime
+    filters: JsonPayload = Field(default_factory=dict)
+    rows: list[BlockerAnalyticsRow]
+
+
+class CandidateFunnelStage(BaseModel):
+    stage_name: str
+    count: int
+    percentage_of_created: Decimal | None = None
+    payload: JsonPayload = Field(default_factory=dict)
+
+
+class CandidateFunnelResponse(BaseModel):
+    generated_at: datetime
+    filters: JsonPayload = Field(default_factory=dict)
+    stages: list[CandidateFunnelStage]
+    totals: JsonPayload = Field(default_factory=dict)
+
+
+class CanceledOrderDiagnosticsRow(BaseModel):
+    cancel_reason_code: str
+    count: int
+    missed_pnl_gross: Decimal | None = None
+    missed_pnl_net: Decimal | None = None
+    avoided_loss: Decimal | None = None
+    would_profit_5m_count: int = 0
+    would_profit_10m_count: int = 0
+    would_profit_15m_count: int = 0
+    explanation_payload: JsonPayload = Field(default_factory=dict)
+
+
+class CanceledOrderDiagnosticsResponse(BaseModel):
+    generated_at: datetime
+    filters: JsonPayload = Field(default_factory=dict)
+    rows: list[CanceledOrderDiagnosticsRow]
 
 
 class StrategyConfigResponse(BaseModel):

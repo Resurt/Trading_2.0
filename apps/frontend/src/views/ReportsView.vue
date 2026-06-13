@@ -28,6 +28,13 @@ const blockerBars = computed(() =>
     code: String(row.reason_code ?? "unknown"),
   })),
 );
+const counterfactualBars = computed(() =>
+  reports.counterfactualHorizonRows.map((row) => ({
+    label: row.label,
+    value: row.value,
+    code: `MFE ${formatDecimal(row.mfe, 1)} / MAE ${formatDecimal(row.mae, 1)}`,
+  })),
+);
 
 function toBars(record: Record<string, unknown>) {
   return Object.entries(record).map(([label, value]) => {
@@ -90,20 +97,43 @@ function toBars(record: Record<string, unknown>) {
           <span>strategy_id</span>
           <input v-model="reports.filters.strategyId" />
         </label>
+        <label>
+          <span>strategy_version</span>
+          <input v-model="reports.filters.strategyVersion" inputmode="numeric" placeholder="all" />
+        </label>
         <div class="filter-actions">
-          <button class="icon-button" type="submit">
+          <button class="icon-button" type="submit" :disabled="reports.loading">
             <RefreshCw :size="16" aria-hidden="true" />
-            <span>Refresh</span>
+            <span>{{ reports.loading ? "Loading" : "Refresh" }}</span>
           </button>
           <button class="icon-button icon-button--good" type="button" @click="reports.rebuildDailyReport">
             <RefreshCw :size="16" aria-hidden="true" />
             <span>Rebuild daily</span>
           </button>
+          <button
+            v-if="reports.latestHourly"
+            class="icon-button"
+            type="button"
+            @click="reports.rebuildReport('hourly', reports.latestHourly.micro_session_id)"
+          >
+            <RefreshCw :size="16" aria-hidden="true" />
+            <span>Rebuild hour</span>
+          </button>
         </div>
       </form>
+      <EmptyState
+        v-if="reports.loading"
+        title="Loading reports"
+        detail="BFF is reading report snapshots and analytics marts."
+      />
       <EmptyState v-if="reports.error" title="Reports degraded" :detail="reports.error" tone="warn" />
       <p v-if="reports.latestJob" class="job-status">
+        <button class="inline-action" type="button" @click="reports.refreshLatestJobStatus">check status</button>
         {{ reports.latestJob.status }} · {{ reports.latestJob.task_name }} · {{ reports.latestJob.job_id }}
+      </p>
+      <p v-if="reports.latestJobStatus" class="job-status">
+        job status: {{ reports.latestJobStatus.status }}
+        <span v-if="reports.latestJobStatus.error">error: {{ reports.latestJobStatus.error }}</span>
       </p>
     </DataPanel>
 
@@ -112,6 +142,7 @@ function toBars(record: Record<string, unknown>) {
         label="Market regime"
         :value="String(trend.market_regime ?? reports.latestDaily?.market_regime ?? 'Нет данных')"
         :code="reports.latestDaily?.market_regime"
+        :detail="String(trend.algorithm ?? 'daily regime card')"
       />
       <MetricTile
         label="Average return"
@@ -130,6 +161,24 @@ function toBars(record: Record<string, unknown>) {
     </div>
 
     <div class="reports-grid">
+      <DataPanel>
+        <template #eyebrow>daily regime</template>
+        <template #title>Daily regime card</template>
+        <dl v-if="reports.latestDaily" class="definition-grid">
+          <dt>regime</dt>
+          <dd><StatusPill :code="reports.latestDaily.market_regime" /></dd>
+          <dt>instrument</dt>
+          <dd>{{ reports.latestDaily.instrument_id ?? "all" }}</dd>
+          <dt>timeframe</dt>
+          <dd>{{ reports.latestDaily.timeframe ?? "all" }}</dd>
+          <dt>explainability</dt>
+          <dd>
+            {{ String(trend.explanation ?? reports.latestDaily.payload.explainability ?? "stored in report payload") }}
+          </dd>
+        </dl>
+        <EmptyState v-else title="No daily regime yet" />
+      </DataPanel>
+
       <DataPanel>
         <template #eyebrow>daily</template>
         <template #title>Daily reports</template>
@@ -197,6 +246,28 @@ function toBars(record: Record<string, unknown>) {
       </DataPanel>
 
       <DataPanel>
+        <template #eyebrow>hourly</template>
+        <template #title>Micro-session timeline</template>
+        <MiniBars v-if="reports.hourlyTimelineBars.length" :rows="reports.hourlyTimelineBars" />
+        <EmptyState
+          v-else
+          title="Timeline is empty"
+          detail="Hourly reports will form a micro-session timeline after rollovers."
+        />
+      </DataPanel>
+
+      <DataPanel>
+        <template #eyebrow>funnel</template>
+        <template #title>Candidate funnel</template>
+        <MiniBars v-if="reports.candidateFunnelBars.length" :rows="reports.candidateFunnelBars" />
+        <EmptyState
+          v-else
+          title="Candidate funnel is empty"
+          detail="signal_candidate and order lifecycle facts are not available for these filters."
+        />
+      </DataPanel>
+
+      <DataPanel>
         <template #eyebrow>blockers</template>
         <template #title>Blocker ranking</template>
         <MiniBars v-if="blockerBars.length" :rows="blockerBars" />
@@ -239,6 +310,92 @@ function toBars(record: Record<string, unknown>) {
             detail="counterfactual_result пока не показал profitable windows."
           />
         </div>
+      </DataPanel>
+
+      <DataPanel>
+        <template #eyebrow>blockers</template>
+        <template #title>Что нас тормозит</template>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>blocker_code</th>
+                <th>count</th>
+                <th>missed net</th>
+                <th>false positive</th>
+                <th>explainability</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in reports.blockerAnalytics.rows" :key="row.blocker_code">
+                <td><StatusPill :code="row.blocker_code" compact /></td>
+                <td>{{ row.count }}</td>
+                <td>{{ formatMoney(row.missed_pnl_net) }}</td>
+                <td>{{ formatPercentRatio(row.false_positive_rate) }}</td>
+                <td>
+                  {{
+                    String(
+                      row.explanation_payload.summary ??
+                        row.explanation_payload.reason ??
+                        row.blocker_family ??
+                        "structured details",
+                    )
+                  }}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <EmptyState
+            v-if="reports.blockerAnalytics.rows.length === 0"
+            title="No blocker analytics"
+            detail="No blocker_event facts matched the selected filters."
+          />
+        </div>
+      </DataPanel>
+
+      <DataPanel>
+        <template #eyebrow>execution</template>
+        <template #title>Canceled order diagnostics</template>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>cancel_reason</th>
+                <th>count</th>
+                <th>missed net</th>
+                <th>+5m</th>
+                <th>+10m</th>
+                <th>+15m</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in reports.canceledDiagnosticsRows" :key="row.cancel_reason_code">
+                <td><StatusPill :code="row.cancel_reason_code" compact /></td>
+                <td>{{ row.count }}</td>
+                <td>{{ formatMoney(row.missed_pnl_net) }}</td>
+                <td>{{ row.would_profit_5m_count }}</td>
+                <td>{{ row.would_profit_10m_count }}</td>
+                <td>{{ row.would_profit_15m_count }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <EmptyState
+            v-if="reports.canceledDiagnosticsRows.length === 0"
+            title="No canceled-order diagnostics"
+            detail="Canceled order counterfactuals are not available for these filters."
+          />
+        </div>
+      </DataPanel>
+
+      <DataPanel>
+        <template #eyebrow>counterfactual</template>
+        <template #title>Counterfactual horizons</template>
+        <MiniBars v-if="counterfactualBars.length" :rows="counterfactualBars" />
+        <EmptyState
+          v-else
+          title="No horizon analytics"
+          detail="Counterfactual results for +5m / +10m / +15m are not available yet."
+        />
       </DataPanel>
     </div>
 

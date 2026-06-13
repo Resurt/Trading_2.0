@@ -8,7 +8,7 @@ from datetime import UTC, date, datetime
 from typing import Annotated, cast
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, Query, Request, Response, WebSocket
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, WebSocket
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -18,6 +18,9 @@ from trading_api.report_tasks import CeleryReportTaskClient, ReportTaskClient
 from trading_api.robot_control import RobotControlState
 from trading_api.schemas import (
     ApiRole,
+    BlockerAnalyticsResponse,
+    CanceledOrderDiagnosticsResponse,
+    CandidateFunnelResponse,
     CounterfactualResponse,
     DailyReportResponse,
     DailyReportRunRequest,
@@ -26,6 +29,9 @@ from trading_api.schemas import (
     OrderResponse,
     PositionResponse,
     ReportJobResponse,
+    ReportJobStatusResponse,
+    ReportRebuildRequest,
+    ReportScope,
     RobotCommandResponse,
     RobotStatusResponse,
     SessionSnapshotResponse,
@@ -154,11 +160,19 @@ def create_fastapi_app(
         service: ReadServiceDep,
         trading_date: Annotated[date | None, Query()] = None,
         strategy_id: Annotated[str | None, Query()] = None,
+        instrument_id: Annotated[str | None, Query()] = None,
+        timeframe: Annotated[str | None, Query()] = None,
+        session_type: Annotated[str | None, Query()] = None,
+        blocker_code: Annotated[str | None, Query()] = None,
         limit: Annotated[int, Query(ge=1, le=500)] = 50,
     ) -> list[HourlyReportResponse]:
         return service.hourly_reports(
             trading_date=trading_date,
             strategy_id=strategy_id,
+            instrument_id=instrument_id,
+            timeframe=timeframe,
+            session_type=session_type,
+            blocker_code=blocker_code,
             limit=limit,
         )
 
@@ -167,11 +181,19 @@ def create_fastapi_app(
         service: ReadServiceDep,
         trading_date: Annotated[date | None, Query()] = None,
         strategy_id: Annotated[str | None, Query()] = None,
+        instrument_id: Annotated[str | None, Query()] = None,
+        timeframe: Annotated[str | None, Query()] = None,
+        session_type: Annotated[str | None, Query()] = None,
+        blocker_code: Annotated[str | None, Query()] = None,
         limit: Annotated[int, Query(ge=1, le=500)] = 50,
     ) -> list[DailyReportResponse]:
         return service.daily_reports(
             trading_date=trading_date,
             strategy_id=strategy_id,
+            instrument_id=instrument_id,
+            timeframe=timeframe,
+            session_type=session_type,
+            blocker_code=blocker_code,
             limit=limit,
         )
 
@@ -184,6 +206,24 @@ def create_fastapi_app(
         require_role(role, (ApiRole.OPERATOR, ApiRole.ADMIN))
         return _report_task_client(request).enqueue_daily_report(payload)
 
+    @app.post("/reports/rebuild/run", response_model=ReportJobResponse, tags=["reports"])
+    def run_report_rebuild(
+        payload: ReportRebuildRequest,
+        request: Request,
+        role: RoleDep,
+    ) -> ReportJobResponse:
+        require_role(role, (ApiRole.OPERATOR, ApiRole.ADMIN))
+        if payload.scope == ReportScope.HOURLY and payload.micro_session_id is None:
+            raise HTTPException(
+                status_code=400,
+                detail="micro_session_id is required for hourly rebuild",
+            )
+        return _report_task_client(request).enqueue_report_rebuild(payload)
+
+    @app.get("/reports/jobs/{job_id}", response_model=ReportJobStatusResponse, tags=["reports"])
+    def report_job_status(job_id: str, request: Request) -> ReportJobStatusResponse:
+        return _report_task_client(request).job_status(job_id)
+
     @app.get(
         "/reports/counterfactual",
         response_model=list[CounterfactualResponse],
@@ -193,11 +233,96 @@ def create_fastapi_app(
         service: ReadServiceDep,
         trading_date: Annotated[date | None, Query()] = None,
         strategy_id: Annotated[str | None, Query()] = None,
+        instrument_id: Annotated[str | None, Query()] = None,
+        timeframe: Annotated[str | None, Query()] = None,
+        session_type: Annotated[str | None, Query()] = None,
+        blocker_code: Annotated[str | None, Query()] = None,
         limit: Annotated[int, Query(ge=1, le=500)] = 100,
     ) -> list[CounterfactualResponse]:
         return service.counterfactual_reports(
             trading_date=trading_date,
             strategy_id=strategy_id,
+            instrument_id=instrument_id,
+            timeframe=timeframe,
+            session_type=session_type,
+            blocker_code=blocker_code,
+            limit=limit,
+        )
+
+    @app.get(
+        "/analytics/blockers",
+        response_model=BlockerAnalyticsResponse,
+        tags=["analytics"],
+    )
+    def blocker_analytics(
+        service: ReadServiceDep,
+        trading_date: Annotated[date | None, Query()] = None,
+        strategy_id: Annotated[str | None, Query()] = None,
+        instrument_id: Annotated[str | None, Query()] = None,
+        timeframe: Annotated[str | None, Query()] = None,
+        session_type: Annotated[str | None, Query()] = None,
+        blocker_code: Annotated[str | None, Query()] = None,
+        strategy_version: Annotated[int | None, Query()] = None,
+        limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    ) -> BlockerAnalyticsResponse:
+        return service.blocker_analytics(
+            trading_date=trading_date,
+            strategy_id=strategy_id,
+            instrument_id=instrument_id,
+            timeframe=timeframe,
+            session_type=session_type,
+            blocker_code=blocker_code,
+            strategy_version=strategy_version,
+            limit=limit,
+        )
+
+    @app.get(
+        "/analytics/candidate-funnel",
+        response_model=CandidateFunnelResponse,
+        tags=["analytics"],
+    )
+    def candidate_funnel(
+        service: ReadServiceDep,
+        trading_date: Annotated[date | None, Query()] = None,
+        strategy_id: Annotated[str | None, Query()] = None,
+        instrument_id: Annotated[str | None, Query()] = None,
+        timeframe: Annotated[str | None, Query()] = None,
+        session_type: Annotated[str | None, Query()] = None,
+        blocker_code: Annotated[str | None, Query()] = None,
+        strategy_version: Annotated[int | None, Query()] = None,
+    ) -> CandidateFunnelResponse:
+        return service.candidate_funnel(
+            trading_date=trading_date,
+            strategy_id=strategy_id,
+            instrument_id=instrument_id,
+            timeframe=timeframe,
+            session_type=session_type,
+            blocker_code=blocker_code,
+            strategy_version=strategy_version,
+        )
+
+    @app.get(
+        "/analytics/canceled-orders",
+        response_model=CanceledOrderDiagnosticsResponse,
+        tags=["analytics"],
+    )
+    def canceled_order_diagnostics(
+        service: ReadServiceDep,
+        trading_date: Annotated[date | None, Query()] = None,
+        strategy_id: Annotated[str | None, Query()] = None,
+        instrument_id: Annotated[str | None, Query()] = None,
+        timeframe: Annotated[str | None, Query()] = None,
+        session_type: Annotated[str | None, Query()] = None,
+        strategy_version: Annotated[int | None, Query()] = None,
+        limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    ) -> CanceledOrderDiagnosticsResponse:
+        return service.canceled_order_diagnostics(
+            trading_date=trading_date,
+            strategy_id=strategy_id,
+            instrument_id=instrument_id,
+            timeframe=timeframe,
+            session_type=session_type,
+            strategy_version=strategy_version,
             limit=limit,
         )
 
@@ -244,6 +369,10 @@ def create_fastapi_app(
             {
                 "hourly": service.hourly_reports(limit=5),
                 "daily": service.daily_reports(limit=5),
+                "blockers": service.blocker_analytics(limit=5),
+                "candidate_funnel": service.candidate_funnel(),
+                "counterfactual": service.counterfactual_reports(limit=10),
+                "canceled_orders": service.canceled_order_diagnostics(limit=5),
             },
         )
 
@@ -305,7 +434,10 @@ def _dashboard_payload(websocket: WebSocket) -> dict[str, object]:
         "robot_status": status,
         "market": service.market_overview(),
         "open_orders": service.open_orders(),
+        "positions": service.positions(),
         "signals": service.current_signals(),
+        "blockers": service.blocker_analytics(limit=5),
+        "candidate_funnel": service.candidate_funnel(),
     }
 
 

@@ -97,6 +97,7 @@ export interface HourlyReportResponse {
   micro_session_id: string;
   strategy_id: string;
   instrument_id: string | null;
+  timeframe: string | null;
   realised_pnl: string | null;
   commission: string | null;
   signal_count: number;
@@ -112,6 +113,7 @@ export interface DailyReportResponse {
   market_regime: string;
   session_type: string | null;
   instrument_id: string | null;
+  timeframe: string | null;
   realised_pnl: string | null;
   commission: string | null;
   signal_count: number;
@@ -127,9 +129,19 @@ export interface CounterfactualResponse {
   order_intent_id: string | null;
   source_event_type: string;
   instrument_id: string;
+  timeframe: string | null;
   strategy_id: string;
   blocker_code: string | null;
   cancel_reason_code: string | null;
+  pnl_gross: string | null;
+  pnl_net: string | null;
+  slippage_bp: string | null;
+  mfe_5m_bps: string | null;
+  mae_5m_bps: string | null;
+  mfe_10m_bps: string | null;
+  mae_10m_bps: string | null;
+  mfe_15m_bps: string | null;
+  mae_15m_bps: string | null;
   would_profit_5m: boolean | null;
   would_profit_10m: boolean | null;
   would_profit_15m: boolean | null;
@@ -141,6 +153,86 @@ export interface ReportJobResponse {
   task_name: string;
   status: string;
   payload: JsonPayload;
+}
+
+export interface ReportJobStatusResponse {
+  job_id: string;
+  task_name: string;
+  status: string;
+  ready: boolean;
+  successful: boolean;
+  failed: boolean;
+  result: JsonPayload | null;
+  error: string | null;
+  payload: JsonPayload;
+}
+
+export type ReportScope = "hourly" | "daily";
+
+export interface ReportRebuildRequest {
+  scope: ReportScope;
+  trading_date: string;
+  strategy_id: string;
+  micro_session_id?: string | null;
+  instrument_id?: string | null;
+  timeframe?: string | null;
+  session_type?: string | null;
+  strategy_version?: number | null;
+  include_counterfactual: boolean;
+  force_rebuild: boolean;
+}
+
+export interface BlockerAnalyticsRow {
+  blocker_code: string;
+  blocker_family: string | null;
+  count: number;
+  terminal_count: number;
+  candidate_count: number;
+  measured_value_avg: string | null;
+  threshold_value_avg: string | null;
+  missed_pnl_gross: string | null;
+  missed_pnl_net: string | null;
+  avoided_loss: string | null;
+  false_positive_rate: string | null;
+  explanation_payload: JsonPayload;
+}
+
+export interface BlockerAnalyticsResponse {
+  generated_at: string;
+  filters: JsonPayload;
+  rows: BlockerAnalyticsRow[];
+}
+
+export interface CandidateFunnelStage {
+  stage_name: string;
+  count: number;
+  percentage_of_created: string | null;
+  payload: JsonPayload;
+}
+
+export interface CandidateFunnelResponse {
+  generated_at: string;
+  filters: JsonPayload;
+  stages: CandidateFunnelStage[];
+  totals: JsonPayload;
+}
+
+export interface CanceledOrderDiagnosticsRow {
+  cancel_reason_code: string;
+  count: number;
+  missed_pnl_gross: string | null;
+  missed_pnl_net: string | null;
+  avoided_loss: string | null;
+  would_profit_5m_count: number;
+  would_profit_10m_count: number;
+  would_profit_15m_count: number;
+  explanation_payload: JsonPayload;
+}
+
+export interface CanceledOrderDiagnosticsResponse {
+  generated_at: string;
+  filters: JsonPayload;
+  rows: CanceledOrderDiagnosticsRow[];
 }
 
 export interface StrategyConfigResponse {
@@ -183,7 +275,10 @@ export interface DashboardSnapshotPayload {
     robot_status?: RobotStatusResponse;
     market?: MarketOverviewResponse;
     open_orders?: OrderResponse[];
+    positions?: PositionResponse[];
     signals?: SignalResponse[];
+    blockers?: BlockerAnalyticsResponse;
+    candidate_funnel?: CandidateFunnelResponse;
   };
 }
 
@@ -191,5 +286,9 @@ export interface ReportsSnapshotPayload {
   data?: {
     hourly?: HourlyReportResponse[];
     daily?: DailyReportResponse[];
+    blockers?: BlockerAnalyticsResponse;
+    candidate_funnel?: CandidateFunnelResponse;
+    counterfactual?: CounterfactualResponse[];
+    canceled_orders?: CanceledOrderDiagnosticsResponse;
   };
 }

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
@@ -11,9 +13,16 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from trading_api.schemas import (
+    BlockerAnalyticsResponse,
+    BlockerAnalyticsRow,
+    CanceledOrderDiagnosticsResponse,
+    CanceledOrderDiagnosticsRow,
+    CandidateFunnelResponse,
+    CandidateFunnelStage,
     CounterfactualResponse,
     DailyReportResponse,
     HourlyReportResponse,
+    JsonPayload,
     MarketInstrumentOverview,
     MarketOverviewResponse,
     MoneyBalance,
@@ -28,8 +37,10 @@ from trading_api.schemas import (
 from trading_common.db.models import (
     BlockerEvent,
     BrokerOrder,
+    CandidateStageResult,
     CounterfactualResult,
     DailyReport,
+    FillEvent,
     HourlyReport,
     InstrumentRegistry,
     MarketCandle,
@@ -43,6 +54,39 @@ from trading_common.db.models import (
 )
 
 TERMINAL_ORDER_STATUSES = frozenset({"filled", "cancelled", "rejected"})
+DEFAULT_ANALYTICS_LIMIT = 50
+
+
+@dataclass(slots=True)
+class _BlockerStats:
+    blocker_code: str
+    blocker_family: str | None = None
+    count: int = 0
+    terminal_count: int = 0
+    candidate_ids: set[UUID] = field(default_factory=set)
+    measured_total: Decimal = Decimal("0")
+    measured_count: int = 0
+    threshold_total: Decimal = Decimal("0")
+    threshold_count: int = 0
+    missed_pnl_gross: Decimal = Decimal("0")
+    missed_pnl_net: Decimal = Decimal("0")
+    avoided_loss: Decimal = Decimal("0")
+    counterfactual_count: int = 0
+    profitable_15m_count: int = 0
+    explanation_payload: JsonPayload = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class _CancelStats:
+    cancel_reason_code: str
+    count: int = 0
+    missed_pnl_gross: Decimal = Decimal("0")
+    missed_pnl_net: Decimal = Decimal("0")
+    avoided_loss: Decimal = Decimal("0")
+    would_profit_5m_count: int = 0
+    would_profit_10m_count: int = 0
+    would_profit_15m_count: int = 0
+    explanation_payload: JsonPayload = field(default_factory=dict)
 
 
 class BffReadService:
@@ -188,7 +232,7 @@ class BffReadService:
                 market_quality=summary.market_quality_score,
                 best_bid=summary.best_bid_price,
                 best_ask=summary.best_ask_price,
-                recent_market_trades=[],
+                recent_market_trades=_payload_list(summary.summary_payload, "recent_market_trades"),
                 order_book_summary={
                     "depth_levels": summary.depth_levels,
                     "best_bid_qty_lots": _optional_str(summary.best_bid_qty_lots),
@@ -209,34 +253,76 @@ class BffReadService:
         *,
         trading_date: date | None = None,
         strategy_id: str | None = None,
+        instrument_id: str | None = None,
+        timeframe: str | None = None,
+        session_type: str | None = None,
+        blocker_code: str | None = None,
         limit: int = 50,
     ) -> list[HourlyReportResponse]:
-        stmt = select(HourlyReport).order_by(HourlyReport.generated_at.desc()).limit(limit)
+        stmt = select(HourlyReport).order_by(HourlyReport.generated_at.desc())
         if trading_date is not None:
             stmt = stmt.where(HourlyReport.trading_date == trading_date)
         if strategy_id is not None:
             stmt = stmt.where(HourlyReport.strategy_id == strategy_id)
-        return [_hourly_report_response(report) for report in self._session.execute(stmt).scalars()]
+        if instrument_id is not None:
+            stmt = stmt.where(HourlyReport.instrument_id == instrument_id)
+        if timeframe is not None:
+            stmt = stmt.where(HourlyReport.timeframe == timeframe)
+        if session_type is not None:
+            stmt = stmt.where(HourlyReport.session_type == session_type)
+        if blocker_code is None:
+            stmt = stmt.limit(limit)
+        reports = [
+            _hourly_report_response(report) for report in self._session.execute(stmt).scalars()
+        ]
+        if blocker_code is not None:
+            reports = [
+                report for report in reports if _payload_mentions(report.payload, blocker_code)
+            ][:limit]
+        return reports
 
     def daily_reports(
         self,
         *,
         trading_date: date | None = None,
         strategy_id: str | None = None,
+        instrument_id: str | None = None,
+        timeframe: str | None = None,
+        session_type: str | None = None,
+        blocker_code: str | None = None,
         limit: int = 50,
     ) -> list[DailyReportResponse]:
-        stmt = select(DailyReport).order_by(DailyReport.generated_at.desc()).limit(limit)
+        stmt = select(DailyReport).order_by(DailyReport.generated_at.desc())
         if trading_date is not None:
             stmt = stmt.where(DailyReport.trading_date == trading_date)
         if strategy_id is not None:
             stmt = stmt.where(DailyReport.strategy_id == strategy_id)
-        return [_daily_report_response(report) for report in self._session.execute(stmt).scalars()]
+        if instrument_id is not None:
+            stmt = stmt.where(DailyReport.instrument_id == instrument_id)
+        if timeframe is not None:
+            stmt = stmt.where(DailyReport.timeframe == timeframe)
+        if session_type is not None:
+            stmt = stmt.where(DailyReport.session_type == session_type)
+        if blocker_code is None:
+            stmt = stmt.limit(limit)
+        reports = [
+            _daily_report_response(report) for report in self._session.execute(stmt).scalars()
+        ]
+        if blocker_code is not None:
+            reports = [
+                report for report in reports if _payload_mentions(report.payload, blocker_code)
+            ][:limit]
+        return reports
 
     def counterfactual_reports(
         self,
         *,
         trading_date: date | None = None,
         strategy_id: str | None = None,
+        instrument_id: str | None = None,
+        timeframe: str | None = None,
+        session_type: str | None = None,
+        blocker_code: str | None = None,
         limit: int = 100,
     ) -> list[CounterfactualResponse]:
         stmt = (
@@ -248,9 +334,286 @@ class BffReadService:
             stmt = stmt.where(CounterfactualResult.trading_date == trading_date)
         if strategy_id is not None:
             stmt = stmt.where(CounterfactualResult.strategy_id == strategy_id)
+        if instrument_id is not None:
+            stmt = stmt.where(CounterfactualResult.instrument_id == instrument_id)
+        if timeframe is not None:
+            stmt = stmt.where(CounterfactualResult.timeframe == timeframe)
+        if session_type is not None:
+            stmt = stmt.where(CounterfactualResult.session_type == session_type)
+        if blocker_code is not None:
+            stmt = stmt.where(CounterfactualResult.blocker_code == blocker_code)
         return [
             _counterfactual_response(result) for result in self._session.execute(stmt).scalars()
         ]
+
+    def blocker_analytics(
+        self,
+        *,
+        trading_date: date | None = None,
+        strategy_id: str | None = None,
+        instrument_id: str | None = None,
+        timeframe: str | None = None,
+        session_type: str | None = None,
+        blocker_code: str | None = None,
+        strategy_version: int | None = None,
+        limit: int = DEFAULT_ANALYTICS_LIMIT,
+    ) -> BlockerAnalyticsResponse:
+        blockers = self._blockers(
+            trading_date=trading_date,
+            strategy_id=strategy_id,
+            instrument_id=instrument_id,
+            timeframe=timeframe,
+            session_type=session_type,
+            blocker_code=blocker_code,
+        )
+        stats_by_code: dict[str, _BlockerStats] = {}
+        for blocker in blockers:
+            candidate = (
+                self._session.get(SignalCandidate, blocker.candidate_id)
+                if blocker.candidate_id is not None
+                else None
+            )
+            if strategy_version is not None and (
+                candidate is None or candidate.strategy_version != strategy_version
+            ):
+                continue
+            code = _blocker_code(blocker)
+            stats = stats_by_code.setdefault(
+                code,
+                _BlockerStats(
+                    blocker_code=code,
+                    blocker_family=blocker.blocker_family,
+                ),
+            )
+            stats.count += 1
+            if blocker.is_final_blocker:
+                stats.terminal_count += 1
+            if blocker.candidate_id is not None:
+                stats.candidate_ids.add(blocker.candidate_id)
+            if blocker.blocker_family and stats.blocker_family is None:
+                stats.blocker_family = blocker.blocker_family
+            if blocker.measured_value is not None:
+                stats.measured_total += blocker.measured_value
+                stats.measured_count += 1
+            if blocker.threshold_value is not None:
+                stats.threshold_total += blocker.threshold_value
+                stats.threshold_count += 1
+            if not stats.explanation_payload:
+                stats.explanation_payload = blocker.explanation_payload or blocker.reason_payload
+
+        for result in self._counterfactuals(
+            trading_date=trading_date,
+            strategy_id=strategy_id,
+            instrument_id=instrument_id,
+            timeframe=timeframe,
+            session_type=session_type,
+            blocker_code=blocker_code,
+        ):
+            if result.blocker_code is None:
+                continue
+            stats = stats_by_code.setdefault(
+                result.blocker_code,
+                _BlockerStats(blocker_code=result.blocker_code),
+            )
+            stats.counterfactual_count += 1
+            stats.missed_pnl_gross += result.pnl_gross or Decimal("0")
+            stats.missed_pnl_net += result.pnl_net or Decimal("0")
+            if result.pnl_net is not None and result.pnl_net < 0:
+                stats.avoided_loss += abs(result.pnl_net)
+            if result.would_profit_15m:
+                stats.profitable_15m_count += 1
+
+        rows = sorted(
+            (_blocker_row(stats) for stats in stats_by_code.values()),
+            key=lambda row: (row.count, row.missed_pnl_net or Decimal("0")),
+            reverse=True,
+        )[:limit]
+        return BlockerAnalyticsResponse(
+            generated_at=datetime.now(tz=UTC),
+            filters=_analytics_filters(
+                trading_date=trading_date,
+                strategy_id=strategy_id,
+                instrument_id=instrument_id,
+                timeframe=timeframe,
+                session_type=session_type,
+                blocker_code=blocker_code,
+                strategy_version=strategy_version,
+            ),
+            rows=rows,
+        )
+
+    def candidate_funnel(
+        self,
+        *,
+        trading_date: date | None = None,
+        strategy_id: str | None = None,
+        instrument_id: str | None = None,
+        timeframe: str | None = None,
+        session_type: str | None = None,
+        blocker_code: str | None = None,
+        strategy_version: int | None = None,
+    ) -> CandidateFunnelResponse:
+        candidates = self._candidates(
+            trading_date=trading_date,
+            strategy_id=strategy_id,
+            instrument_id=instrument_id,
+            timeframe=timeframe,
+            session_type=session_type,
+            strategy_version=strategy_version,
+        )
+        candidate_ids = {candidate.candidate_id for candidate in candidates}
+        blocked_ids = {
+            blocker.candidate_id
+            for blocker in self._blockers(
+                trading_date=trading_date,
+                strategy_id=strategy_id,
+                instrument_id=instrument_id,
+                timeframe=timeframe,
+                session_type=session_type,
+                blocker_code=blocker_code,
+            )
+            if blocker.candidate_id is not None and blocker.is_final_blocker
+        }
+        if blocker_code is not None:
+            candidate_ids &= blocked_ids
+            candidates = [
+                candidate for candidate in candidates if candidate.candidate_id in candidate_ids
+            ]
+
+        stage_results = self._stage_results(candidate_ids)
+        passed_gate_ids = {
+            stage.candidate_id for stage in stage_results if stage.passed and stage.candidate_id
+        }
+        intents = self._order_intents(candidate_ids=candidate_ids)
+        intent_ids = {intent.order_intent_id for intent in intents}
+        intent_candidate_ids = {
+            intent.candidate_id for intent in intents if intent.candidate_id is not None
+        }
+        posted_candidate_ids = self._posted_candidate_ids(candidate_ids, intent_ids)
+        filled_candidate_ids = self._filled_candidate_ids(candidate_ids, intent_ids)
+        exited_ids = {
+            candidate.candidate_id
+            for candidate in candidates
+            if candidate.candidate_status in {"exited", "closed"}
+        } | filled_candidate_ids
+
+        created_count = len(candidates)
+        stages: list[tuple[str, int, JsonPayload]] = [
+            ("created", created_count, {}),
+            ("passed_gates", len(passed_gate_ids), {"stage_result_count": len(stage_results)}),
+            ("blocked", len(blocked_ids & candidate_ids), {"terminal_blocker": True}),
+            ("order_intent", len(intent_candidate_ids), {}),
+            ("posted", len(posted_candidate_ids), {}),
+            ("filled", len(filled_candidate_ids), {}),
+            ("exited", len(exited_ids), {}),
+        ]
+        return CandidateFunnelResponse(
+            generated_at=datetime.now(tz=UTC),
+            filters=_analytics_filters(
+                trading_date=trading_date,
+                strategy_id=strategy_id,
+                instrument_id=instrument_id,
+                timeframe=timeframe,
+                session_type=session_type,
+                blocker_code=blocker_code,
+                strategy_version=strategy_version,
+            ),
+            stages=[
+                CandidateFunnelStage(
+                    stage_name=name,
+                    count=count,
+                    percentage_of_created=_ratio_decimal(count, created_count),
+                    payload=payload,
+                )
+                for name, count, payload in stages
+            ],
+            totals={
+                "candidate_count": created_count,
+                "blocked_candidate_count": len(blocked_ids & candidate_ids),
+                "order_intent_count": len(intents),
+            },
+        )
+
+    def canceled_order_diagnostics(
+        self,
+        *,
+        trading_date: date | None = None,
+        strategy_id: str | None = None,
+        instrument_id: str | None = None,
+        timeframe: str | None = None,
+        session_type: str | None = None,
+        strategy_version: int | None = None,
+        limit: int = DEFAULT_ANALYTICS_LIMIT,
+    ) -> CanceledOrderDiagnosticsResponse:
+        stats_by_reason: dict[str, _CancelStats] = {}
+        stmt = select(OrderIntent).where(OrderIntent.cancel_reason_code.is_not(None))
+        if trading_date is not None:
+            stmt = stmt.where(OrderIntent.trading_date == trading_date)
+        if strategy_id is not None:
+            stmt = stmt.where(OrderIntent.strategy_id == strategy_id)
+        if instrument_id is not None:
+            stmt = stmt.where(OrderIntent.instrument_id == instrument_id)
+        if timeframe is not None:
+            stmt = stmt.where(OrderIntent.timeframe == timeframe)
+        if session_type is not None:
+            stmt = stmt.where(OrderIntent.session_type == session_type)
+        if strategy_version is not None:
+            stmt = stmt.where(OrderIntent.strategy_version == strategy_version)
+        intents = list(self._session.execute(stmt).scalars())
+        for intent in intents:
+            if intent.cancel_reason_code is None:
+                continue
+            stats = stats_by_reason.setdefault(
+                intent.cancel_reason_code,
+                _CancelStats(cancel_reason_code=intent.cancel_reason_code),
+            )
+            stats.count += 1
+            if not stats.explanation_payload:
+                stats.explanation_payload = intent.intent_payload
+
+        for result in self._counterfactuals(
+            trading_date=trading_date,
+            strategy_id=strategy_id,
+            instrument_id=instrument_id,
+            timeframe=timeframe,
+            session_type=session_type,
+        ):
+            if result.cancel_reason_code is None:
+                continue
+            stats = stats_by_reason.setdefault(
+                result.cancel_reason_code,
+                _CancelStats(cancel_reason_code=result.cancel_reason_code),
+            )
+            stats.missed_pnl_gross += result.pnl_gross or Decimal("0")
+            stats.missed_pnl_net += result.pnl_net or Decimal("0")
+            if result.pnl_net is not None and result.pnl_net < 0:
+                stats.avoided_loss += abs(result.pnl_net)
+            if result.would_profit_5m:
+                stats.would_profit_5m_count += 1
+            if result.would_profit_10m:
+                stats.would_profit_10m_count += 1
+            if result.would_profit_15m:
+                stats.would_profit_15m_count += 1
+            if not stats.explanation_payload:
+                stats.explanation_payload = result.result_payload
+
+        rows = sorted(
+            (_cancel_row(stats) for stats in stats_by_reason.values()),
+            key=lambda row: (row.count, row.missed_pnl_net or Decimal("0")),
+            reverse=True,
+        )[:limit]
+        return CanceledOrderDiagnosticsResponse(
+            generated_at=datetime.now(tz=UTC),
+            filters=_analytics_filters(
+                trading_date=trading_date,
+                strategy_id=strategy_id,
+                instrument_id=instrument_id,
+                timeframe=timeframe,
+                session_type=session_type,
+                strategy_version=strategy_version,
+            ),
+            rows=rows,
+        )
 
     def get_strategy_config(
         self,
@@ -350,10 +713,174 @@ class BffReadService:
             ).scalars()
         )
         return {
-            blocker.candidate_id: blocker.reason_code
+            blocker.candidate_id: _blocker_code(blocker)
             for blocker in blockers
             if blocker.candidate_id is not None
         }
+
+    def _candidates(
+        self,
+        *,
+        trading_date: date | None = None,
+        strategy_id: str | None = None,
+        instrument_id: str | None = None,
+        timeframe: str | None = None,
+        session_type: str | None = None,
+        strategy_version: int | None = None,
+    ) -> list[SignalCandidate]:
+        stmt = select(SignalCandidate).order_by(SignalCandidate.ts_utc.desc())
+        if trading_date is not None:
+            stmt = stmt.where(SignalCandidate.trading_date == trading_date)
+        if strategy_id is not None:
+            stmt = stmt.where(SignalCandidate.strategy_id == strategy_id)
+        if instrument_id is not None:
+            stmt = stmt.where(SignalCandidate.instrument_id == instrument_id)
+        if timeframe is not None:
+            stmt = stmt.where(SignalCandidate.timeframe == timeframe)
+        if session_type is not None:
+            stmt = stmt.where(SignalCandidate.session_type == session_type)
+        if strategy_version is not None:
+            stmt = stmt.where(SignalCandidate.strategy_version == strategy_version)
+        return list(self._session.execute(stmt).scalars())
+
+    def _blockers(
+        self,
+        *,
+        trading_date: date | None = None,
+        strategy_id: str | None = None,
+        instrument_id: str | None = None,
+        timeframe: str | None = None,
+        session_type: str | None = None,
+        blocker_code: str | None = None,
+    ) -> list[BlockerEvent]:
+        stmt = select(BlockerEvent).order_by(BlockerEvent.ts_utc.desc())
+        if trading_date is not None:
+            stmt = stmt.where(BlockerEvent.trading_date == trading_date)
+        if strategy_id is not None:
+            stmt = stmt.where(BlockerEvent.strategy_id == strategy_id)
+        if instrument_id is not None:
+            stmt = stmt.where(BlockerEvent.instrument_id == instrument_id)
+        if timeframe is not None:
+            stmt = stmt.where(BlockerEvent.timeframe == timeframe)
+        if session_type is not None:
+            stmt = stmt.where(BlockerEvent.session_type == session_type)
+        if blocker_code is not None:
+            stmt = stmt.where(
+                (BlockerEvent.blocker_code == blocker_code)
+                | (BlockerEvent.reason_code == blocker_code)
+            )
+        return list(self._session.execute(stmt).scalars())
+
+    def _counterfactuals(
+        self,
+        *,
+        trading_date: date | None = None,
+        strategy_id: str | None = None,
+        instrument_id: str | None = None,
+        timeframe: str | None = None,
+        session_type: str | None = None,
+        blocker_code: str | None = None,
+    ) -> list[CounterfactualResult]:
+        stmt = select(CounterfactualResult).order_by(CounterfactualResult.generated_at.desc())
+        if trading_date is not None:
+            stmt = stmt.where(CounterfactualResult.trading_date == trading_date)
+        if strategy_id is not None:
+            stmt = stmt.where(CounterfactualResult.strategy_id == strategy_id)
+        if instrument_id is not None:
+            stmt = stmt.where(CounterfactualResult.instrument_id == instrument_id)
+        if timeframe is not None:
+            stmt = stmt.where(CounterfactualResult.timeframe == timeframe)
+        if session_type is not None:
+            stmt = stmt.where(CounterfactualResult.session_type == session_type)
+        if blocker_code is not None:
+            stmt = stmt.where(CounterfactualResult.blocker_code == blocker_code)
+        return list(self._session.execute(stmt).scalars())
+
+    def _stage_results(self, candidate_ids: set[UUID]) -> list[CandidateStageResult]:
+        if not candidate_ids:
+            return []
+        return list(
+            self._session.execute(
+                select(CandidateStageResult).where(
+                    CandidateStageResult.candidate_id.in_(candidate_ids)
+                )
+            ).scalars()
+        )
+
+    def _order_intents(self, *, candidate_ids: set[UUID]) -> list[OrderIntent]:
+        if not candidate_ids:
+            return []
+        return list(
+            self._session.execute(
+                select(OrderIntent).where(OrderIntent.candidate_id.in_(candidate_ids))
+            ).scalars()
+        )
+
+    def _posted_candidate_ids(
+        self,
+        candidate_ids: set[UUID],
+        intent_ids: set[UUID],
+    ) -> set[UUID]:
+        if not candidate_ids and not intent_ids:
+            return set()
+        stmt = select(BrokerOrder)
+        if candidate_ids and intent_ids:
+            stmt = stmt.where(
+                (BrokerOrder.candidate_id.in_(candidate_ids))
+                | (BrokerOrder.order_intent_id.in_(intent_ids))
+            )
+        elif candidate_ids:
+            stmt = stmt.where(BrokerOrder.candidate_id.in_(candidate_ids))
+        else:
+            stmt = stmt.where(BrokerOrder.order_intent_id.in_(intent_ids))
+        broker_orders = list(self._session.execute(stmt).scalars())
+        posted_ids: set[UUID] = set()
+        intent_candidate_by_id = {
+            intent.order_intent_id: intent.candidate_id
+            for intent in self._session.execute(
+                select(OrderIntent).where(OrderIntent.order_intent_id.in_(intent_ids))
+            ).scalars()
+            if intent.candidate_id is not None
+        }
+        for order in broker_orders:
+            if order.candidate_id is not None:
+                posted_ids.add(order.candidate_id)
+            elif order.order_intent_id in intent_candidate_by_id:
+                posted_ids.add(intent_candidate_by_id[order.order_intent_id])
+        return posted_ids
+
+    def _filled_candidate_ids(
+        self,
+        candidate_ids: set[UUID],
+        intent_ids: set[UUID],
+    ) -> set[UUID]:
+        if not candidate_ids and not intent_ids:
+            return set()
+        stmt = select(FillEvent)
+        if candidate_ids and intent_ids:
+            stmt = stmt.where(
+                (FillEvent.candidate_id.in_(candidate_ids))
+                | (FillEvent.order_intent_id.in_(intent_ids))
+            )
+        elif candidate_ids:
+            stmt = stmt.where(FillEvent.candidate_id.in_(candidate_ids))
+        else:
+            stmt = stmt.where(FillEvent.order_intent_id.in_(intent_ids))
+        fills = list(self._session.execute(stmt).scalars())
+        filled_ids: set[UUID] = set()
+        intent_candidate_by_id = {
+            intent.order_intent_id: intent.candidate_id
+            for intent in self._session.execute(
+                select(OrderIntent).where(OrderIntent.order_intent_id.in_(intent_ids))
+            ).scalars()
+            if intent.candidate_id is not None
+        }
+        for fill in fills:
+            if fill.candidate_id is not None:
+                filled_ids.add(fill.candidate_id)
+            elif fill.order_intent_id in intent_candidate_by_id:
+                filled_ids.add(intent_candidate_by_id[fill.order_intent_id])
+        return filled_ids
 
 
 def _order_response(*, broker_order: BrokerOrder, intent: OrderIntent | None) -> OrderResponse:
@@ -374,6 +901,92 @@ def _order_response(*, broker_order: BrokerOrder, intent: OrderIntent | None) ->
     )
 
 
+def _blocker_code(blocker: BlockerEvent) -> str:
+    return blocker.blocker_code or blocker.reason_code
+
+
+def _blocker_row(stats: _BlockerStats) -> BlockerAnalyticsRow:
+    return BlockerAnalyticsRow(
+        blocker_code=stats.blocker_code,
+        blocker_family=stats.blocker_family,
+        count=stats.count,
+        terminal_count=stats.terminal_count,
+        candidate_count=len(stats.candidate_ids),
+        measured_value_avg=_decimal_average(stats.measured_total, stats.measured_count),
+        threshold_value_avg=_decimal_average(stats.threshold_total, stats.threshold_count),
+        missed_pnl_gross=stats.missed_pnl_gross,
+        missed_pnl_net=stats.missed_pnl_net,
+        avoided_loss=stats.avoided_loss,
+        false_positive_rate=_ratio_decimal(
+            stats.profitable_15m_count,
+            stats.counterfactual_count,
+        ),
+        explanation_payload=stats.explanation_payload,
+    )
+
+
+def _cancel_row(stats: _CancelStats) -> CanceledOrderDiagnosticsRow:
+    return CanceledOrderDiagnosticsRow(
+        cancel_reason_code=stats.cancel_reason_code,
+        count=stats.count,
+        missed_pnl_gross=stats.missed_pnl_gross,
+        missed_pnl_net=stats.missed_pnl_net,
+        avoided_loss=stats.avoided_loss,
+        would_profit_5m_count=stats.would_profit_5m_count,
+        would_profit_10m_count=stats.would_profit_10m_count,
+        would_profit_15m_count=stats.would_profit_15m_count,
+        explanation_payload=stats.explanation_payload,
+    )
+
+
+def _decimal_average(total: Decimal, count: int) -> Decimal | None:
+    if count == 0:
+        return None
+    return total / Decimal(count)
+
+
+def _ratio_decimal(numerator: int, denominator: int) -> Decimal | None:
+    if denominator == 0:
+        return None
+    return Decimal(numerator) / Decimal(denominator)
+
+
+def _analytics_filters(
+    *,
+    trading_date: date | None = None,
+    strategy_id: str | None = None,
+    instrument_id: str | None = None,
+    timeframe: str | None = None,
+    session_type: str | None = None,
+    blocker_code: str | None = None,
+    strategy_version: int | None = None,
+) -> JsonPayload:
+    return {
+        key: value
+        for key, value in {
+            "trading_date": trading_date.isoformat() if trading_date is not None else None,
+            "strategy_id": strategy_id,
+            "instrument_id": instrument_id,
+            "timeframe": timeframe,
+            "session_type": session_type,
+            "blocker_code": blocker_code,
+            "strategy_version": strategy_version,
+        }.items()
+        if value is not None
+    }
+
+
+def _payload_mentions(payload: JsonPayload, value: str) -> bool:
+    return value in str(payload)
+
+
+def _payload_list(payload: JsonPayload, key: str) -> list[JsonPayload]:
+    value = payload.get(key)
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
 def _hourly_report_response(report: HourlyReport) -> HourlyReportResponse:
     return HourlyReportResponse(
         hourly_report_id=report.hourly_report_id,
@@ -382,6 +995,7 @@ def _hourly_report_response(report: HourlyReport) -> HourlyReportResponse:
         micro_session_id=report.micro_session_id,
         strategy_id=report.strategy_id,
         instrument_id=report.instrument_id,
+        timeframe=report.timeframe,
         realised_pnl=report.realised_pnl,
         commission=report.commission,
         signal_count=report.signal_count,
@@ -399,6 +1013,7 @@ def _daily_report_response(report: DailyReport) -> DailyReportResponse:
         market_regime=report.market_regime,
         session_type=report.session_type,
         instrument_id=report.instrument_id,
+        timeframe=report.timeframe,
         realised_pnl=report.realised_pnl,
         commission=report.commission,
         signal_count=report.signal_count,
@@ -416,9 +1031,19 @@ def _counterfactual_response(result: CounterfactualResult) -> CounterfactualResp
         order_intent_id=result.order_intent_id,
         source_event_type=result.source_event_type,
         instrument_id=result.instrument_id,
+        timeframe=result.timeframe,
         strategy_id=result.strategy_id,
         blocker_code=result.blocker_code,
         cancel_reason_code=result.cancel_reason_code,
+        pnl_gross=result.pnl_gross,
+        pnl_net=result.pnl_net,
+        slippage_bp=result.slippage_bp,
+        mfe_5m_bps=result.mfe_5m_bps,
+        mae_5m_bps=result.mae_5m_bps,
+        mfe_10m_bps=result.mfe_10m_bps,
+        mae_10m_bps=result.mae_10m_bps,
+        mfe_15m_bps=result.mfe_15m_bps,
+        mae_15m_bps=result.mae_15m_bps,
         would_profit_5m=result.would_profit_5m,
         would_profit_10m=result.would_profit_10m,
         would_profit_15m=result.would_profit_15m,

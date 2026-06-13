@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { SignalResponse } from "../../api/types";
-import { formatDecimal } from "../../utils/format";
+import { formatDecimal, stringifyValue } from "../../utils/format";
 import { codeWithLabel } from "../../utils/labels";
 import EmptyState from "../ui/EmptyState.vue";
 import StatusPill from "../ui/StatusPill.vue";
@@ -35,6 +35,9 @@ defineProps<{
     </dl>
     <p v-if="signal.final_blocker_code" class="reason-card__explain">
       Причина: {{ codeWithLabel(signal.final_blocker_code) }}.
+      <span v-if="signal.payload.explanation || signal.payload.reason">
+        {{ stringifyValue(signal.payload.explanation ?? signal.payload.reason) }}
+      </span>
     </p>
   </div>
   <EmptyState

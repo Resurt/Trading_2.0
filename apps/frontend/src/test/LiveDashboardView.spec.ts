@@ -42,7 +42,7 @@ function mountWithStores() {
       expected_edge_bps: "12.5",
       expected_holding_minutes: 5,
       final_blocker_code: "spread_too_wide",
-      payload: {},
+      payload: { explanation: "spread above configured threshold" },
     },
   ];
   market.overview = {
@@ -102,6 +102,7 @@ function mountWithStores() {
       micro_session_id: "2026-06-13:weekday_main:1000",
       strategy_id: "baseline",
       instrument_id: "MOEX:SBER",
+      timeframe: "5m",
       realised_pnl: "10",
       commission: "1",
       signal_count: 1,
@@ -125,7 +126,9 @@ describe("LiveDashboardView", () => {
     expect(wrapper.find('[data-testid="live-dashboard"]').exists()).toBe(true);
     expect(wrapper.text()).toContain("MOEX:SBER");
     expect(wrapper.text()).toContain("spread_too_wide");
+    expect(wrapper.text()).toContain("spread above configured threshold");
     expect(wrapper.text()).toContain("weekday_main");
     expect(wrapper.text()).toContain("request-1");
+    expect(wrapper.text()).toContain("Stream health / reconnect");
   });
 });
