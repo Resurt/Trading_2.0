@@ -8,7 +8,11 @@
     "typecheck": "vue-tsc --noEmit",
     "test:unit": "vitest run",
     "build": "vite build",
-    "preview": "vite preview --host 0.0.0.0"
+    "preview": "vite preview --host 0.0.0.0",
+    "analytics-smoke": "cd ../.. && python scripts/run_logging_analytics_acceptance.py",
+    "report-rebuild": "cd ../.. && python scripts/run_report_rebuild.py",
+    "replay-day": "cd ../.. && python scripts/run_replay_day.py",
+    "observability-up": "cd ../.. && docker compose up -d prometheus grafana loki fluent-bit"
   },
   "dependencies": {
     "@lucide/vue": "^1.18.0",

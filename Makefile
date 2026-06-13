@@ -1,7 +1,9 @@
 PYTHON ?= python
 NPM ?= npm
+TRADING_DATE ?= 2026-06-12
+STRATEGY_ID ?= baseline
 
-.PHONY: lint test up down logs frontend-build migrate migrate-down replay-smoke sandbox-smoke
+.PHONY: lint test up down logs frontend-build migrate migrate-down replay-smoke sandbox-smoke analytics-smoke report-rebuild replay-day observability-up
 
 lint:
 	$(PYTHON) -m ruff check .
@@ -33,3 +35,15 @@ replay-smoke:
 
 sandbox-smoke:
 	$(PYTHON) scripts/run_sandbox_smoke.py --dry-run
+
+analytics-smoke:
+	$(PYTHON) scripts/run_logging_analytics_acceptance.py --date $(TRADING_DATE) --strategy-id $(STRATEGY_ID)
+
+report-rebuild:
+	$(PYTHON) scripts/run_report_rebuild.py --date $(TRADING_DATE) --strategy-id $(STRATEGY_ID)
+
+replay-day:
+	$(PYTHON) scripts/run_replay_day.py --date $(TRADING_DATE)
+
+observability-up:
+	docker compose up -d prometheus grafana loki fluent-bit

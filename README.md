@@ -31,6 +31,7 @@
 - `Docs/strategy-risk-execution.md`
 - `Docs/observability_runbook.md`
 - `Docs/live-analytics-bff.md`
+- `Docs/logging_analytics_acceptance.md`
 - все ADR из `Docs/adr/`
 
 Если в ходе задачи меняется архитектурное решение, нужно обновить `Docs/` и соответствующий ADR в том же шаге.
@@ -78,6 +79,14 @@ cd apps/frontend && npm run test:unit
 
 ```bash
 python scripts/check.py
+```
+
+Приёмка logging/analytics слоя для калибровки:
+
+```bash
+make analytics-smoke
+make report-rebuild
+make replay-day
 ```
 
 ## Локальный Docker Compose
