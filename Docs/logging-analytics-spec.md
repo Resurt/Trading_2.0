@@ -295,6 +295,8 @@ analytics_context:
 - `strategy_state_event`
 - `hourly_report`
 - `daily_report`
+- `robot_command`
+- `report_job_outbox`
 - `counterfactual_result`
 - `audit_event`
 

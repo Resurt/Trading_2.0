@@ -18,6 +18,8 @@ from trading_common.db.models import (
     MarketCandle,
     OrderBookSummary,
     OrderIntent,
+    ReportJobOutbox,
+    RobotCommand,
     SessionRun,
     StrategyConfig,
 )
@@ -27,6 +29,8 @@ from trading_common.db.repositories import (
     MarketDataRepository,
     MicroSessionRepository,
     OrderRepository,
+    ReportJobRepository,
+    RobotCommandRepository,
     SessionRunRepository,
     StrategyConfigRepository,
 )
@@ -84,6 +88,8 @@ def test_metadata_contains_required_tables_and_partitioning() -> None:
         "strategy_state_event",
         "hourly_report",
         "daily_report",
+        "report_job_outbox",
+        "robot_command",
         "counterfactual_result",
         "audit_event",
         "market_candle",
@@ -116,6 +122,7 @@ def test_alembic_upgrade_and_downgrade_on_sqlite(tmp_path: Path) -> None:
         assert "order_intent" in table_names
         assert "counterfactual_result" in table_names
         assert "market_candle" in table_names
+        assert "robot_command" in table_names
         assert list(tickers) == ["GAZP", "LKOH", "SBER"]
 
     command.downgrade(config, "base")
@@ -135,6 +142,8 @@ def test_repository_crud_and_order_idempotency() -> None:
         strategy_configs = StrategyConfigRepository(session)
         session_runs = SessionRunRepository(session)
         orders = OrderRepository(session)
+        report_jobs = ReportJobRepository(session)
+        robot_commands = RobotCommandRepository(session)
         market_data = MarketDataRepository(session)
 
         instrument = instruments.upsert(
@@ -189,6 +198,40 @@ def test_repository_crud_and_order_idempotency() -> None:
         )
         session_runs.close(run.run_id, ended_at=now, close_reason_code="hourly_rollover")
         assert run.status == "closed"
+
+        report_job = report_jobs.create_hourly_job_idempotent(
+            micro_session_id=run.micro_session_id,
+            strategy_id="baseline",
+            trading_date=run.trading_date,
+            requested_at=now,
+            job_payload={"source": "test"},
+        )
+        duplicate_report_job = report_jobs.create_hourly_job_idempotent(
+            micro_session_id=run.micro_session_id,
+            strategy_id="baseline",
+            trading_date=run.trading_date,
+            requested_at=now,
+            job_payload={"source": "test"},
+        )
+        assert duplicate_report_job is report_job
+        assert report_job.status == "pending"
+        assert session.get(ReportJobOutbox, report_job.report_job_id) is report_job
+
+        command_row = robot_commands.create(
+            command_type="stop",
+            requested_by="operator",
+            requested_role="operator",
+            requested_at=now,
+            payload={"reason": "test"},
+        )
+        robot_commands.mark_accepted(command_row, accepted_at=now)
+        robot_commands.mark_applied(
+            command_row,
+            applied_at=now,
+            reason_code="runtime_safe_stopped",
+        )
+        assert command_row.status == "applied"
+        assert session.get(RobotCommand, command_row.command_id) is command_row
 
         request_order_id = uuid4()
         intent = orders.create_intent_idempotent(

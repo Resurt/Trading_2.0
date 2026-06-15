@@ -118,7 +118,8 @@ Invoke-RestMethod http://localhost:8000/session/current
 Invoke-RestMethod http://localhost:8000/market/overview
 ```
 
-Команды управления и ручной запуск daily report требуют placeholder role header:
+Команды управления и ручной запуск daily report в local-dev используют dev auth
+headers. В production этот путь запрещен, там нужен `TRADING_AUTH_MODE=static_bearer`.
 
 ```powershell
 Invoke-RestMethod -Method Post -Headers @{ "X-API-Role" = "operator" } http://localhost:8000/robot/start
@@ -128,6 +129,10 @@ Invoke-RestMethod -Method Post -Headers @{ "X-API-Role" = "operator" } `
   -Body '{"trading_date":"2026-06-13","strategy_id":"baseline","include_counterfactual":true}' `
   http://localhost:8000/reports/daily/run
 ```
+
+Эти команды сохраняются в `robot_command`, а `trade-core` применяет их в runtime loop.
+Проверить статус durable команды можно через `/robot/status` и прямую диагностику БД
+в local-dev.
 
 WebSocket каналы:
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import func, or_, select
@@ -26,11 +26,33 @@ from trading_common.db.models import (
     OrderBookSummary,
     OrderIntent,
     OrderStateEvent,
+    ReportJobOutbox,
     RiskEvent,
+    RobotCommand,
     SessionRun,
     SignalCandidate,
     StrategyConfig,
     StrategyStateEvent,
+)
+
+REPORT_JOB_PENDING = "pending"
+REPORT_JOB_QUEUED = "queued"
+REPORT_JOB_RUNNING = "running"
+REPORT_JOB_SUCCEEDED = "succeeded"
+REPORT_JOB_RETRY = "retry"
+REPORT_JOB_DEAD_LETTER = "dead_letter"
+HOURLY_REPORT_TASK = "report_worker.build_hourly_report"
+DAILY_REBUILD_TASK = "report_worker.rebuild_reports_for_date"
+
+ROBOT_COMMAND_REQUESTED = "requested"
+ROBOT_COMMAND_ACCEPTED = "accepted"
+ROBOT_COMMAND_APPLIED = "applied"
+ROBOT_COMMAND_REJECTED = "rejected"
+ROBOT_COMMAND_FAILED = "failed"
+ROBOT_COMMAND_TERMINAL_STATUSES = (
+    ROBOT_COMMAND_APPLIED,
+    ROBOT_COMMAND_REJECTED,
+    ROBOT_COMMAND_FAILED,
 )
 
 
@@ -257,6 +279,366 @@ class MicroSessionRepository:
             micro_session.status = "freezing"
         self._session.flush()
         return micro_session
+
+
+class ReportJobRepository:
+    """Transactional outbox helpers for report-worker Celery jobs."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def create_job_idempotent(
+        self,
+        *,
+        report_type: str,
+        task_name: str,
+        strategy_id: str,
+        requested_at: datetime,
+        micro_session_id: str | None = None,
+        trading_date: date | None = None,
+        force_rebuild: bool = True,
+        job_payload: Mapping[str, object] | None = None,
+        max_retries: int = 3,
+        idempotency_key: str | None = None,
+    ) -> ReportJobOutbox:
+        key = idempotency_key or self.idempotency_key(
+            report_type=report_type,
+            strategy_id=strategy_id,
+            micro_session_id=micro_session_id,
+            trading_date=trading_date,
+            job_payload=job_payload,
+        )
+        existing = self.get_by_idempotency_key(key)
+        if existing is not None:
+            return existing
+
+        payload = {
+            **dict(job_payload or {}),
+            "force_rebuild": force_rebuild,
+        }
+        job = ReportJobOutbox(
+            celery_task_id=None,
+            task_name=task_name,
+            report_type=report_type,
+            micro_session_id=micro_session_id,
+            strategy_id=strategy_id,
+            trading_date=trading_date,
+            status=REPORT_JOB_PENDING,
+            retry_count=0,
+            max_retries=max_retries,
+            last_error=None,
+            requested_at=requested_at,
+            started_at=None,
+            finished_at=None,
+            next_retry_at=None,
+            idempotency_key=key,
+            job_payload=payload,
+            result_payload={},
+        )
+        self._session.add(job)
+        self._session.flush()
+        return job
+
+    def create_hourly_job_idempotent(
+        self,
+        *,
+        micro_session_id: str,
+        strategy_id: str,
+        trading_date: date,
+        requested_at: datetime,
+        force_rebuild: bool = True,
+        job_payload: Mapping[str, object] | None = None,
+    ) -> ReportJobOutbox:
+        return self.create_job_idempotent(
+            report_type="hourly",
+            task_name=HOURLY_REPORT_TASK,
+            strategy_id=strategy_id,
+            micro_session_id=micro_session_id,
+            trading_date=trading_date,
+            requested_at=requested_at,
+            force_rebuild=force_rebuild,
+            job_payload=job_payload,
+            idempotency_key=self.hourly_idempotency_key(
+                micro_session_id=micro_session_id,
+                strategy_id=strategy_id,
+            ),
+        )
+
+    def get(self, report_job_id: UUID | str) -> ReportJobOutbox | None:
+        job_id = report_job_id if isinstance(report_job_id, UUID) else UUID(str(report_job_id))
+        return self._session.get(ReportJobOutbox, job_id)
+
+    def get_by_idempotency_key(self, idempotency_key: str) -> ReportJobOutbox | None:
+        stmt = select(ReportJobOutbox).where(ReportJobOutbox.idempotency_key == idempotency_key)
+        return self._session.execute(stmt).scalar_one_or_none()
+
+    def get_by_celery_task_id(self, celery_task_id: str | None) -> ReportJobOutbox | None:
+        if not celery_task_id:
+            return None
+        stmt = select(ReportJobOutbox).where(ReportJobOutbox.celery_task_id == celery_task_id)
+        return self._session.execute(stmt).scalar_one_or_none()
+
+    def list_dispatchable(
+        self,
+        *,
+        now: datetime,
+        limit: int = 50,
+    ) -> list[ReportJobOutbox]:
+        stmt = (
+            select(ReportJobOutbox)
+            .where(
+                ReportJobOutbox.status.in_((REPORT_JOB_PENDING, REPORT_JOB_RETRY)),
+                or_(
+                    ReportJobOutbox.next_retry_at.is_(None),
+                    ReportJobOutbox.next_retry_at <= now,
+                ),
+            )
+            .order_by(ReportJobOutbox.requested_at)
+            .limit(limit)
+        )
+        return list(self._session.execute(stmt).scalars())
+
+    def mark_enqueued(
+        self,
+        job: ReportJobOutbox,
+        *,
+        celery_task_id: str,
+    ) -> ReportJobOutbox:
+        job.celery_task_id = celery_task_id
+        job.status = REPORT_JOB_QUEUED
+        job.last_error = None
+        job.next_retry_at = None
+        self._session.flush()
+        return job
+
+    def mark_started_by_celery_task_id(
+        self,
+        celery_task_id: str | None,
+        *,
+        started_at: datetime,
+    ) -> ReportJobOutbox | None:
+        job = self.get_by_celery_task_id(celery_task_id)
+        if job is None:
+            return None
+        job.status = REPORT_JOB_RUNNING
+        job.started_at = started_at
+        job.last_error = None
+        self._session.flush()
+        return job
+
+    def mark_succeeded_by_celery_task_id(
+        self,
+        celery_task_id: str | None,
+        *,
+        finished_at: datetime,
+        result_payload: Mapping[str, object],
+    ) -> ReportJobOutbox | None:
+        job = self.get_by_celery_task_id(celery_task_id)
+        if job is None:
+            return None
+        job.status = REPORT_JOB_SUCCEEDED
+        job.finished_at = finished_at
+        job.last_error = None
+        job.next_retry_at = None
+        job.result_payload = dict(result_payload)
+        self._session.flush()
+        return job
+
+    def mark_failed_by_celery_task_id(
+        self,
+        celery_task_id: str | None,
+        *,
+        failed_at: datetime,
+        error: str,
+        retry_delay_seconds: int = 60,
+    ) -> ReportJobOutbox | None:
+        job = self.get_by_celery_task_id(celery_task_id)
+        if job is None:
+            return None
+        return self.mark_failed(
+            job,
+            failed_at=failed_at,
+            error=error,
+            retry_delay_seconds=retry_delay_seconds,
+        )
+
+    def mark_failed(
+        self,
+        job: ReportJobOutbox,
+        *,
+        failed_at: datetime,
+        error: str,
+        retry_delay_seconds: int = 60,
+    ) -> ReportJobOutbox:
+        job.retry_count += 1
+        job.last_error = error[:2048]
+        job.finished_at = failed_at
+        if job.retry_count < job.max_retries:
+            job.status = REPORT_JOB_RETRY
+            job.next_retry_at = failed_at + timedelta(seconds=retry_delay_seconds)
+            job.celery_task_id = None
+        else:
+            job.status = REPORT_JOB_DEAD_LETTER
+            job.next_retry_at = None
+        self._session.flush()
+        return job
+
+    @staticmethod
+    def hourly_idempotency_key(*, micro_session_id: str, strategy_id: str) -> str:
+        return f"hourly:{strategy_id}:{micro_session_id}"
+
+    @staticmethod
+    def idempotency_key(
+        *,
+        report_type: str,
+        strategy_id: str,
+        micro_session_id: str | None,
+        trading_date: date | None,
+        job_payload: Mapping[str, object] | None,
+    ) -> str:
+        payload_items = sorted((job_payload or {}).items())
+        payload_fingerprint = "|".join(f"{key}={value}" for key, value in payload_items)
+        return ":".join(
+            (
+                report_type,
+                strategy_id,
+                micro_session_id or "none",
+                trading_date.isoformat() if trading_date else "none",
+                payload_fingerprint or "default",
+            )
+        )
+
+
+class RobotCommandRepository:
+    """Persistent robot command queue for API -> trade-core control plane."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def create(
+        self,
+        *,
+        command_type: str,
+        requested_by: str,
+        requested_role: str,
+        requested_at: datetime,
+        payload: Mapping[str, object] | None = None,
+        reason_code: str | None = None,
+    ) -> RobotCommand:
+        command = RobotCommand(
+            command_type=command_type,
+            requested_by=requested_by,
+            requested_role=requested_role,
+            requested_at=requested_at,
+            status=ROBOT_COMMAND_REQUESTED,
+            reason_code=reason_code,
+            accepted_at=None,
+            applied_at=None,
+            finished_at=None,
+            payload=dict(payload or {}),
+            result_payload={},
+        )
+        self._session.add(command)
+        self._session.flush()
+        return command
+
+    def get(self, command_id: UUID | str) -> RobotCommand | None:
+        parsed_id = command_id if isinstance(command_id, UUID) else UUID(str(command_id))
+        return self._session.get(RobotCommand, parsed_id)
+
+    def latest(self) -> RobotCommand | None:
+        stmt = select(RobotCommand).order_by(RobotCommand.requested_at.desc())
+        return self._session.execute(stmt).scalars().first()
+
+    def list_requested(self, *, limit: int = 20) -> list[RobotCommand]:
+        stmt = (
+            select(RobotCommand)
+            .where(RobotCommand.status == ROBOT_COMMAND_REQUESTED)
+            .order_by(RobotCommand.requested_at, RobotCommand.command_id)
+            .limit(limit)
+        )
+        return list(self._session.execute(stmt).scalars())
+
+    def mark_accepted(
+        self,
+        command: RobotCommand,
+        *,
+        accepted_at: datetime,
+        reason_code: str = "runtime_command_accepted",
+    ) -> RobotCommand:
+        command.status = ROBOT_COMMAND_ACCEPTED
+        command.reason_code = reason_code
+        command.accepted_at = accepted_at
+        self._session.flush()
+        return command
+
+    def mark_applied(
+        self,
+        command: RobotCommand,
+        *,
+        applied_at: datetime,
+        reason_code: str,
+        result_payload: Mapping[str, object] | None = None,
+    ) -> RobotCommand:
+        command.status = ROBOT_COMMAND_APPLIED
+        command.reason_code = reason_code
+        command.applied_at = applied_at
+        command.finished_at = applied_at
+        command.result_payload = dict(result_payload or {})
+        self._session.flush()
+        return command
+
+    def mark_rejected(
+        self,
+        command: RobotCommand,
+        *,
+        rejected_at: datetime,
+        reason_code: str,
+        result_payload: Mapping[str, object] | None = None,
+    ) -> RobotCommand:
+        command.status = ROBOT_COMMAND_REJECTED
+        command.reason_code = reason_code
+        command.finished_at = rejected_at
+        command.result_payload = dict(result_payload or {})
+        self._session.flush()
+        return command
+
+    def mark_failed(
+        self,
+        command: RobotCommand,
+        *,
+        failed_at: datetime,
+        reason_code: str,
+        error: str,
+        result_payload: Mapping[str, object] | None = None,
+    ) -> RobotCommand:
+        command.status = ROBOT_COMMAND_FAILED
+        command.reason_code = reason_code
+        command.finished_at = failed_at
+        command.result_payload = {
+            **dict(result_payload or {}),
+            "error": error[:2048],
+        }
+        self._session.flush()
+        return command
+
+    @staticmethod
+    def robot_state_from_command(command: RobotCommand | None) -> str:
+        if command is None:
+            return "stopped"
+        if command.status not in ROBOT_COMMAND_TERMINAL_STATUSES:
+            return f"{command.command_type}_{command.status}"
+        if command.status != ROBOT_COMMAND_APPLIED:
+            return f"{command.command_type}_{command.status}"
+        if command.command_type in {"start", "resume"}:
+            return "running"
+        if command.command_type == "pause":
+            return "paused"
+        if command.command_type == "stop":
+            return "stopped"
+        if command.command_type == "emergency_stop":
+            return "emergency_stopped"
+        return command.status
 
 
 class StrategyStateEventRepository:

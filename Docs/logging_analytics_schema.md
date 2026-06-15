@@ -17,6 +17,7 @@ flowchart LR
     candidate --> counterfactual["counterfactual_result"]
     session --> hourly["hourly_report"]
     hourly --> daily["daily_report"]
+    command["robot_command"] --> audit["audit_event"]
 ```
 
 `candidate_id` является центральным join key для разбора пути:
@@ -44,6 +45,8 @@ flowchart LR
 | `counterfactual_result` | Что было бы с заблокированным/отмененным кандидатом через 5/10/15 минут. |
 | `hourly_report` | Агрегат закрытой micro-session. |
 | `daily_report` | Дневной агрегат по session/instrument/timeframe. |
+| `robot_command` | Durable команды оператора: `start`, `stop`, `pause`, `resume`, `emergency_stop` и их lifecycle. |
+| `report_job_outbox` | Transactional outbox для постановки тяжелых отчетов в `report-worker`. |
 | `audit_event` | Аудит операторских и системных действий. |
 
 ## Partitioning

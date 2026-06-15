@@ -14,6 +14,7 @@ from trade_core.session.models import JsonObject, SessionEventContext
 from trading_common.db.models import MicroSession, SessionRun, StrategyStateEvent
 from trading_common.db.repositories import (
     MicroSessionRepository,
+    ReportJobRepository,
     SessionRunRepository,
     StrategyStateEventRepository,
 )
@@ -85,6 +86,7 @@ class SqlAlchemySessionStateStore:
     ) -> None:
         self._session_runs = SessionRunRepository(session)
         self._micro_sessions = MicroSessionRepository(session)
+        self._report_jobs = ReportJobRepository(session)
         self._state_events = StrategyStateEventRepository(session)
         self._strategy_id = strategy_id
         self._strategy_version = strategy_version
@@ -257,6 +259,18 @@ class SqlAlchemySessionStateStore:
         report_payload: Mapping[str, object],
     ) -> None:
         self._session_runs.request_report(run_id, requested_at=requested_at)
+        job = self._report_jobs.create_hourly_job_idempotent(
+            micro_session_id=context.micro_session_id,
+            strategy_id=self._strategy_id,
+            trading_date=context.trading_date,
+            requested_at=requested_at,
+            force_rebuild=True,
+            job_payload={
+                "run_id": str(run_id),
+                "source_event_type": "report_requested",
+                **dict(report_payload),
+            },
+        )
         self._record_state_event(
             context=context,
             observed_at=requested_at,
@@ -264,13 +278,21 @@ class SqlAlchemySessionStateStore:
             previous_state="closed",
             new_state="report_requested",
             reason_code=None,
-            payload={"run_id": str(run_id), "report": dict(report_payload)},
+            payload={
+                "run_id": str(run_id),
+                "report_job_id": str(job.report_job_id),
+                "report": dict(report_payload),
+            },
         )
         _log_session_event(
             context=context,
             event_type="report_requested",
             observed_at=requested_at,
-            payload={"run_id": str(run_id), "report": dict(report_payload)},
+            payload={
+                "run_id": str(run_id),
+                "report_job_id": str(job.report_job_id),
+                "report": dict(report_payload),
+            },
         )
 
     def _record_state_event(

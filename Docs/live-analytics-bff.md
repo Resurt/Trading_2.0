@@ -60,9 +60,13 @@ FastAPI читает read models и доменные факты из PostgreSQL,
 - `counterfactual`
 - `canceled_orders`
 
-Текущая реализация WebSocket отправляет snapshot и закрывает соединение. Frontend
-отображает это как `snapshot_closed`, а не как ошибку. Непрерывный push останется
-следующим шагом после подключения live event bus.
+WebSocket endpoints держат соединение открытым. При подключении BFF отправляет
+первый snapshot, затем повторные snapshot/update сообщения по configurable interval
+и heartbeat. Если клиент не успевает принимать сообщения, BFF закрывает соединение
+как backpressure protection; frontend должен перейти в degraded/reconnect состояние.
+
+Control plane команды идут через `robot_command`: API пишет durable command и audit,
+а `trade-core` применяет ее в runtime loop без физического рестарта процесса.
 
 ## Analytics read models
 

@@ -90,7 +90,7 @@ def test_logging_analytics_acceptance_detects_raw_secret_leak() -> None:
                 entity_id="request-1",
                 severity="info",
                 correlation_id="secret-leak-check",
-                audit_payload={"token": "t.CUtCVmpYDwTcVJg2iw6I2_93fkWFHMeB38axeIC2ZG4"},
+                audit_payload={"token": "fake-token-for-secret-leak-check"},
             )
         )
         report = AnalyticsAcceptanceChecker(session).run(

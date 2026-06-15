@@ -36,7 +36,10 @@ WebSocket channels:
 - `/ws/market`
 - `/ws/reports`
 
-Команды управления и ручной запуск отчетов должны отправлять placeholder role header `X-API-Role: operator` до внедрения полноценной auth-модели.
+Команды управления и ручной запуск отчетов проходят через auth abstraction BFF.
+В local-dev frontend может отправлять dev header `X-API-Role: operator`, но
+в `production` этот provider запрещен: используется bearer-token provider,
+а сами команды сохраняются в `robot_command` и `audit_event`.
 
 ## Общий layout
 
@@ -224,4 +227,6 @@ Live widgets:
 - latest hourly report;
 - freshness timestamps.
 
-REST используется для initial snapshot/history. WebSocket используется для snapshot/live обновлений. Текущий BFF WebSocket пока отправляет snapshot и закрывает соединение; frontend отображает это как `snapshot_closed`, а не как ошибку.
+REST используется для initial snapshot/history. WebSocket используется для snapshot/live
+обновлений. BFF WebSocket держит соединение открытым, отправляет snapshot при
+подключении, затем push-обновления по interval и heartbeat.

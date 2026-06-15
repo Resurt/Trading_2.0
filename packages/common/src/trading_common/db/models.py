@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     ForeignKey,
@@ -855,6 +856,79 @@ class DailyReport(Base):
     fill_ratio: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
     report_payload: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
     generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ReportJobOutbox(Base, TimestampMixin):
+    """Transactional outbox row for report-worker Celery jobs."""
+
+    __tablename__ = "report_job_outbox"
+    __table_args__ = (
+        UniqueConstraint(
+            "idempotency_key",
+            name="uq_report_job_outbox_idempotency_key",
+        ),
+        Index("ix_report_job_outbox_status", "status", "next_retry_at"),
+        Index("ix_report_job_outbox_micro_strategy", "micro_session_id", "strategy_id"),
+        Index("ix_report_job_outbox_celery_task_id", "celery_task_id", unique=True),
+    )
+
+    report_job_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    celery_task_id: Mapped[str | None] = mapped_column(String(128))
+    task_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    report_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    micro_session_id: Mapped[str | None] = mapped_column(String(96))
+    strategy_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    trading_date: Mapped[date | None] = mapped_column(Date)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_retries: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    last_error: Mapped[str | None] = mapped_column(String(2048))
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    idempotency_key: Mapped[str] = mapped_column(String(256), nullable=False)
+    job_payload: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
+    result_payload: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
+
+
+class RobotCommand(Base, TimestampMixin):
+    """Persistent operator command consumed by the long-lived trade-core runtime."""
+
+    __tablename__ = "robot_command"
+    __table_args__ = (
+        CheckConstraint(
+            "command_type in ('start', 'stop', 'pause', 'resume', 'emergency_stop')",
+            name="ck_robot_command_type",
+        ),
+        CheckConstraint(
+            "status in ('requested', 'accepted', 'applied', 'rejected', 'failed')",
+            name="ck_robot_command_status",
+        ),
+        Index("ix_robot_command_status_requested", "status", "requested_at"),
+        Index("ix_robot_command_type_requested", "command_type", "requested_at"),
+    )
+
+    command_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    command_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    requested_by: Mapped[str] = mapped_column(String(96), nullable=False)
+    requested_role: Mapped[str] = mapped_column(String(32), nullable=False)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="requested")
+    reason_code: Mapped[str | None] = mapped_column(String(64))
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    payload: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
+    result_payload: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
 
 
 class CounterfactualResult(Base, SessionContextMixin):

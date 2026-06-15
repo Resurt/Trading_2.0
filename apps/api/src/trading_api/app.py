@@ -2,20 +2,36 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime
 from typing import Annotated, cast
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, WebSocket
+from fastapi import (
+    Depends,
+    FastAPI,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 
-from trading_api.auth import require_role, role_from_header
+from trading_api.auth import (
+    AuthContext,
+    auth_context_from_request,
+    authenticate_websocket,
+    build_auth_provider,
+    require_role,
+)
 from trading_api.read_service import BffReadService
 from trading_api.report_tasks import CeleryReportTaskClient, ReportTaskClient
-from trading_api.robot_control import RobotControlState
+from trading_api.robot_control import RobotControlService
 from trading_api.schemas import (
     ApiRole,
     BlockerAnalyticsResponse,
@@ -47,7 +63,7 @@ from trading_common.http_health import CONTENT_TYPE_TEXT, render_health, render_
 from trading_common.models import HealthStatus
 from trading_common.observability import TradingMetrics
 
-RoleDep = Annotated[ApiRole, Depends(role_from_header)]
+AuthDep = Annotated[AuthContext, Depends(auth_context_from_request)]
 
 
 def runtime_mode_from_env(value: str | None) -> RuntimeMode:
@@ -92,13 +108,17 @@ def create_fastapi_app(
         allow_origins=_cors_origins_from_env(),
         allow_credentials=False,
         allow_methods=["GET", "POST", "PUT"],
-        allow_headers=["Accept", "Content-Type", "X-API-Role"],
+        allow_headers=["Accept", "Authorization", "Content-Type", "X-API-Actor", "X-API-Role"],
     )
     app.state.identity = identity
     app.state.database = database
-    app.state.report_task_client = report_task_client or CeleryReportTaskClient.from_env()
-    app.state.robot_control = RobotControlState()
+    app.state.auth_provider = build_auth_provider(runtime_mode=runtime_mode)
+    app.state.report_task_client = report_task_client or CeleryReportTaskClient.from_env(
+        database=database
+    )
+    app.state.robot_control = None
     app.state.metrics = TradingMetrics(identity)
+    app.state.ws_push_interval_seconds = _ws_push_interval_from_env()
 
     @app.get("/health", tags=["health"])
     def get_health() -> Response:
@@ -117,23 +137,38 @@ def create_fastapi_app(
         )
 
     @app.post("/robot/start", response_model=RobotCommandResponse, tags=["robot"])
-    def robot_start(request: Request, role: RoleDep) -> RobotCommandResponse:
-        allowed_role = require_role(role, (ApiRole.OPERATOR, ApiRole.ADMIN))
+    def robot_start(request: Request, auth: AuthDep) -> RobotCommandResponse:
+        allowed_auth = require_role(auth, (ApiRole.OPERATOR, ApiRole.ADMIN))
         control = _robot_control(request)
-        return control.start(role=allowed_role)
+        return control.start(auth=allowed_auth)
 
     @app.post("/robot/stop", response_model=RobotCommandResponse, tags=["robot"])
-    def robot_stop(request: Request, role: RoleDep) -> RobotCommandResponse:
-        allowed_role = require_role(role, (ApiRole.OPERATOR, ApiRole.ADMIN))
+    def robot_stop(request: Request, auth: AuthDep) -> RobotCommandResponse:
+        allowed_auth = require_role(auth, (ApiRole.OPERATOR, ApiRole.ADMIN))
         control = _robot_control(request)
-        return control.stop(role=allowed_role)
+        return control.stop(auth=allowed_auth)
+
+    @app.post("/robot/pause", response_model=RobotCommandResponse, tags=["robot"])
+    def robot_pause(request: Request, auth: AuthDep) -> RobotCommandResponse:
+        allowed_auth = require_role(auth, (ApiRole.OPERATOR, ApiRole.ADMIN))
+        return _robot_control(request).pause(auth=allowed_auth)
+
+    @app.post("/robot/resume", response_model=RobotCommandResponse, tags=["robot"])
+    def robot_resume(request: Request, auth: AuthDep) -> RobotCommandResponse:
+        allowed_auth = require_role(auth, (ApiRole.OPERATOR, ApiRole.ADMIN))
+        return _robot_control(request).resume(auth=allowed_auth)
+
+    @app.post("/robot/emergency-stop", response_model=RobotCommandResponse, tags=["robot"])
+    def robot_emergency_stop(request: Request, auth: AuthDep) -> RobotCommandResponse:
+        allowed_auth = require_role(auth, (ApiRole.OPERATOR, ApiRole.ADMIN))
+        return _robot_control(request).emergency_stop(auth=allowed_auth)
 
     @app.get("/robot/status", response_model=RobotStatusResponse, tags=["robot"])
     def robot_status(
         request: Request,
         service: ReadServiceDep,
     ) -> RobotStatusResponse:
-        return service.robot_status(robot_control_state=_robot_control(request).state)
+        return service.robot_status(robot_control_state=_robot_control(request).current_state())
 
     @app.get("/session/current", response_model=SessionSnapshotResponse, tags=["session"])
     def current_session(service: ReadServiceDep) -> SessionSnapshotResponse:
@@ -201,18 +236,18 @@ def create_fastapi_app(
     def run_daily_report(
         payload: DailyReportRunRequest,
         request: Request,
-        role: RoleDep,
+        auth: AuthDep,
     ) -> ReportJobResponse:
-        require_role(role, (ApiRole.OPERATOR, ApiRole.ADMIN))
+        require_role(auth, (ApiRole.OPERATOR, ApiRole.ADMIN))
         return _report_task_client(request).enqueue_daily_report(payload)
 
     @app.post("/reports/rebuild/run", response_model=ReportJobResponse, tags=["reports"])
     def run_report_rebuild(
         payload: ReportRebuildRequest,
         request: Request,
-        role: RoleDep,
+        auth: AuthDep,
     ) -> ReportJobResponse:
-        require_role(role, (ApiRole.OPERATOR, ApiRole.ADMIN))
+        require_role(auth, (ApiRole.OPERATOR, ApiRole.ADMIN))
         if payload.scope == ReportScope.HOURLY and payload.micro_session_id is None:
             raise HTTPException(
                 status_code=400,
@@ -340,40 +375,42 @@ def create_fastapi_app(
     @app.put("/config/strategy", response_model=StrategyConfigResponse, tags=["config"])
     def put_strategy_config(
         payload: StrategyConfigUpdateRequest,
-        role: RoleDep,
+        auth: AuthDep,
         service: ReadServiceDep,
     ) -> StrategyConfigResponse:
-        require_role(role, (ApiRole.OPERATOR, ApiRole.ADMIN))
+        require_role(auth, (ApiRole.OPERATOR, ApiRole.ADMIN))
         return service.update_strategy_config(payload)
 
     @app.websocket("/ws/dashboard")
     async def ws_dashboard(websocket: WebSocket) -> None:
-        await _send_ws_snapshot(websocket, "dashboard.snapshot", _dashboard_payload(websocket))
+        await _stream_ws_snapshots(
+            websocket,
+            "dashboard.snapshot",
+            lambda: _dashboard_payload(cast(FastAPI, websocket.app)),
+        )
 
     @app.websocket("/ws/orders")
     async def ws_orders(websocket: WebSocket) -> None:
-        service = _read_service_for_websocket(websocket)
-        await _send_ws_snapshot(websocket, "orders.snapshot", {"orders": service.open_orders()})
+        await _stream_ws_snapshots(
+            websocket,
+            "orders.snapshot",
+            lambda: _orders_payload(cast(FastAPI, websocket.app)),
+        )
 
     @app.websocket("/ws/market")
     async def ws_market(websocket: WebSocket) -> None:
-        service = _read_service_for_websocket(websocket)
-        await _send_ws_snapshot(websocket, "market.snapshot", service.market_overview())
+        await _stream_ws_snapshots(
+            websocket,
+            "market.snapshot",
+            lambda: _market_payload(cast(FastAPI, websocket.app)),
+        )
 
     @app.websocket("/ws/reports")
     async def ws_reports(websocket: WebSocket) -> None:
-        service = _read_service_for_websocket(websocket)
-        await _send_ws_snapshot(
+        await _stream_ws_snapshots(
             websocket,
             "reports.snapshot",
-            {
-                "hourly": service.hourly_reports(limit=5),
-                "daily": service.daily_reports(limit=5),
-                "blockers": service.blocker_analytics(limit=5),
-                "candidate_funnel": service.candidate_funnel(),
-                "counterfactual": service.counterfactual_reports(limit=10),
-                "canceled_orders": service.canceled_order_diagnostics(limit=5),
-            },
+            lambda: _reports_payload(cast(FastAPI, websocket.app)),
         )
 
     return app
@@ -392,23 +429,28 @@ def _read_service_dependency(request: Request) -> Iterator[BffReadService]:
 ReadServiceDep = Annotated[BffReadService, Depends(_read_service_dependency)]
 
 
-def _read_service_for_websocket(websocket: WebSocket) -> BffReadService:
-    database = _database_service(websocket)
-    session = database.session_factory()
-    websocket.state.db_session = session
-    return BffReadService(session)
-
-
 def _database_service(request: Request | WebSocket) -> DatabaseService:
-    database = getattr(request.app.state, "database", None)
+    return _database_service_from_app(cast(FastAPI, request.app))
+
+
+def _database_service_from_app(app: FastAPI) -> DatabaseService:
+    database = getattr(app.state, "database", None)
     if database is None:
         database = DatabaseService(build_database_url_from_env())
-        request.app.state.database = database
+        app.state.database = database
     return database
 
 
-def _robot_control(request: Request) -> RobotControlState:
-    return cast(RobotControlState, request.app.state.robot_control)
+def _robot_control(request: Request) -> RobotControlService:
+    return _robot_control_from_app(cast(FastAPI, request.app))
+
+
+def _robot_control_from_app(app: FastAPI) -> RobotControlService:
+    control = getattr(app.state, "robot_control", None)
+    if control is None:
+        control = RobotControlService(_database_service_from_app(app))
+        app.state.robot_control = control
+    return cast(RobotControlService, control)
 
 
 def _report_task_client(request: Request) -> ReportTaskClient:
@@ -427,37 +469,113 @@ def _cors_origins_from_env() -> list[str]:
     return [origin.strip() for origin in raw_origins.split(",") if origin.strip()]
 
 
-def _dashboard_payload(websocket: WebSocket) -> dict[str, object]:
-    service = _read_service_for_websocket(websocket)
-    status = service.robot_status(robot_control_state=websocket.app.state.robot_control.state)
-    return {
-        "robot_status": status,
-        "market": service.market_overview(),
-        "open_orders": service.open_orders(),
-        "positions": service.positions(),
-        "signals": service.current_signals(),
-        "blockers": service.blocker_analytics(limit=5),
-        "candidate_funnel": service.candidate_funnel(),
-    }
+def _ws_push_interval_from_env() -> float:
+    return max(0.05, float(os.getenv("TRADING_WS_PUSH_INTERVAL_SECONDS", "1.0")))
 
 
-async def _send_ws_snapshot(websocket: WebSocket, message_type: str, payload: object) -> None:
-    await websocket.accept()
-    try:
-        micro_session_id = _payload_micro_session_id(payload)
-        envelope = WebSocketEnvelope(
-            message_id=uuid4(),
-            ts_utc=datetime.now(tz=UTC),
-            type=message_type,
-            micro_session_id=micro_session_id,
-            payload={"data": jsonable_encoder(payload)},
+def _dashboard_payload(app: FastAPI) -> dict[str, object]:
+    database = _database_service_from_app(app)
+    with database.session_scope() as session:
+        service = BffReadService(session)
+        status = service.robot_status(
+            robot_control_state=_robot_control_from_app(app).current_state()
         )
-        await websocket.send_json(envelope.model_dump(mode="json"))
-    finally:
-        session = getattr(websocket.state, "db_session", None)
-        if session is not None:
-            session.close()
-        await websocket.close()
+        return {
+            "robot_status": status,
+            "market": service.market_overview(),
+            "open_orders": service.open_orders(),
+            "positions": service.positions(),
+            "signals": service.current_signals(),
+            "blockers": service.blocker_analytics(limit=5),
+            "candidate_funnel": service.candidate_funnel(),
+        }
+
+
+def _orders_payload(app: FastAPI) -> dict[str, object]:
+    database = _database_service_from_app(app)
+    with database.session_scope() as session:
+        return {"orders": BffReadService(session).open_orders()}
+
+
+def _market_payload(app: FastAPI) -> MarketOverviewResponse:
+    database = _database_service_from_app(app)
+    with database.session_scope() as session:
+        return BffReadService(session).market_overview()
+
+
+def _reports_payload(app: FastAPI) -> dict[str, object]:
+    database = _database_service_from_app(app)
+    with database.session_scope() as session:
+        service = BffReadService(session)
+        return {
+            "hourly": service.hourly_reports(limit=5),
+            "daily": service.daily_reports(limit=5),
+            "blockers": service.blocker_analytics(limit=5),
+            "candidate_funnel": service.candidate_funnel(),
+            "counterfactual": service.counterfactual_reports(limit=10),
+            "canceled_orders": service.canceled_order_diagnostics(limit=5),
+        }
+
+
+async def _stream_ws_snapshots(
+    websocket: WebSocket,
+    message_type: str,
+    payload_factory: Callable[[], object],
+) -> None:
+    try:
+        require_role(
+            authenticate_websocket(websocket),
+            (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN),
+        )
+    except HTTPException:
+        await websocket.close(code=1008)
+        return
+
+    await websocket.accept()
+    interval = float(getattr(websocket.app.state, "ws_push_interval_seconds", 1.0))
+    sequence = 0
+    try:
+        while True:
+            payload = payload_factory()
+            await _send_ws_envelope(websocket, message_type, payload, sequence=sequence)
+            sequence += 1
+            if sequence % 10 == 0:
+                await _send_ws_envelope(
+                    websocket,
+                    "heartbeat",
+                    {"sequence": sequence},
+                    sequence=sequence,
+                )
+            await asyncio.sleep(interval)
+    except WebSocketDisconnect:
+        return
+    except TimeoutError:
+        await _close_ws_quietly(websocket, code=1011)
+
+
+async def _send_ws_envelope(
+    websocket: WebSocket,
+    message_type: str,
+    payload: object,
+    *,
+    sequence: int,
+) -> None:
+    micro_session_id = _payload_micro_session_id(payload)
+    envelope = WebSocketEnvelope(
+        message_id=uuid4(),
+        ts_utc=datetime.now(tz=UTC),
+        type=message_type,
+        micro_session_id=micro_session_id,
+        payload={"data": jsonable_encoder(payload), "sequence": sequence},
+    )
+    await asyncio.wait_for(websocket.send_json(envelope.model_dump(mode="json")), timeout=5.0)
+
+
+async def _close_ws_quietly(websocket: WebSocket, *, code: int) -> None:
+    try:
+        await websocket.close(code=code)
+    except RuntimeError:
+        return
 
 
 def _payload_micro_session_id(payload: object) -> str | None:

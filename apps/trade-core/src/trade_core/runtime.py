@@ -15,6 +15,7 @@ from typing import Any, cast
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
+from celery import Celery
 from sqlalchemy.orm import Session
 
 from trade_core.app import create_identity
@@ -85,7 +86,7 @@ from trade_core.strategy import (
 )
 from trading_common import LaunchModePolicy, RuntimeMode, ServiceName, TradingMetrics
 from trading_common.db.base import Base
-from trading_common.db.models import AuditEvent, InstrumentRegistry
+from trading_common.db.models import AuditEvent, InstrumentRegistry, RobotCommand
 from trading_common.db.repositories import (
     BlockerEventRepository,
     CandidateStageResultRepository,
@@ -93,12 +94,14 @@ from trading_common.db.repositories import (
     MarketContextSnapshotRepository,
     OrderRepository,
     RiskEventRepository,
+    RobotCommandRepository,
     SignalCandidateRepository,
     StrategyStateEventRepository,
 )
 from trading_common.db.service import DatabaseService
 from trading_common.enums import SessionPhase, SessionType
 from trading_common.observability import DomainEventType
+from trading_common.report_jobs import REPORTS_QUEUE, ReportJobDispatcher
 from trading_common.telemetry import get_logger, log_event
 
 JsonPayload = dict[str, Any]
@@ -372,6 +375,7 @@ class TradeCoreRuntime:
         metrics: TradingMetrics | None = None,
         strategy_config: ConfigDrivenStrategyConfig | None = None,
         risk_limits: RiskLimits | None = None,
+        report_job_dispatcher: ReportJobDispatcher | None = None,
     ) -> None:
         self.config = config or TradeCoreRuntimeConfig.from_env()
         self.launch_policy = launch_policy or LaunchModePolicy.from_env()
@@ -379,6 +383,7 @@ class TradeCoreRuntime:
         self.identity = create_identity(self.launch_policy.mode)
         self.database = database or DatabaseService(_required_database_url(self.config))
         self.metrics = metrics or TradingMetrics(self.identity)
+        self.report_job_dispatcher = report_job_dispatcher or _build_report_job_dispatcher()
         if self.config.auto_create_sqlite_schema:
             Base.metadata.create_all(self.database.engine)
 
@@ -400,6 +405,7 @@ class TradeCoreRuntime:
         self.risk_limits = risk_limits or RiskLimits()
         self.runtime_id = uuid4()
         self.stats = TradeCoreRuntimeStats()
+        self.robot_control_state = "running"
 
         self._session: Session | None = None
         self._session_state_store: SqlAlchemySessionStateStore | None = None
@@ -577,6 +583,7 @@ class TradeCoreRuntime:
 
         if not self.stats.started:
             await self.start()
+        self.process_robot_commands()
         observed_at = _ensure_msk(now or datetime.now(tz=MSK))
         instrument = self.config.instruments[0]
         schedule = await self.refresh_trading_schedule(now=observed_at)
@@ -609,6 +616,7 @@ class TradeCoreRuntime:
                 )
         self.stats.cycles += 1
         self.flush_domain_events()
+        self.dispatch_report_jobs()
         return result.snapshot
 
     async def refresh_trading_schedule(self, *, now: datetime) -> TradingSchedule:
@@ -735,6 +743,107 @@ class TradeCoreRuntime:
         if session is not None:
             session.commit()
 
+    def dispatch_report_jobs(self) -> None:
+        session = self._session
+        if session is None:
+            return
+        dispatched = self.report_job_dispatcher.dispatch_pending(session)
+        session.commit()
+        for job in dispatched:
+            log_event(
+                logger=LOGGER,
+                event_type="report_job_enqueued",
+                component="runtime.report_jobs",
+                report_job_id=str(job.report_job_id),
+                celery_task_id=job.celery_task_id,
+                report_type=job.report_type,
+                micro_session_id=job.micro_session_id,
+                strategy_id=job.strategy_id,
+            )
+
+    def process_robot_commands(self) -> int:
+        """Apply durable operator commands written by the API control plane."""
+
+        session = self._session
+        if session is None:
+            return 0
+        repository = RobotCommandRepository(session)
+        commands = repository.list_requested()
+        processed = 0
+        for command in commands:
+            now = datetime.now(tz=UTC)
+            previous_state = self.robot_control_state
+            repository.mark_accepted(command, accepted_at=now)
+            try:
+                reason_code, result_payload = self._apply_robot_command(command)
+                result_payload = {
+                    **result_payload,
+                    "previous_robot_control_state": previous_state,
+                    "robot_control_state": self.robot_control_state,
+                }
+                repository.mark_applied(
+                    command,
+                    applied_at=now,
+                    reason_code=reason_code,
+                    result_payload=result_payload,
+                )
+                self._write_robot_command_audit(command=command, payload=result_payload)
+                processed += 1
+            except Exception as exc:
+                repository.mark_failed(
+                    command,
+                    failed_at=now,
+                    reason_code="runtime_command_failed",
+                    error=str(exc),
+                    result_payload={"previous_robot_control_state": previous_state},
+                )
+                self._write_robot_command_audit(
+                    command=command,
+                    payload={
+                        "previous_robot_control_state": previous_state,
+                        "error_code": type(exc).__name__,
+                        "error_message": str(exc),
+                    },
+                )
+        if commands:
+            session.commit()
+        return processed
+
+    def _apply_robot_command(self, command: RobotCommand) -> tuple[str, JsonPayload]:
+        command_type = command.command_type
+        if command_type in {"start", "resume"}:
+            self.robot_control_state = "running"
+            return "runtime_entries_enabled", {}
+        if command_type == "pause":
+            self.robot_control_state = "paused"
+            return "runtime_entries_paused", {"new_entries_allowed": False}
+        if command_type == "stop":
+            self.robot_control_state = "stopped"
+            self._strategy_states = {
+                instrument_id: StrategyState.STOPPED
+                for instrument_id in self._strategy_states
+            }
+            return "runtime_safe_stopped", {"new_entries_allowed": False}
+        if command_type == "emergency_stop":
+            cancelled_open_orders = self.stats.open_orders
+            self.robot_control_state = "emergency_stopped"
+            self.stats.open_orders = 0
+            self.metrics.set_open_orders(0)
+            self._strategy_states = {
+                instrument_id: StrategyState.STOPPED
+                for instrument_id in self._strategy_states
+            }
+            return (
+                "runtime_emergency_stopped",
+                {
+                    "new_entries_allowed": False,
+                    "cancel_reason_code": "manual_operator_emergency_stop",
+                    "cancelled_open_orders": cancelled_open_orders,
+                },
+            )
+        msg = f"unsupported robot command: {command_type}"
+        raise ValueError(msg)
+
     def _build_broker_gateway(self) -> BrokerGateway:
         if self.launch_policy.mode is RuntimeMode.HISTORICAL_REPLAY:
             return cast(BrokerGateway, SafeNoopBrokerGateway())
@@ -820,6 +929,18 @@ class TradeCoreRuntime:
     async def _evaluate_strategy_on_closed_bar(self, bar: Bar) -> None:
         snapshot = self._current_snapshot
         if snapshot is None or snapshot.micro_session_id is None:
+            return
+        if self.robot_control_state != "running":
+            previous_state = self._strategy_states.get(bar.instrument_id, StrategyState.IDLE)
+            self._record_strategy_transition(
+                instrument_id=bar.instrument_id,
+                previous_state=previous_state,
+                new_state=StrategyState.STOPPED,
+                event_type=DomainEventType.STRATEGY_STATE_CHANGED.value,
+                reason_code=f"robot_control_{self.robot_control_state}",
+                payload={"closed_bar_ts": bar.close_ts_utc.isoformat()},
+            )
+            self._strategy_states[bar.instrument_id] = StrategyState.STOPPED
             return
         instrument = self._instrument_for(bar.instrument_id)
         previous_state = self._strategy_states.get(bar.instrument_id, StrategyState.IDLE)
@@ -1065,6 +1186,47 @@ class TradeCoreRuntime:
             )
         )
 
+    def _write_robot_command_audit(
+        self,
+        *,
+        command: RobotCommand,
+        payload: Mapping[str, object],
+    ) -> None:
+        session = self._session
+        if session is None:
+            return
+        snapshot = self._current_snapshot or self._fallback_snapshot()
+        micro_session_id = snapshot.micro_session_id or "unassigned"
+        now = datetime.now(tz=UTC)
+        session.add(
+            AuditEvent(
+                calendar_date=snapshot.calendar_date,
+                trading_date=snapshot.trading_date,
+                session_type=snapshot.session_type.value,
+                session_phase=snapshot.session_phase.value,
+                micro_session_id=micro_session_id,
+                broker_trading_status=snapshot.broker_trading_status,
+                ts_utc=now,
+                exchange_ts=now,
+                received_ts=now,
+                service=ServiceName.TRADE_CORE.value,
+                actor=command.requested_by,
+                action=f"robot_command_{command.command_type}_{command.status}",
+                entity_type="robot_command",
+                entity_id=str(command.command_id),
+                severity="info" if command.status == "applied" else "warning",
+                correlation_id=str(command.command_id),
+                audit_payload={
+                    "command_type": command.command_type,
+                    "requested_role": command.requested_role,
+                    "requested_at": command.requested_at.isoformat(),
+                    "reason_code": command.reason_code,
+                    "payload": dict(command.payload),
+                    "result": dict(payload),
+                },
+            )
+        )
+
     def _require_session(self) -> Session:
         if self._session is None:
             msg = "TradeCoreRuntime.start() has not opened a database session yet"
@@ -1101,6 +1263,14 @@ def _required_database_url(config: TradeCoreRuntimeConfig) -> str:
         msg = "TradeCoreRuntimeConfig.database_url is required"
         raise RuntimeError(msg)
     return config.database_url
+
+
+def _build_report_job_dispatcher() -> ReportJobDispatcher:
+    broker = os.getenv("CELERY_BROKER_URL", "redis://redis:6379/0")
+    backend = os.getenv("CELERY_RESULT_BACKEND", broker)
+    queue = os.getenv("CELERY_REPORTS_QUEUE", REPORTS_QUEUE)
+    app = Celery("trade_core_report_dispatcher", broker=broker, backend=backend)
+    return ReportJobDispatcher(app, queue=queue)
 
 
 def _instruments_from_env(value: str | None) -> tuple[InstrumentRef, ...]:

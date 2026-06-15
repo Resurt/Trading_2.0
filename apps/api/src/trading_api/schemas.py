@@ -22,6 +22,9 @@ class ApiRole(StrEnum):
 class RobotCommand(StrEnum):
     START = "start"
     STOP = "stop"
+    PAUSE = "pause"
+    RESUME = "resume"
+    EMERGENCY_STOP = "emergency_stop"
 
 
 class ReportScope(StrEnum):
@@ -31,9 +34,14 @@ class ReportScope(StrEnum):
 
 class RobotCommandResponse(BaseModel):
     accepted: bool
+    command_id: UUID | None = None
     command: RobotCommand
     requested_by_role: ApiRole
+    requested_by: str = "unknown"
+    requested_at: datetime | None = None
     status: str
+    reason_code: str | None = None
+    payload: JsonPayload = Field(default_factory=dict)
     message: str
 
 

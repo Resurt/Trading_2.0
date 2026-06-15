@@ -23,8 +23,10 @@ from trading_common.db.models import (
     BrokerOrder,
     CandidateStageResult,
     OrderIntent,
+    RobotCommand,
     SignalCandidate,
 )
+from trading_common.db.repositories import RobotCommandRepository
 from trading_common.db.service import DatabaseService
 
 MSK = ZoneInfo("Europe/Moscow")
@@ -116,6 +118,34 @@ def test_runtime_micro_session_rollover_requests_report(tmp_path: Path) -> None:
     assert runtime.stats.report_requests[0]["reason_code"] == "hourly_rollover"
     assert runtime.current_snapshot is not None
     assert runtime.current_snapshot.micro_session_id == "2026-06-12:weekday_main:20260612T1100"
+    asyncio.run(runtime.shutdown())
+
+
+def test_stop_command_reaches_trade_core_consumer(tmp_path: Path) -> None:
+    runtime = build_runtime(tmp_path)
+    command_id = None
+
+    asyncio.run(runtime.start())
+    with runtime.database.session_scope() as session:
+        command = RobotCommandRepository(session).create(
+            command_type="stop",
+            requested_by="desk-operator",
+            requested_role="operator",
+            requested_at=datetime.now(tz=UTC),
+            payload={"source": "test"},
+        )
+        command_id = command.command_id
+
+    processed = runtime.process_robot_commands()
+
+    assert processed == 1
+    assert runtime.robot_control_state == "stopped"
+    assert command_id is not None
+    with runtime.database.session_factory() as session:
+        stored_command = session.get(RobotCommand, command_id)
+        assert stored_command is not None
+        assert stored_command.status == "applied"
+        assert stored_command.reason_code == "runtime_safe_stopped"
     asyncio.run(runtime.shutdown())
 
 

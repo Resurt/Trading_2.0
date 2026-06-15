@@ -24,7 +24,7 @@ from trade_core.session.reason_codes import (
     WEEKEND_BROKER_MODE,
 )
 from trading_common.db.base import Base
-from trading_common.db.models import MicroSession, SessionRun, StrategyStateEvent
+from trading_common.db.models import MicroSession, ReportJobOutbox, SessionRun, StrategyStateEvent
 from trading_common.enums import SessionPhase, SessionType
 
 MSK = ZoneInfo("Europe/Moscow")
@@ -288,6 +288,12 @@ def test_micro_session_state_is_persisted_to_database() -> None:
         assert runs[0].freeze_started_at == msk(2026, 6, 12, 10, 59).replace(tzinfo=None)
         assert runs[0].report_requested_at == msk(2026, 6, 12, 11).replace(tzinfo=None)
         assert runs[0].close_reason_code == HOURLY_ROLLOVER
+        report_jobs = list(db_session.execute(select(ReportJobOutbox)).scalars())
+        assert len(report_jobs) == 1
+        assert report_jobs[0].task_name == "report_worker.build_hourly_report"
+        assert report_jobs[0].micro_session_id == runs[0].micro_session_id
+        assert report_jobs[0].strategy_id == "baseline"
+        assert report_jobs[0].status == "pending"
         assert "snapshot_taken" in event_types
         assert "session_run_closed" in event_types
         assert "report_requested" in event_types

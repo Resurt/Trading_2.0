@@ -78,7 +78,7 @@ def test_redaction_filter_removes_tokens_headers_and_credentials() -> None:
         authorization="Bearer extremely-secret-token",
         headers={"Authorization": "Bearer nested-secret-token"},
         nested={"password": "plain-secret", "safe": "visible"},
-        raw_text="token=t.CUtCVmpYDwTcVJg2iw6I2-93fkWFHMeB38axeIC2ZG4PcOy",
+        raw_text="token=fake-token-for-redaction-test",
     )
 
     raw = stream.getvalue()
@@ -87,7 +87,7 @@ def test_redaction_filter_removes_tokens_headers_and_credentials() -> None:
     assert "extremely-secret-token" not in raw
     assert "nested-secret-token" not in raw
     assert "plain-secret" not in raw
-    assert "t.CUtCVmpYDwTcVJg2iw6I2-93fkWFHMeB38axeIC2ZG4PcOy" not in raw
+    assert "fake-token-for-redaction-test" not in raw
     assert REDACTED in raw
     assert payload["payload"]["authorization"] == REDACTED
     assert payload["payload"]["headers"]["Authorization"] == REDACTED

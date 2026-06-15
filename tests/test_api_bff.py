@@ -3,8 +3,9 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 
 from trading_api import create_fastapi_app
@@ -14,8 +15,10 @@ from trading_api.schemas import (
     ReportJobStatusResponse,
     ReportRebuildRequest,
 )
+from trading_common import RuntimeMode
 from trading_common.db.base import Base
 from trading_common.db.models import (
+    AuditEvent,
     BlockerEvent,
     BrokerOrder,
     CandidateStageResult,
@@ -27,6 +30,7 @@ from trading_common.db.models import (
     OrderBookSummary,
     OrderIntent,
     PositionSnapshot,
+    RobotCommand,
     SessionRun,
     SignalCandidate,
     StrategyConfig,
@@ -527,7 +531,9 @@ def test_management_auth_and_daily_report_job(tmp_path: Path) -> None:
         json={"trading_date": "2026-06-12", "strategy_id": "baseline"},
     ).json()
 
-    assert started["status"] == "start_requested"
+    assert started["status"] == "requested"
+    assert started["command_id"]
+    assert started["requested_by"] == "local-dev:operator"
     assert job["status"] == "queued"
     assert job["task_name"] == "report_worker.rebuild_reports_for_date"
     assert job["payload"]["include_counterfactual"] is True
@@ -545,6 +551,48 @@ def test_management_auth_and_daily_report_job(tmp_path: Path) -> None:
     assert rebuild["task_name"] == "report_worker.build_hourly_report"
     assert job_status["status"] == "success"
     assert job_status["successful"] is True
+
+
+def test_robot_control_persists_command_and_audit(tmp_path: Path) -> None:
+    database = DatabaseService(f"sqlite+pysqlite:///{tmp_path / 'api-control.db'}")
+    Base.metadata.create_all(database.engine)
+    seed_database(database)
+    app = create_fastapi_app(database=database, report_task_client=FakeReportTaskClient())
+    client = TestClient(app)
+
+    response = client.post(
+        "/robot/stop",
+        headers={"X-API-Role": "operator", "X-API-Actor": "desk-operator"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "requested"
+    with database.session_scope() as session:
+        command = session.get(RobotCommand, UUID(payload["command_id"]))
+        assert command is not None
+        assert command.command_type == "stop"
+        assert command.requested_by == "desk-operator"
+        audit = session.query(AuditEvent).filter_by(entity_id=payload["command_id"]).one()
+        assert audit.action == "robot_command_stop_requested"
+
+
+def test_production_refuses_dev_auth_without_auth_service(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("TRADING_API_ADMIN_TOKEN", raising=False)
+    monkeypatch.delenv("TRADING_API_OPERATOR_TOKEN", raising=False)
+    monkeypatch.delenv("TRADING_API_OBSERVER_TOKEN", raising=False)
+    monkeypatch.setenv("TRADING_AUTH_MODE", "dev")
+    database = DatabaseService(f"sqlite+pysqlite:///{tmp_path / 'api-prod.db'}")
+
+    try:
+        create_fastapi_app(database=database, runtime_mode=RuntimeMode.PRODUCTION)
+    except RuntimeError as exc:
+        assert "refuses dev auth" in str(exc)
+    else:
+        raise AssertionError("production startup accepted dev auth")
 
 
 def test_reports_config_and_openapi(tmp_path: Path) -> None:
@@ -611,3 +659,20 @@ def test_websocket_channels_send_smoke_snapshots(tmp_path: Path) -> None:
             assert message["type"] == expected_type
             assert "message_id" in message
             assert "payload" in message
+
+
+def test_websocket_dashboard_stays_live(tmp_path: Path) -> None:
+    database = DatabaseService(f"sqlite+pysqlite:///{tmp_path / 'api-ws.db'}")
+    Base.metadata.create_all(database.engine)
+    seed_database(database)
+    app = create_fastapi_app(database=database, report_task_client=FakeReportTaskClient())
+    app.state.ws_push_interval_seconds = 0.05
+    client = TestClient(app)
+
+    with client.websocket_connect("/ws/dashboard") as websocket:
+        first = websocket.receive_json()
+        second = websocket.receive_json()
+
+    assert first["type"] == "dashboard.snapshot"
+    assert second["type"] == "dashboard.snapshot"
+    assert second["payload"]["sequence"] == 1

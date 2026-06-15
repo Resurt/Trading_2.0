@@ -32,6 +32,26 @@ TRADING_PRODUCTION_CONFIRM=I_UNDERSTAND_LIVE_ORDERS
 - `sandbox` разрешает broker calls только через sandbox config.
 - `production` разрешает broker calls только после явного подтверждения и production checklist.
 
+## Control plane
+
+Операторские команды проходят через durable control plane:
+
+- API endpoint пишет `robot_command` со статусом `requested`;
+- API пишет соответствующий `audit_event`;
+- `trade-core` читает команды внутри long-lived runtime loop;
+- команда переводится в `accepted`, затем `applied`, `rejected` или `failed`;
+- `start`/`resume` разрешают runtime принимать новые entries;
+- `pause`/`stop` запрещают новые entries без физического рестарта `trade-core`;
+- `emergency_stop` переводит runtime в `emergency_stopped` и фиксирует
+  `cancel_reason_code=manual_operator_emergency_stop`.
+
+Auth policy:
+
+- в local-dev допустим dev provider `X-API-Role`/`X-API-Actor`;
+- в `production` dev auth запрещен на startup;
+- production API должен стартовать только с `TRADING_AUTH_MODE=static_bearer`
+  и токенами операторских ролей через env/secrets.
+
 ## Replay harness
 
 `trade_core.replay.ReplayHarness` воспроизводит:
