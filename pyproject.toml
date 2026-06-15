@@ -26,6 +26,9 @@ dev = [
   "pytest>=8.2",
   "ruff>=0.5",
 ]
+tbank = [
+  "t-tech-investments>=1.49,<2.0",
+]
 
 [tool.setuptools.packages.find]
 where = [

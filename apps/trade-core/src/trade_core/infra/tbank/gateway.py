@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
@@ -31,6 +31,7 @@ from trade_core.infra.tbank.headers import auth_metadata, capture_response_heade
 from trade_core.infra.tbank.idempotency import OrderIdempotencyStore
 from trade_core.infra.tbank.protocols import TBankStreamClient, TBankUnaryClient, UnaryCallResult
 from trade_core.infra.tbank.retry import ExponentialBackoff, retry_async
+from trade_core.infra.tbank.sdk_clients import TBankSdkStreamClient, TBankSdkUnaryClient
 from trade_core.infra.tbank.secrets import TBankTokenBundle, load_tbank_tokens
 from trade_core.infra.tbank.streams import StreamSupervisor
 from trading_common.observability import DomainEventType
@@ -55,8 +56,8 @@ class TBankBrokerGateway:
     ) -> None:
         self.config = config or TBankBrokerConfig.from_env()
         self.tokens = tokens or load_tbank_tokens()
-        self._unary_client = unary_client
-        self._stream_client = stream_client
+        self._unary_client = unary_client or TBankSdkUnaryClient(config=self.config)
+        self._stream_client = stream_client or TBankSdkStreamClient(config=self.config)
         self._idempotency_store = idempotency_store or OrderIdempotencyStore()
         self._backoff = backoff or ExponentialBackoff(
             initial_seconds=self.config.backoff_initial_seconds,
@@ -419,4 +420,10 @@ def _headers_from_exception(exc: Exception) -> Mapping[str, object] | None:
     headers = getattr(exc, "headers", None) or getattr(exc, "metadata", None)
     if isinstance(headers, Mapping):
         return headers
+    if isinstance(headers, Sequence) and not isinstance(headers, str | bytes):
+        normalized: dict[str, object] = {}
+        for item in headers:
+            if isinstance(item, tuple) and len(item) == 2:
+                normalized[str(item[0])] = item[1]
+        return normalized
     return None

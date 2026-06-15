@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -129,6 +130,8 @@ def map_exception(
         status_code = status_value.name if hasattr(status_value, "name") else str(status_value)
 
     raw_error_code = getattr(exc, "error_code", None)
+    if raw_error_code is None:
+        raw_error_code = _extract_numeric_error_code(getattr(exc, "details", None))
     error_code = int(raw_error_code) if raw_error_code is not None else None
     info = map_error_info(status_code, error_code)
     message = str(exc) or info.reason_code
@@ -141,3 +144,12 @@ def map_exception(
         headers=headers,
         original_error=exc,
     )
+
+
+def _extract_numeric_error_code(details: object) -> int | None:
+    if details is None:
+        return None
+    match = re.search(r"\b([3-9]\d{4})\b", str(details))
+    if match is None:
+        return None
+    return int(match.group(1))

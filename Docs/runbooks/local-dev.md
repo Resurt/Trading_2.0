@@ -38,6 +38,12 @@ $env:TBANK_ENVIRONMENT = "sandbox"
 $env:TBANK_APP_NAME = "Resurt.Trading_2_0"
 ```
 
+Для реальных sandbox/live readonly calls через официальный SDK установите optional extra:
+
+```powershell
+python -m pip install -e ".[tbank]" --extra-index-url https://opensource.tbank.ru/api/v4/projects/238/packages/pypi/simple
+```
+
 ## Запуск стека
 
 ```powershell

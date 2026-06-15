@@ -40,6 +40,7 @@ apps/trade-core/src/trade_core/infra/tbank/
   protocols.py
   retry.py
   secrets.py
+  sdk_clients.py
   streams.py
 ```
 
@@ -126,3 +127,33 @@ Per-method deadlines зафиксированы по официальной та
 - recovery через unary helpers после reconnect.
 
 Источник по stream рекомендациям: `https://developer.tbank.ru/invest/intro/developer/stream`.
+
+## Official T-Bank SDK wrapper
+
+Реальный транспорт реализован внутри `infra/tbank/sdk_clients.py` и не протекает выше
+`infra/tbank`:
+
+- `TBankSdkUnaryClient` вызывает официальный Python SDK `t_tech.invest` для unary methods;
+- `TBankSdkStreamClient` открывает market data stream и `OrderStateStream`;
+- `TBankBrokerGateway` по умолчанию создает эти clients, если тест или replay не передал fake client;
+- наружу возвращаются только SDK-neutral `dict` payloads и `StreamEvent`, без protobuf/SDK типов.
+
+SDK подключен как optional dependency `tbank`, потому что пакет распространяется через T-Bank
+package index и не должен ломать обычный CI без доступа к этому index:
+
+```powershell
+python -m pip install -e ".[tbank]" --extra-index-url https://opensource.tbank.ru/api/v4/projects/238/packages/pypi/simple
+```
+
+Sandbox/live endpoint выбирается только через `LaunchModePolicy` и
+`TBankBrokerConfig.from_launch_policy()`. Strategy/risk/execution слои не должны выбирать target
+самостоятельно.
+
+Высокоуровневый SDK стабильно отдает `x-tracking-id` через `response_metadata`.
+Rate-limit headers сохраняются, когда SDK/gRPC metadata предоставляет их в ответе или исключении.
+Raw token и Authorization metadata не логируются.
+
+Для candle stream wrapper выставляет `waiting_close=True`; closed candles остаются primary input
+для `BarEngine` и strategy candidates. Anonymous market trades используются только как market tape
+context. Собственные fills идут через `OrderStateStream` и reconciliation helpers, а не через
+deprecated user trades stream.

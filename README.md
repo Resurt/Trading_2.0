@@ -81,6 +81,14 @@ cd apps/frontend && npm run test:unit
 python scripts/check.py
 ```
 
+Реальный T-Bank SDK wrapper подключается optional extra, чтобы обычный CI не зависел от
+T-Bank package index:
+
+```powershell
+python -m pip install -e ".[tbank]" --extra-index-url https://opensource.tbank.ru/api/v4/projects/238/packages/pypi/simple
+python scripts/run_sandbox_smoke.py --dry-run
+```
+
 ## Trade-core runtime
 
 `python -m trade_core.service` запускает HTTP `/health` и `/metrics`, а также

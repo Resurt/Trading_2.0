@@ -62,6 +62,16 @@ Sandbox smoke проверяет wiring, endpoint и secret policy. Dry-run не
 python scripts/run_sandbox_smoke.py --dry-run
 ```
 
+Если установлен optional SDK extra и в окружении есть sandbox token, тот же скрипт без
+`--dry-run` делает только readonly `TradingSchedules` call. Sandbox `PostOrder` разрешен
+только явным флагом и параметрами заявки:
+
+```powershell
+python -m pip install -e ".[tbank]" --extra-index-url https://opensource.tbank.ru/api/v4/projects/238/packages/pypi/simple
+python scripts/run_sandbox_smoke.py
+python scripts/run_sandbox_smoke.py --allow-sandbox-orders --account-id "<sandbox-account>" --instrument-id "MOEX:SBER" --price 300.10
+```
+
 Sandbox results нельзя использовать как прямую оценку real execution quality. Это проверка инфраструктуры и adapter lifecycle.
 
 ## Shadow mode

@@ -147,8 +147,10 @@ best bid/ask, depth, spread, imbalance, quality score и payload для расш
 
 ## Ограничения
 
-- Реальная protobuf/SDK схема T-Bank streams еще не подключена; parser принимает
-  SDK-neutral payloads из `StreamEvent`.
+- Реальная T-Bank stream схема подключена в `infra/tbank/sdk_clients.py`, но выше
+  `infra/tbank` по-прежнему проходят только SDK-neutral payloads из `StreamEvent`.
+- Для candle stream SDK wrapper выставляет `waiting_close=True`; closed candles остаются
+  primary input, а формирующиеся свечи не запускают strategy candidates без явного флага.
 - Deprecated user trade stream не используется как источник истины по собственным
   исполнениям; для этого остается broker order/fill reconciliation.
 - Market quality score не является сигналом на сделку сам по себе.
