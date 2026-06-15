@@ -53,7 +53,7 @@ WebSocket snapshot channels для dashboard/orders/market/reports. `frontend`
 
 ## Каркас репозитория
 
-- `apps/trade-core` - долгоживущий Python service skeleton.
+- `apps/trade-core` - долгоживущий Python runtime для session/market/strategy/risk/execution orchestration.
 - `apps/api` - FastAPI BFF для управления, read models, отчетов и WebSocket snapshots.
 - `apps/report-worker` - Celery/report worker для hourly/daily/counterfactual analytics.
 - `apps/frontend` - Vue 3 + Vite dark-theme операторский UI.
@@ -80,6 +80,23 @@ cd apps/frontend && npm run test:unit
 ```bash
 python scripts/check.py
 ```
+
+## Trade-core runtime
+
+`python -m trade_core.service` запускает HTTP `/health` и `/metrics`, а также
+фоновый `TradeCoreRuntime`. Безопасный режим по умолчанию - `historical_replay`:
+он открывает logical micro-sessions, пишет domain events в БД, строит closed bars,
+создаёт `signal_candidate`, прогоняет risk gates и создаёт pseudo-orders без
+реальных broker calls.
+
+Минимальный локальный запуск без T-Bank токенов:
+
+```powershell
+$env:TRADING_RUNTIME_MODE = "historical_replay"
+python -m trade_core.service
+```
+
+Production не стартует без явного `TRADING_PRODUCTION_CONFIRM=I_UNDERSTAND_LIVE_ORDERS`.
 
 Приёмка logging/analytics слоя для калибровки:
 

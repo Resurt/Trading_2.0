@@ -2,7 +2,7 @@
 
 ## Назначение
 
-Локальный запуск нужен для проверки каркаса сервисов, health endpoints, Prometheus/Grafana/Loki и Docker Compose wiring. На этом шаге реальная торговая бизнес-логика и T-Bank broker calls не включены.
+Локальный запуск нужен для проверки runtime wiring, health endpoints, Prometheus/Grafana/Loki и Docker Compose wiring. По умолчанию `trade-core` стартует в безопасном `historical_replay`: он ведёт session/micro-session loop, пишет domain events, строит closed bars и pseudo-orders без реальных T-Bank broker calls.
 
 ## Обязательные ограничения
 
@@ -62,6 +62,33 @@ Invoke-WebRequest http://localhost:9090/-/healthy
 Invoke-WebRequest http://localhost:3000/api/health
 Invoke-WebRequest http://localhost:3100/ready
 ```
+
+## Проверка trade-core runtime
+
+Локально без токенов используйте только безопасный режим:
+
+```powershell
+$env:TRADING_RUNTIME_MODE = "historical_replay"
+$env:TRADE_CORE_TICK_INTERVAL_SECONDS = "1"
+python -m trade_core.service
+```
+
+Ожидаемые endpoints:
+
+```powershell
+Invoke-WebRequest http://localhost:8001/health
+Invoke-WebRequest http://localhost:8001/metrics
+```
+
+В `historical_replay` runtime:
+
+- не требует T-Bank токены;
+- не вызывает `BrokerGateway.post_order`;
+- открывает logical hourly micro-sessions без рестарта процесса;
+- пишет `signal_candidate`, `candidate_stage_result`, `order_intent`, `broker_order` как domain facts;
+- на shutdown пишет `audit_event`.
+
+Если `TRADING_DATABASE_URL`/`DATABASE_URL` не задан, локальный runtime создаёт SQLite файл `.local/trade_core_runtime.db`. Для compose-режима используйте PostgreSQL через переменные окружения compose и Alembic migrations.
 
 ## FastAPI BFF
 
