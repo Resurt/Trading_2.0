@@ -110,6 +110,7 @@ def test_prometheus_metrics_are_registered_and_rendered() -> None:
     metrics.inc_rejected_order(status="broker_rejected")
     metrics.inc_risk_event(result="spread_too_wide")
     metrics.inc_counterfactual_job(status="success")
+    metrics.inc_report_job_failed(status="error")
     metrics.set_open_orders(2)
     metrics.set_active_positions(1, instrument="MOEX:SBER")
     metrics.set_market_stream_alive(

@@ -12,7 +12,7 @@ def test_prometheus_scrape_config_includes_rules_and_backend_services() -> None:
     assert "/etc/prometheus/rules/*.yml" in prometheus_config
     assert "trade-core:8001" in prometheus_config
     assert "api:8000" in prometheus_config
-    assert "report-worker:8002" in prometheus_config
+    assert "report-worker-health:8002" in prometheus_config
 
 
 def test_prometheus_alert_rules_cover_required_observability_metrics() -> None:
@@ -28,6 +28,7 @@ def test_prometheus_alert_rules_cover_required_observability_metrics() -> None:
         "rejected_orders_total",
         "risk_events_total",
         "counterfactual_jobs_total",
+        "report_jobs_failed_total",
         "market_stream_alive",
         "last_stream_message_age_seconds",
         "celery_queue_backlog",

@@ -737,6 +737,7 @@ Counters:
 - `rejected_orders_total`
 - `risk_events_total`
 - `counterfactual_jobs_total`
+- `report_jobs_failed_total`
 
 Gauges:
 

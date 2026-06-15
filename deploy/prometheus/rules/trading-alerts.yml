@@ -76,7 +76,9 @@ groups:
           description: "{{ $labels.service }} rollover p95 is above 5s."
 
       - alert: ReportGenerationFailures
-        expr: sum(increase(report_generation_duration_seconds_count{status="error"}[15m])) by (service) > 0
+        expr: |
+          sum(increase(report_jobs_failed_total{status="error"}[15m])) by (service) > 0
+          or sum(increase(report_generation_duration_seconds_count{status="error"}[15m])) by (service) > 0
         for: 1m
         labels:
           severity: warning

@@ -237,19 +237,47 @@ Shadow mode локально должен писать pseudo-orders и не в�
 
 ```powershell
 $env:TRADING_RUNTIME_MODE = "shadow"
-docker compose up -d --build trade-core api report-worker frontend
+docker compose up -d --build trade-core api report-worker report-worker-health frontend
 ```
 
 Production не включать локально без отдельного checklist. Для production требуется `TRADING_PRODUCTION_CONFIRM=I_UNDERSTAND_LIVE_ORDERS`.
 
 ## Report Worker
 
-Celery tasks используют Redis:
+В Docker Compose роли разделены:
+
+- `report-worker` запускает Celery worker очереди `reports`;
+- `report-worker-health` отдает HTTP `/health` и `/metrics` на `http://localhost:8002`;
+- тяжелые hourly/daily/counterfactual отчеты не выполняются в FastAPI process.
+
+Запуск только контура отчетов:
+
+```powershell
+docker compose up -d --build redis postgres report-worker report-worker-health
+Invoke-WebRequest http://localhost:8002/health
+```
+
+Проверка способности worker принимать задачи:
+
+```powershell
+make celery-inspect
+make report-worker-smoke
+```
+
+Эквивалентная Celery команда внутри контейнера:
+
+```powershell
+docker compose exec -T report-worker celery -A report_worker.celery_app.celery_app inspect ping
+```
+
+Локальный запуск worker без Docker, если Redis доступен на `localhost:6379`:
 
 ```powershell
 $env:CELERY_BROKER_URL = "redis://localhost:6379/0"
 $env:CELERY_RESULT_BACKEND = "redis://localhost:6379/0"
-celery -A report_worker.tasks worker --loglevel=INFO
+$env:CELERY_DEFAULT_QUEUE = "reports"
+$env:CELERY_REPORTS_QUEUE = "reports"
+celery -A report_worker.celery_app.celery_app worker --loglevel=INFO --queues=reports
 ```
 
 Ручной запуск отчетов без FastAPI:

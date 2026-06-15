@@ -19,4 +19,4 @@ scrape_configs:
   - job_name: report-worker
     metrics_path: /metrics
     static_configs:
-      - targets: ["report-worker:8002"]
+      - targets: ["report-worker-health:8002"]

@@ -22,6 +22,7 @@ PROMETHEUS_METRIC_NAMES: tuple[str, ...] = (
     "rejected_orders_total",
     "risk_events_total",
     "counterfactual_jobs_total",
+    "report_jobs_failed_total",
     "market_stream_alive",
     "last_stream_message_age_seconds",
     "open_orders",
@@ -124,6 +125,12 @@ class TradingMetrics:
         self.counterfactual_jobs_total = Counter(
             "counterfactual_jobs_total",
             "Counterfactual analysis jobs by completion status.",
+            ("service", "status"),
+            registry=self.registry,
+        )
+        self.report_jobs_failed_total = Counter(
+            "report_jobs_failed_total",
+            "Report-worker jobs that failed before producing a completed result.",
             ("service", "status"),
             registry=self.registry,
         )
@@ -261,6 +268,9 @@ class TradingMetrics:
     def inc_counterfactual_job(self, *, status: str = "success") -> None:
         self.counterfactual_jobs_total.labels(**self._base_labels, status=status).inc()
 
+    def inc_report_job_failed(self, *, status: str = "error") -> None:
+        self.report_jobs_failed_total.labels(**self._base_labels, status=status).inc()
+
     def set_open_orders(self, count: int) -> None:
         self.open_orders.labels(**self._base_labels).set(count)
 
@@ -356,6 +366,7 @@ class TradingMetrics:
         self.rejected_orders_total.labels(**self._base_labels, status="unknown").inc(0)
         self.risk_events_total.labels(**self._base_labels, result="unknown").inc(0)
         self.counterfactual_jobs_total.labels(**self._base_labels, status="success").inc(0)
+        self.report_jobs_failed_total.labels(**self._base_labels, status="error").inc(0)
         self.set_market_stream_alive(False, stream_type="market_data")
         self.set_last_stream_message_age(0, stream_type="market_data")
         self.set_open_orders(0)

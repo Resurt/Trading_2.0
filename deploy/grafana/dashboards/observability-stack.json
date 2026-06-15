@@ -124,7 +124,7 @@
           "refId": "A"
         },
         {
-          "expr": "sum(increase(report_generation_duration_seconds_count{status=\"error\"}[1h])) by (service)",
+          "expr": "sum(increase(report_jobs_failed_total{status=\"error\"}[1h])) by (service)",
           "legendFormat": "report failures {{service}}",
           "refId": "B"
         },

@@ -6,6 +6,8 @@ import os
 
 from celery import Celery
 
+REPORTS_QUEUE = "reports"
+
 
 def create_celery_app(
     *,
@@ -28,6 +30,12 @@ def create_celery_app(
         enable_utc=True,
         task_track_started=True,
         broker_connection_retry_on_startup=True,
+        task_default_queue=os.getenv("CELERY_DEFAULT_QUEUE", REPORTS_QUEUE),
+        task_routes={
+            "report_worker.*": {
+                "queue": os.getenv("CELERY_REPORTS_QUEUE", REPORTS_QUEUE),
+            }
+        },
     )
     return app
 

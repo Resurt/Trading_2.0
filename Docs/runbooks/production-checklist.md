@@ -15,10 +15,13 @@ $env:TBANK_ENVIRONMENT = "live"
 - Docker Compose secrets exist for `tbank_full_access_token`, `tbank_readonly_token`, `postgres_password`, `grafana_admin_password`.
 - No real token is present in git, `.env`, docs, shell history snippets, or CI config.
 - `python -m alembic upgrade head` is applied.
-- `trade-core`, `api`, `report-worker`, `frontend`, `postgres`, `redis` are healthy.
+- `trade-core`, `api`, `report-worker`, `report-worker-health`, `frontend`, `postgres`, `redis` are healthy.
 - Prometheus, Grafana, Loki and Fluent Bit are reachable.
 - Grafana dashboards are provisioned.
-- Report worker is running and can build hourly/daily reports.
+- `docker compose exec -T report-worker celery -A report_worker.celery_app.celery_app inspect ping` returns at least one worker response.
+- `report-worker-health` exposes `/health` and `/metrics`; Prometheus scrapes `report-worker-health:8002`.
+- `make report-worker-smoke` completes a queued `build_hourly_report` result in Redis before live start.
+- Report worker is running and can build hourly/daily reports without FastAPI BackgroundTasks.
 - `TRADING_RUNTIME_MODE=production` is visible in service health/log context.
 - Risk limits and max position limits are reviewed for the session template.
 - Session manager shows the correct `session_type`, `session_phase`, `trading_date`, `calendar_date`.

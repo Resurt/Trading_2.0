@@ -1,9 +1,9 @@
-"""HTTP entrypoint for the local report-worker container."""
+"""HTTP health/metrics entrypoint for the report-worker sidecar container."""
 
 from __future__ import annotations
 
 from report_worker.app import create_identity
-from report_worker.metrics import REPORT_WORKER_METRICS, sample_celery_queue_backlog
+from report_worker.metrics import REPORT_WORKER_METRICS, sample_report_worker_metrics
 from trading_common import LaunchModePolicy
 from trading_common.http_health import run_health_server
 from trading_common.models import HealthStatus, ServiceHealth
@@ -19,10 +19,10 @@ def main() -> None:
         ServiceHealth(
             identity=identity,
             status=HealthStatus.OK,
-            detail="report-worker health server is running; Celery tasks are available",
+            detail="report-worker-health is running; Celery worker metrics are sampled from Redis",
         ),
         metrics=REPORT_WORKER_METRICS,
-        metrics_sampler=sample_celery_queue_backlog,
+        metrics_sampler=sample_report_worker_metrics,
     )
 
 

@@ -47,6 +47,8 @@ make analytics-smoke
 make report-rebuild
 make replay-day
 make observability-up
+make celery-inspect
+make report-worker-smoke
 ```
 
 Эквиваленты из frontend package:
@@ -84,6 +86,7 @@ Logging/analytics слой считается пригодным для кали
 
 - `make analytics-smoke` возвращает `passed=true`;
 - `make report-rebuild` строит daily report с regime, blocker ranking, funnel, missed opportunity summary и gross/net PnL;
+- `make celery-inspect` получает ping от Celery worker, а `make report-worker-smoke` кладет `build_hourly_report` в очередь `reports` и получает completed result;
 - `make replay-day` возвращает `deterministic=true` и подтверждает session rollover, blocker pipeline и counterfactual pipeline;
 - `python -m pytest tests/test_logging_analytics_acceptance.py` проходит локально;
 - ни один acceptance scenario не требует физического restart `trade-core`;

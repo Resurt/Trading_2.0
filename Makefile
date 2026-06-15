@@ -2,8 +2,10 @@ PYTHON ?= python
 NPM ?= npm
 TRADING_DATE ?= 2026-06-12
 STRATEGY_ID ?= baseline
+REPORT_WORKER_SMOKE_MICRO_SESSION_ID ?= 2026-06-12:weekday_main:1000
+REPORT_WORKER_SMOKE_TIMEOUT ?= 30
 
-.PHONY: lint test up down logs frontend-build migrate migrate-down replay-smoke sandbox-smoke analytics-smoke report-rebuild replay-day observability-up
+.PHONY: lint test up down logs frontend-build migrate migrate-down replay-smoke sandbox-smoke analytics-smoke report-rebuild replay-day observability-up report-worker-smoke celery-inspect
 
 lint:
 	$(PYTHON) -m ruff check .
@@ -47,3 +49,9 @@ replay-day:
 
 observability-up:
 	docker compose up -d prometheus grafana loki fluent-bit
+
+report-worker-smoke:
+	$(PYTHON) scripts/run_report_worker_smoke.py --micro-session-id $(REPORT_WORKER_SMOKE_MICRO_SESSION_ID) --strategy-id $(STRATEGY_ID) --timeout-seconds $(REPORT_WORKER_SMOKE_TIMEOUT)
+
+celery-inspect:
+	docker compose exec -T report-worker celery -A report_worker.celery_app.celery_app inspect ping
