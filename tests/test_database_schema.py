@@ -9,8 +9,8 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import Session
-from tests.fixtures.analytics_seed import seed_candidate_journey
 
+from tests.fixtures.analytics_seed import seed_candidate_journey
 from trading_common.db.base import Base
 from trading_common.db.models import (
     BrokerOrder,
