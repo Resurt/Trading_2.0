@@ -167,3 +167,7 @@ deprecated user trades stream.
 
 Recovery best-effort: ошибка backfill/refresh логируется как `stream_gap_recovery_failed`, но не
 должна останавливать reconnect loop.
+
+Contract coverage для SDK wrapper находится в `tests/test_tbank_sdk_clients.py`: тесты используют
+fake SDK без сети и проверяют unary payload shapes, stream subscription shapes, `waiting_close=True`,
+UUID `request_order_id`, headers, order lifecycle и machine-readable error mapping.

@@ -54,6 +54,11 @@ class FakeCandleSource(Enum):
     CANDLE_SOURCE_EXCHANGE = 1
 
 
+class FakeTradingStatus(Enum):
+    SECURITY_TRADING_STATUS_NORMAL_TRADING = 1
+    SECURITY_TRADING_STATUS_NOT_AVAILABLE_FOR_TRADING = 2
+
+
 class FakeLastPriceType(Enum):
     LAST_PRICE_EXCHANGE = 1
 
@@ -126,6 +131,11 @@ class FakeStatus(Enum):
     INVALID_ARGUMENT = 1
 
 
+class FakeTradeDirection(Enum):
+    TRADE_DIRECTION_BUY = 1
+    TRADE_DIRECTION_SELL = 2
+
+
 class FakeSdkException(Exception):
     def __init__(self) -> None:
         super().__init__("30028 invalid order")
@@ -137,6 +147,21 @@ class FakeSdkException(Exception):
 class FakeMarketDataService:
     def __init__(self) -> None:
         self.get_candles_kwargs: dict[str, object] | None = None
+        self.get_trading_status_kwargs: dict[str, object] | None = None
+        self.get_last_prices_kwargs: dict[str, object] | None = None
+        self.get_order_book_kwargs: dict[str, object] | None = None
+
+    def get_trading_status(self, **kwargs: object) -> Box:
+        self.get_trading_status_kwargs = dict(kwargs)
+        return Box(
+            instrument_uid="uid-sber",
+            figi="figi-sber",
+            trading_status=FakeTradingStatus.SECURITY_TRADING_STATUS_NORMAL_TRADING,
+            api_trade_available_flag=True,
+            limit_order_available_flag=True,
+            market_order_available_flag=False,
+            bestprice_order_available_flag=True,
+        )
 
     def get_candles(self, **kwargs: object) -> Box:
         self.get_candles_kwargs = dict(kwargs)
@@ -156,11 +181,66 @@ class FakeMarketDataService:
             ]
         )
 
+    def get_last_prices(self, **kwargs: object) -> Box:
+        self.get_last_prices_kwargs = dict(kwargs)
+        return Box(
+            last_prices=[
+                Box(
+                    instrument_uid="uid-sber",
+                    figi="figi-sber",
+                    price=Box(units=300, nano=500_000_000),
+                    time=datetime(2026, 6, 15, 7, 1, tzinfo=UTC),
+                )
+            ]
+        )
+
+    def get_order_book(self, **kwargs: object) -> Box:
+        self.get_order_book_kwargs = dict(kwargs)
+        return Box(
+            instrument_uid="uid-sber",
+            figi="figi-sber",
+            depth=20,
+            orderbook_ts=datetime(2026, 6, 15, 7, 1, tzinfo=UTC),
+            bids=[Box(price=Box(units=300, nano=0), quantity=10)],
+            asks=[Box(price=Box(units=301, nano=0), quantity=8)],
+            is_consistent=True,
+        )
+
+
+class FakeInstrumentsService:
+    def __init__(self) -> None:
+        self.trading_schedules_kwargs: dict[str, object] | None = None
+
+    def trading_schedules(self, **kwargs: object) -> Box:
+        self.trading_schedules_kwargs = dict(kwargs)
+        trading_date = datetime(2026, 6, 15, tzinfo=UTC)
+        return Box(
+            exchanges=[
+                Box(
+                    days=[
+                        Box(
+                            is_trading_day=True,
+                            date=trading_date,
+                            premarket_start_time=datetime(2026, 6, 15, 7, 0, tzinfo=UTC),
+                            premarket_end_time=datetime(2026, 6, 15, 10, 0, tzinfo=UTC),
+                            start_time=datetime(2026, 6, 15, 10, 0, tzinfo=UTC),
+                            end_time=datetime(2026, 6, 15, 18, 50, tzinfo=UTC),
+                            evening_start_time=datetime(2026, 6, 15, 19, 0, tzinfo=UTC),
+                            evening_end_time=datetime(2026, 6, 15, 23, 50, tzinfo=UTC),
+                        )
+                    ]
+                )
+            ]
+        )
+
 
 class FakeOrdersService:
     def __init__(self, *, raise_on_post: bool = False) -> None:
         self.raise_on_post = raise_on_post
         self.post_order_kwargs: dict[str, object] | None = None
+        self.cancel_order_kwargs: dict[str, object] | None = None
+        self.get_order_state_kwargs: dict[str, object] | None = None
+        self.get_orders_kwargs: dict[str, object] | None = None
 
     def post_order(self, **kwargs: object) -> Box:
         self.post_order_kwargs = dict(kwargs)
@@ -178,6 +258,46 @@ class FakeOrdersService:
             response_metadata=Box(tracking_id="tracking-post-order"),
         )
 
+    def cancel_order(self, **kwargs: object) -> Box:
+        self.cancel_order_kwargs = dict(kwargs)
+        return Box(
+            time=datetime(2026, 6, 15, 7, 2, tzinfo=UTC),
+            response_metadata=Box(tracking_id="tracking-cancel-order"),
+        )
+
+    def get_order_state(self, **kwargs: object) -> Box:
+        self.get_order_state_kwargs = dict(kwargs)
+        return _fake_order_state(
+            order_id="exchange-order-1",
+            order_request_id=str(kwargs["order_id"]),
+            status=FakeExecutionReportStatus.EXECUTION_REPORT_STATUS_FILL,
+        )
+
+    def get_orders(self, **kwargs: object) -> Box:
+        self.get_orders_kwargs = dict(kwargs)
+        return Box(
+            orders=[
+                _fake_order_state(
+                    order_id="exchange-order-1",
+                    order_request_id="request-order-1",
+                    status=FakeExecutionReportStatus.EXECUTION_REPORT_STATUS_NEW,
+                )
+            ]
+        )
+
+
+class FakeStopOrdersService:
+    def __init__(self) -> None:
+        self.post_stop_order_kwargs: dict[str, object] | None = None
+
+    def post_stop_order(self, **kwargs: object) -> Box:
+        self.post_stop_order_kwargs = dict(kwargs)
+        return Box(
+            stop_order_id="stop-order-1",
+            order_request_id=str(kwargs["order_id"]),
+            response_metadata=Box(tracking_id="tracking-stop-order"),
+        )
+
 
 class FakeMarketDataStreamService:
     def __init__(self) -> None:
@@ -185,6 +305,65 @@ class FakeMarketDataStreamService:
 
     def market_data_stream(self, request_iterator: Iterator[object]) -> Iterator[Box]:
         self.requests = list(request_iterator)
+        request = cast(Any, self.requests[0])
+        if hasattr(request, "subscribe_order_book_request"):
+            return iter(
+                [
+                    Box(
+                        orderbook=Box(
+                            instrument_uid="uid-sber",
+                            figi="figi-sber",
+                            depth=20,
+                            orderbook_ts=datetime(2026, 6, 15, 7, 1, tzinfo=UTC),
+                            bids=[Box(price=Box(units=300, nano=0), quantity=10)],
+                            asks=[Box(price=Box(units=301, nano=0), quantity=8)],
+                        )
+                    )
+                ]
+            )
+        if hasattr(request, "subscribe_last_price_request"):
+            return iter(
+                [
+                    Box(
+                        last_price=Box(
+                            instrument_uid="uid-sber",
+                            figi="figi-sber",
+                            price=Box(units=300, nano=500_000_000),
+                            time=datetime(2026, 6, 15, 7, 1, tzinfo=UTC),
+                        )
+                    )
+                ]
+            )
+        if hasattr(request, "subscribe_info_request"):
+            return iter(
+                [
+                    Box(
+                        trading_status=Box(
+                            instrument_uid="uid-sber",
+                            figi="figi-sber",
+                            trading_status=FakeTradingStatus.SECURITY_TRADING_STATUS_NORMAL_TRADING,
+                            limit_order_available_flag=True,
+                            market_order_available_flag=True,
+                            time=datetime(2026, 6, 15, 7, 1, tzinfo=UTC),
+                        )
+                    )
+                ]
+            )
+        if hasattr(request, "subscribe_trades_request"):
+            return iter(
+                [
+                    Box(
+                        trade=Box(
+                            instrument_uid="uid-sber",
+                            figi="figi-sber",
+                            price=Box(units=300, nano=250_000_000),
+                            quantity=3,
+                            direction=FakeTradeDirection.TRADE_DIRECTION_BUY,
+                            time=datetime(2026, 6, 15, 7, 1, tzinfo=UTC),
+                        )
+                    )
+                ]
+            )
         return iter(
             [
                 Box(
@@ -231,8 +410,10 @@ class FakeOrdersStreamService:
 
 class FakeServices:
     def __init__(self, *, raise_on_post: bool = False) -> None:
+        self.instruments = FakeInstrumentsService()
         self.market_data = FakeMarketDataService()
         self.orders = FakeOrdersService(raise_on_post=raise_on_post)
+        self.stop_orders = FakeStopOrdersService()
         self.market_data_stream = FakeMarketDataStreamService()
         self.orders_stream = FakeOrdersStreamService()
 
@@ -257,6 +438,7 @@ def fake_sdk() -> SimpleNamespace:
     return SimpleNamespace(
         CandleInterval=FakeCandleInterval,
         CandleSource=FakeCandleSource,
+        TradingStatus=FakeTradingStatus,
         LastPriceType=FakeLastPriceType,
         OrderBookType=FakeOrderBookType,
         OrderDirection=FakeOrderDirection,
@@ -286,6 +468,34 @@ def fake_sdk() -> SimpleNamespace:
         TradeInstrument=Box,
         PingDelaySettings=Box,
         OrderStateStreamRequest=Box,
+    )
+
+
+def _fake_order_state(
+    *,
+    order_id: str,
+    order_request_id: str,
+    status: FakeExecutionReportStatus,
+) -> Box:
+    return Box(
+        order_id=order_id,
+        order_request_id=order_request_id,
+        execution_report_status=status,
+        lots_requested=1,
+        lots_executed=1 if status is FakeExecutionReportStatus.EXECUTION_REPORT_STATUS_FILL else 0,
+        instrument_uid="uid-sber",
+        figi="figi-sber",
+        direction=FakeOrderDirection.ORDER_DIRECTION_BUY,
+        order_type=FakeOrderType.ORDER_TYPE_LIMIT,
+        order_date=datetime(2026, 6, 15, 7, 2, tzinfo=UTC),
+        stages=[
+            Box(
+                trade_id="fill-1",
+                price=Box(units=300, nano=0),
+                quantity=1,
+                execution_time=datetime(2026, 6, 15, 7, 3, tzinfo=UTC),
+            )
+        ],
     )
 
 
@@ -398,6 +608,150 @@ def test_sdk_unary_get_candles_maps_closed_candle_payload() -> None:
     assert candle["source"] == "tbank_get_candles"
 
 
+def test_sdk_unary_maps_market_payload_shapes() -> None:
+    services = FakeServices()
+    client = TBankSdkUnaryClient(
+        config=config(),
+        sdk_module=fake_sdk(),
+        services_factory=services_factory(services),
+    )
+    metadata = auth_metadata("readonly-token-for-tests", "Resurt.Trading_2_0")
+
+    schedules = asyncio.run(
+        client.call_unary(
+            "TradingSchedules",
+            {
+                "exchange": "MOEX",
+                "from": "2026-06-15T00:00:00+00:00",
+                "to": "2026-06-16T00:00:00+00:00",
+            },
+            metadata=metadata,
+            timeout_seconds=1.0,
+        )
+    )
+    trading_status = asyncio.run(
+        client.call_unary(
+            "GetTradingStatus",
+            {"instrument": {"instrument_uid": "uid-sber"}},
+            metadata=metadata,
+            timeout_seconds=1.0,
+        )
+    )
+    last_prices = asyncio.run(
+        client.call_unary(
+            "GetLastPrices",
+            {"instruments": [{"instrument_uid": "uid-sber"}]},
+            metadata=metadata,
+            timeout_seconds=1.0,
+        )
+    )
+    order_book = asyncio.run(
+        client.call_unary(
+            "GetOrderBook",
+            {"instrument": {"instrument_uid": "uid-sber"}, "depth": 20},
+            metadata=metadata,
+            timeout_seconds=1.0,
+        )
+    )
+
+    assert len(schedules.data["windows"]) == 3
+    assert services.instruments.trading_schedules_kwargs == {
+        "exchange": "MOEX",
+        "from_": datetime(2026, 6, 15, tzinfo=UTC),
+        "to": datetime(2026, 6, 16, tzinfo=UTC),
+    }
+    assert trading_status.data["instrument_id"] == "uid-sber"
+    assert trading_status.data["api_trade_available"] is True
+    assert last_prices.data["prices"][0]["price"] == "300.5"
+    assert services.market_data.get_last_prices_kwargs is not None
+    assert services.market_data.get_last_prices_kwargs["last_price_type"] is (
+        FakeLastPriceType.LAST_PRICE_EXCHANGE
+    )
+    assert order_book.data["bids"][0]["price"] == "300"
+    assert order_book.data["asks"][0]["quantity_lots"] == "8"
+
+
+def test_sdk_unary_maps_order_lifecycle_payload_shapes() -> None:
+    services = FakeServices()
+    client = TBankSdkUnaryClient(
+        config=config(),
+        sdk_module=fake_sdk(),
+        services_factory=services_factory(services),
+    )
+    metadata = auth_metadata("full-access-token-for-tests", "Resurt.Trading_2_0")
+
+    cancel_response = asyncio.run(
+        client.call_unary(
+            "CancelOrder",
+            {
+                "account_id": "account-1",
+                "exchange_order_id": "exchange-order-1",
+                "request_order_id": None,
+            },
+            metadata=metadata,
+            timeout_seconds=1.0,
+        )
+    )
+    order_state = asyncio.run(
+        client.call_unary(
+            "GetOrderState",
+            {
+                "account_id": "account-1",
+                "exchange_order_id": None,
+                "request_order_id": "request-order-1",
+            },
+            metadata=metadata,
+            timeout_seconds=1.0,
+        )
+    )
+    orders = asyncio.run(
+        client.call_unary(
+            "GetOrders",
+            {"account_id": "account-1"},
+            metadata=metadata,
+            timeout_seconds=1.0,
+        )
+    )
+    stop_order = asyncio.run(
+        client.call_unary(
+            "PostStopOrder",
+            {
+                "account_id": "account-1",
+                "instrument": {"instrument_uid": "uid-sber"},
+                "side": "sell",
+                "stop_order_type": "stop_loss",
+                "lot_qty": 1,
+                "stop_price": "299.50",
+                "price": "299.40",
+                "expiration_type": "good_till_cancel",
+                "expire_date": None,
+                "request_order_id": "request-stop-order-1",
+            },
+            metadata=metadata,
+            timeout_seconds=1.0,
+        )
+    )
+
+    assert services.orders.cancel_order_kwargs is not None
+    assert services.orders.cancel_order_kwargs["order_id_type"] is (
+        FakeOrderIdType.ORDER_ID_TYPE_EXCHANGE
+    )
+    assert cancel_response.data["broker_status"] == "cancelled"
+    assert services.orders.get_order_state_kwargs is not None
+    assert services.orders.get_order_state_kwargs["order_id_type"] is (
+        FakeOrderIdType.ORDER_ID_TYPE_REQUEST
+    )
+    assert order_state.data["broker_status"] == "filled"
+    assert order_state.data["fills"][0]["broker_fill_id"] == "fill-1"
+    assert orders.data["orders"][0]["broker_status"] == "posted"
+    assert services.stop_orders.post_stop_order_kwargs is not None
+    assert services.stop_orders.post_stop_order_kwargs["direction"] is (
+        FakeStopOrderDirection.STOP_ORDER_DIRECTION_SELL
+    )
+    assert stop_order.data["exchange_order_id"] == "stop-order-1"
+    assert stop_order.headers["x-tracking-id"] == "tracking-stop-order"
+
+
 def test_market_data_stream_subscribes_to_waiting_close_candles() -> None:
     services = FakeServices()
     client = TBankSdkStreamClient(
@@ -427,6 +781,55 @@ def test_market_data_stream_subscribes_to_waiting_close_candles() -> None:
     assert candles_request.candle_source_type is FakeCandleSource.CANDLE_SOURCE_EXCHANGE
     assert payload["is_closed"] is True
     assert payload["source"] == "tbank_waiting_close_stream"
+
+
+@pytest.mark.parametrize(
+    ("stream_name", "request_attr", "event_type", "payload_key"),
+    (
+        ("order_book", "subscribe_order_book_request", "order_book", "bids"),
+        ("last_prices", "subscribe_last_price_request", "last_price", "price"),
+        ("trading_status", "subscribe_info_request", "trading_status", "status"),
+        ("market_trades", "subscribe_trades_request", "market_trade", "quantity_lots"),
+    ),
+)
+def test_market_data_stream_maps_non_candle_stream_payloads(
+    stream_name: str,
+    request_attr: str,
+    event_type: str,
+    payload_key: str,
+) -> None:
+    services = FakeServices()
+    client = TBankSdkStreamClient(
+        config=config(),
+        instruments=("uid-sber",),
+        sdk_module=fake_sdk(),
+        services_factory=services_factory(services),
+    )
+
+    async def first_event() -> JsonPayload:
+        async for event in client.open_market_data_stream(
+            stream_name,
+            metadata=auth_metadata("readonly-token-for-tests", "Resurt.Trading_2_0"),
+            ping_interval_seconds=30.0,
+        ):
+            assert event.event_type == event_type
+            return event.payload
+        msg = "stream returned no events"
+        raise AssertionError(msg)
+
+    payload = asyncio.run(first_event())
+
+    assert services.market_data_stream.requests
+    request = cast(Any, services.market_data_stream.requests[0])
+    subscription_request = getattr(request, request_attr)
+    assert subscription_request.subscription_action is (
+        FakeSubscriptionAction.SUBSCRIPTION_ACTION_SUBSCRIBE
+    )
+    assert payload["instrument_id"] == "uid-sber"
+    assert payload_key in payload
+    if stream_name == "market_trades":
+        assert subscription_request.trade_source is FakeTradeSourceType.TRADE_SOURCE_EXCHANGE
+        assert subscription_request.with_open_interest is False
 
 
 def test_order_state_stream_maps_own_order_state_events() -> None:
