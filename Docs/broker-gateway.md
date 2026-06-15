@@ -157,3 +157,13 @@ Raw token и Authorization metadata не логируются.
 для `BarEngine` и strategy candidates. Anonymous market trades используются только как market tape
 context. Собственные fills идут через `OrderStateStream` и reconciliation helpers, а не через
 deprecated user trades stream.
+
+После reconnect `StreamSupervisor` вызывает `TBankBrokerGateway.recover_after_stream_gap()`:
+
+- для market streams выполняется recent `GetCandles` backfill по `TBANK_STREAM_INSTRUMENT_IDS`
+  и `TBANK_GAP_RECOVERY_TIMEFRAMES`;
+- для `OrderStateStream` выполняется `GetOrders` по account id;
+- для известных idempotency mappings выполняется `GetOrderState` по `request_order_id`.
+
+Recovery best-effort: ошибка backfill/refresh логируется как `stream_gap_recovery_failed`, но не
+должна останавливать reconnect loop.

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterator, Mapping, Sequence
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -39,6 +40,9 @@ from trading_common.telemetry import get_logger, log_event
 
 JsonPayload = dict[str, Any]
 LOGGER = get_logger(__name__)
+DEFAULT_GAP_RECOVERY_INSTRUMENTS_ENV = "TBANK_STREAM_INSTRUMENT_IDS"
+GAP_RECOVERY_TIMEFRAMES_ENV = "TBANK_GAP_RECOVERY_TIMEFRAMES"
+GAP_RECOVERY_LOOKBACK_MINUTES_ENV = "TBANK_GAP_RECOVERY_LOOKBACK_MINUTES"
 
 
 class TBankBrokerGateway:
@@ -243,7 +247,7 @@ class TBankBrokerGateway:
         stream_name = "OrderStateStream"
 
         async def recover_gap(name: str) -> None:
-            await self.recover_after_stream_gap(name)
+            await self.recover_after_stream_gap(name, account_id=account_id)
 
         return self._stream_supervisor.run(
             stream_name=stream_name,
@@ -251,7 +255,11 @@ class TBankBrokerGateway:
             gap_recovery_hook=recover_gap,
         )
 
-    async def recover_after_stream_gap(self, stream_name: str) -> None:
+    async def recover_after_stream_gap(
+        self,
+        stream_name: str,
+        account_id: str | None = None,
+    ) -> None:
         log_event(
             logger=LOGGER,
             level="WARNING",
@@ -259,7 +267,64 @@ class TBankBrokerGateway:
             component="tbank.gateway",
             stream_name=stream_name,
             target=self.config.target,
+            account_id_present=account_id is not None,
         )
+        recovered_candles = 0
+        open_orders_refreshed = False
+        order_states_refreshed = 0
+        try:
+            if _stream_needs_candle_backfill(stream_name):
+                recovered_candles = await self._recover_recent_candles_after_gap()
+            if account_id is not None:
+                await self.reconcile_open_orders(OrdersRequest(account_id=account_id))
+                open_orders_refreshed = True
+                for request_order_id in self._idempotency_store.request_order_ids():
+                    await self.reconcile_order_state(
+                        OrderStateRequest(
+                            account_id=account_id,
+                            request_order_id=request_order_id,
+                        )
+                    )
+                    order_states_refreshed += 1
+        except Exception as exc:
+            log_event(
+                logger=LOGGER,
+                level="WARNING",
+                event_type="stream_gap_recovery_failed",
+                component="tbank.gateway",
+                stream_name=stream_name,
+                error_message=str(exc),
+            )
+            return
+        log_event(
+            logger=LOGGER,
+            event_type=DomainEventType.STREAM_GAP_RECOVERY_COMPLETED.value,
+            component="tbank.gateway",
+            stream_name=stream_name,
+            recovered_candles=recovered_candles,
+            open_orders_refreshed=open_orders_refreshed,
+            order_states_refreshed=order_states_refreshed,
+        )
+
+    async def _recover_recent_candles_after_gap(self) -> int:
+        now = datetime.now(tz=UTC)
+        lookback_minutes = int(os.getenv(GAP_RECOVERY_LOOKBACK_MINUTES_ENV, "30"))
+        from_ts = now - timedelta(minutes=lookback_minutes)
+        recovered = 0
+        for instrument in _gap_recovery_instruments():
+            for timeframe in _gap_recovery_timeframes():
+                response = await self.get_candles(
+                    CandleRequest(
+                        instrument=instrument,
+                        interval=timeframe,
+                        from_=from_ts,
+                        to=now,
+                    )
+                )
+                candles = response.data.get("candles", ())
+                if isinstance(candles, list | tuple):
+                    recovered += len(candles)
+        return recovered
 
     async def _call_readonly(
         self,
@@ -427,3 +492,28 @@ def _headers_from_exception(exc: Exception) -> Mapping[str, object] | None:
                 normalized[str(item[0])] = item[1]
         return normalized
     return None
+
+
+def _stream_needs_candle_backfill(stream_name: str) -> bool:
+    normalized = stream_name.lower()
+    return (
+        "candle" in normalized
+        or "last" in normalized
+        or "order_book" in normalized
+        or "book" in normalized
+        or "trade" in normalized
+        or "status" in normalized
+        or "info" in normalized
+    )
+
+
+def _gap_recovery_instruments() -> tuple[InstrumentRef, ...]:
+    raw = os.getenv(DEFAULT_GAP_RECOVERY_INSTRUMENTS_ENV, "MOEX:SBER")
+    values = tuple(item.strip() for item in raw.split(",") if item.strip())
+    return tuple(InstrumentRef(instrument_id=value) for value in values)
+
+
+def _gap_recovery_timeframes() -> tuple[str, ...]:
+    raw = os.getenv(GAP_RECOVERY_TIMEFRAMES_ENV, "1m,5m,10m,15m")
+    values = tuple(item.strip() for item in raw.split(",") if item.strip())
+    return values or ("1m",)

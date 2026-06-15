@@ -28,3 +28,6 @@ class OrderIdempotencyStore:
 
     def get(self, key: str) -> UUID | None:
         return self._request_ids.get(key)
+
+    def request_order_ids(self) -> tuple[UUID, ...]:
+        return tuple(self._request_ids.values())

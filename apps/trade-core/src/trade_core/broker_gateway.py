@@ -211,4 +211,8 @@ class BrokerGateway(Protocol):
 
     def stream_orders(self, account_id: str) -> AsyncIterator[StreamEvent]: ...
 
-    async def recover_after_stream_gap(self, stream_name: str) -> None: ...
+    async def recover_after_stream_gap(
+        self,
+        stream_name: str,
+        account_id: str | None = None,
+    ) -> None: ...

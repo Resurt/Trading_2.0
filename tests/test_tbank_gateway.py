@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from decimal import Decimal
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -21,6 +21,7 @@ from trade_core.infra.tbank.errors import (
 )
 from trade_core.infra.tbank.gateway import TBankBrokerGateway
 from trade_core.infra.tbank.headers import capture_response_headers
+from trade_core.infra.tbank.idempotency import OrderIdempotencyStore
 from trade_core.infra.tbank.protocols import JsonPayload, UnaryCallResult
 from trade_core.infra.tbank.retry import ExponentialBackoff
 from trade_core.infra.tbank.secrets import (
@@ -290,3 +291,62 @@ def test_gateway_maps_non_retryable_errors() -> None:
     assert not exc_info.value.retryable
     assert exc_info.value.headers.tracking_id == "tracking-error"
     assert len(fake_client.calls) == 1
+
+
+def test_stream_gap_recovery_backfills_recent_candles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_client = FakeUnaryClient([UnaryCallResult(data={"candles": [{"close_price": "1"}]})])
+    gateway = TBankBrokerGateway(
+        config=config(),
+        tokens=tokens(),
+        unary_client=fake_client,
+        backoff=ExponentialBackoff(initial_seconds=0.0, max_seconds=0.0),
+    )
+    monkeypatch.setenv("TBANK_STREAM_INSTRUMENT_IDS", "uid-sber")
+    monkeypatch.setenv("TBANK_GAP_RECOVERY_TIMEFRAMES", "5m")
+    monkeypatch.setenv("TBANK_GAP_RECOVERY_LOOKBACK_MINUTES", "5")
+
+    asyncio.run(gateway.recover_after_stream_gap("candles"))
+
+    assert len(fake_client.calls) == 1
+    assert fake_client.calls[0]["method_name"] == "GetCandles"
+    payload = fake_client.calls[0]["payload"]
+    assert isinstance(payload, dict)
+    assert payload["interval"] == "5m"
+    assert payload["instrument"] == {
+        "instrument_id": "uid-sber",
+        "instrument_uid": None,
+        "class_code": None,
+        "ticker": None,
+    }
+
+
+def test_order_stream_gap_recovery_refreshes_open_and_known_orders() -> None:
+    request_order_id = uuid4()
+    idempotency_store = OrderIdempotencyStore()
+    idempotency_store.remember("candidate-1:entry", request_order_id)
+    fake_client = FakeUnaryClient(
+        [
+            UnaryCallResult(data={"orders": []}),
+            UnaryCallResult(data={"status": "observed"}),
+        ]
+    )
+    gateway = TBankBrokerGateway(
+        config=config(),
+        tokens=tokens(),
+        unary_client=fake_client,
+        idempotency_store=idempotency_store,
+        backoff=ExponentialBackoff(initial_seconds=0.0, max_seconds=0.0),
+    )
+
+    asyncio.run(gateway.recover_after_stream_gap("OrderStateStream", account_id="account-1"))
+
+    assert [call["method_name"] for call in fake_client.calls] == [
+        "GetOrders",
+        "GetOrderState",
+    ]
+    state_payload = fake_client.calls[1]["payload"]
+    assert isinstance(state_payload, dict)
+    assert state_payload["account_id"] == "account-1"
+    assert state_payload["request_order_id"] == str(request_order_id)

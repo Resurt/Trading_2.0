@@ -344,13 +344,18 @@ class SafeNoopBrokerGateway:
         if False:
             yield StreamEvent(stream_name="noop-orders", event_type="noop", payload={})
 
-    async def recover_after_stream_gap(self, stream_name: str) -> None:
+    async def recover_after_stream_gap(
+        self,
+        stream_name: str,
+        account_id: str | None = None,
+    ) -> None:
         log_event(
             logger=LOGGER,
             level="WARNING",
             event_type=DomainEventType.STREAM_GAP_RECOVERY_REQUESTED.value,
             component="runtime.noop_gateway",
             stream_name=stream_name,
+            account_id_present=account_id is not None,
         )
 
 
