@@ -72,6 +72,12 @@ class TradingSchedulesRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class InstrumentResolveRequest:
+    tickers: tuple[str, ...]
+    class_code: str = "TQBR"
+
+
+@dataclass(frozen=True, slots=True)
 class OrderPlacementRequest:
     account_id: str
     instrument: InstrumentRef
@@ -153,6 +159,12 @@ class BrokerGateway(Protocol):
     async def trading_schedules(
         self,
         request: TradingSchedulesRequest,
+        metadata: RequestMetadata | None = None,
+    ) -> BrokerUnaryResponse: ...
+
+    async def resolve_instruments(
+        self,
+        request: InstrumentResolveRequest,
         metadata: RequestMetadata | None = None,
     ) -> BrokerUnaryResponse: ...
 

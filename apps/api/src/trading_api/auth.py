@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import json
 import os
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Protocol
+from secrets import token_urlsafe
+from typing import Protocol, cast
 
 from fastapi import HTTPException, Request, WebSocket, status
 
@@ -16,6 +22,8 @@ from trading_common import RuntimeMode
 AUTH_MODE_ENV = "TRADING_AUTH_MODE"
 DEV_AUTH_MODE = "dev"
 STATIC_BEARER_AUTH_MODE = "static_bearer"
+WS_TICKET_SECRET_ENV = "TRADING_WS_TICKET_SECRET"
+WS_TICKET_TTL_SECONDS_ENV = "TRADING_WS_TICKET_TTL_SECONDS"
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +125,92 @@ class StaticBearerAuthProvider:
         return cls(token_to_role=token_to_role)
 
 
+@dataclass(frozen=True, slots=True)
+class WebSocketTicket:
+    ticket: str
+    expires_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class WebSocketTicketManager:
+    """Short-lived signed ticket issuer for browser WebSocket auth."""
+
+    secret: str
+    ttl_seconds: int = 60
+
+    def issue(self, auth: AuthContext) -> WebSocketTicket:
+        expires_at = datetime.now(tz=UTC) + timedelta(seconds=self.ttl_seconds)
+        payload = {
+            "role": auth.role.value,
+            "subject": auth.subject,
+            "auth_mode": auth.auth_mode,
+            "exp": int(expires_at.timestamp()),
+            "nonce": token_urlsafe(12),
+        }
+        encoded_payload = _b64_json(payload)
+        signature = _b64_bytes(
+            hmac.new(
+                self.secret.encode("utf-8"),
+                encoded_payload.encode("ascii"),
+                hashlib.sha256,
+            ).digest()
+        )
+        return WebSocketTicket(ticket=f"{encoded_payload}.{signature}", expires_at=expires_at)
+
+    def authenticate_ticket(self, ticket: str | None) -> AuthContext:
+        if not ticket:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="WS ticket required",
+            )
+        encoded_payload, sep, signature = ticket.partition(".")
+        if not sep:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Bad WS ticket")
+        expected_signature = _b64_bytes(
+            hmac.new(
+                self.secret.encode("utf-8"),
+                encoded_payload.encode("ascii"),
+                hashlib.sha256,
+            ).digest()
+        )
+        if not hmac.compare_digest(signature, expected_signature):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Bad WS ticket")
+        payload = _json_from_b64(encoded_payload)
+        exp_value = payload.get("exp", 0)
+        exp_ts = int(exp_value) if isinstance(exp_value, int | str) else 0
+        if exp_ts < int(datetime.now(tz=UTC).timestamp()):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Expired WS ticket",
+            )
+        role = ApiRole(str(payload.get("role", ApiRole.OBSERVER.value)))
+        subject = str(payload.get("subject") or "ws-ticket:unknown")
+        auth_mode = str(payload.get("auth_mode") or "ws_ticket")
+        return AuthContext(role=role, subject=subject, auth_mode=auth_mode)
+
+    @classmethod
+    def from_env(
+        cls,
+        environ: Mapping[str, str] | None = None,
+        *,
+        strict: bool,
+    ) -> WebSocketTicketManager | None:
+        env = environ if environ is not None else os.environ
+        secret = _read_secret_or_env(env, WS_TICKET_SECRET_ENV)
+        if not secret:
+            if strict:
+                msg = (
+                    "production WebSocket auth requires TRADING_WS_TICKET_SECRET "
+                    "or TRADING_WS_TICKET_SECRET_FILE"
+                )
+                raise RuntimeError(msg)
+            return None
+        return cls(
+            secret=secret,
+            ttl_seconds=int(env.get(WS_TICKET_TTL_SECONDS_ENV, "60")),
+        )
+
+
 def build_auth_provider(
     *,
     runtime_mode: RuntimeMode,
@@ -143,6 +237,17 @@ def build_auth_provider(
     raise RuntimeError(msg)
 
 
+def build_ws_ticket_manager(
+    *,
+    runtime_mode: RuntimeMode,
+    environ: Mapping[str, str] | None = None,
+) -> WebSocketTicketManager | None:
+    return WebSocketTicketManager.from_env(
+        environ,
+        strict=runtime_mode is RuntimeMode.PRODUCTION,
+    )
+
+
 def auth_context_from_request(request: Request) -> AuthContext:
     provider = getattr(request.app.state, "auth_provider", None)
     if provider is None:
@@ -152,7 +257,14 @@ def auth_context_from_request(request: Request) -> AuthContext:
 
 
 def authenticate_websocket(websocket: WebSocket) -> AuthContext:
-    provider = getattr(websocket.app.state, "auth_provider", None)
+    ticket_manager = cast(
+        WebSocketTicketManager | None,
+        getattr(websocket.app.state, "ws_ticket_manager", None),
+    )
+    ticket = websocket.query_params.get("ticket")
+    if ticket_manager is not None and ticket:
+        return ticket_manager.authenticate_ticket(ticket)
+    provider = cast(AuthProvider | None, getattr(websocket.app.state, "auth_provider", None))
     if provider is None:
         provider = build_auth_provider(runtime_mode=RuntimeMode.HISTORICAL_REPLAY)
         websocket.app.state.auth_provider = provider
@@ -178,3 +290,20 @@ def _read_secret_or_env(env: Mapping[str, str], name: str) -> str | None:
             raise RuntimeError(msg) from exc
     value = env.get(name)
     return value.strip() if value else None
+
+
+def _b64_json(payload: Mapping[str, object]) -> str:
+    return _b64_bytes(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+
+
+def _b64_bytes(payload: bytes) -> str:
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def _json_from_b64(payload: str) -> Mapping[str, object]:
+    padded = payload + "=" * (-len(payload) % 4)
+    decoded = base64.urlsafe_b64decode(padded.encode("ascii"))
+    value = json.loads(decoded.decode("utf-8"))
+    if not isinstance(value, dict):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Bad WS ticket")
+    return value

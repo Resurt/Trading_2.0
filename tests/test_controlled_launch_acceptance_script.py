@@ -17,7 +17,10 @@ def test_controlled_launch_secret_scan_detects_raw_tbank_token_assignment(
     tmp_path: Path,
 ) -> None:
     leaking_file = tmp_path / "local.env"
-    leaking_file.write_text("TINVEST_" + "TOKEN=t.fake_raw_token_value\n", encoding="utf-8")
+    leaking_file.write_text(
+        "TINVEST_" + "TOKEN=" + "t.fake_raw_token_value\n",
+        encoding="utf-8",
+    )
 
     leaks = secret_scan(tmp_path)
 

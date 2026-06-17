@@ -201,6 +201,11 @@ def test_tbank_config_and_secret_policy_follow_launch_mode(
             LaunchModePolicy.from_mode(RuntimeMode.HISTORICAL_REPLAY)
         )
 
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("TBANK_FULL_ACCESS_TOKEN_FILE", raising=False)
+    monkeypatch.delenv("TBANK_READONLY_TOKEN_FILE", raising=False)
+    monkeypatch.delenv("TBANK_FULL_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("TBANK_READONLY_TOKEN", raising=False)
     monkeypatch.setenv("TINVEST_TOKEN", "dev-token")
     tokens = load_tbank_tokens_for_launch(sandbox_policy)
     assert tokens.full_access_token == "dev-token"

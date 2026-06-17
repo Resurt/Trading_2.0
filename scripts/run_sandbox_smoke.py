@@ -21,9 +21,14 @@ for src in (
         path.insert(0, str(src))
 
 from trade_core.broker_gateway import (
+    AccountsRequest,
+    CandleRequest,
     InstrumentRef,
+    InstrumentResolveRequest,
+    OrderBookRequest,
     OrderPlacementRequest,
     TradingSchedulesRequest,
+    TradingStatusRequest,
 )
 from trade_core.infra.tbank import (
     TBankBrokerConfig,
@@ -39,9 +44,9 @@ async def _sandbox_readonly_status(
     *,
     config: TBankBrokerConfig,
     tokens: TBankTokenBundle,
-) -> str:
+) -> dict[str, object]:
     if not (tokens.readonly_token or tokens.full_access_token):
-        return "skipped_no_token"
+        return {"status": "skipped_no_token"}
 
     gateway = TBankBrokerGateway(config=config, tokens=tokens)
     now = datetime.now(tz=UTC)
@@ -52,7 +57,40 @@ async def _sandbox_readonly_status(
             to=now + timedelta(days=1),
         )
     )
-    return "ok"
+    accounts_response = await gateway.get_accounts(AccountsRequest())
+    resolve_response = await gateway.resolve_instruments(
+        InstrumentResolveRequest(tickers=("SBER",), class_code="TQBR")
+    )
+    instrument_payloads = resolve_response.data.get("instruments", [])
+    if not isinstance(instrument_payloads, list) or not instrument_payloads:
+        return {"status": "failed_no_resolved_instrument"}
+    instrument_payload = instrument_payloads[0]
+    if not isinstance(instrument_payload, dict):
+        return {"status": "failed_bad_instrument_payload"}
+    instrument = InstrumentRef(
+        instrument_id=str(instrument_payload.get("instrument_id")),
+        instrument_uid=str(instrument_payload.get("instrument_uid") or ""),
+        class_code=str(instrument_payload.get("class_code") or "TQBR"),
+        ticker=str(instrument_payload.get("ticker") or "SBER"),
+    )
+    await gateway.get_trading_status(TradingStatusRequest(instrument=instrument))
+    await gateway.get_candles(
+        CandleRequest(
+            instrument=instrument,
+            interval="1m",
+            from_=now - timedelta(minutes=30),
+            to=now,
+        )
+    )
+    await gateway.get_order_book(OrderBookRequest(instrument=instrument, depth=10))
+    accounts = accounts_response.data.get("accounts", [])
+    return {
+        "status": "ok",
+        "accounts_count": len(accounts) if isinstance(accounts, list) else None,
+        "resolved_ticker": instrument.ticker,
+        "resolved_instrument_id_present": bool(instrument.instrument_id),
+        "resolved_instrument_uid_present": bool(instrument.instrument_uid),
+    }
 
 
 async def _sandbox_order_status(
@@ -111,7 +149,7 @@ async def async_main() -> None:
     if args.allow_sandbox_orders and not tokens.full_access_token:
         parser.error("--allow-sandbox-orders requires configured full-access sandbox token")
 
-    readonly_status = "dry_run"
+    readonly_status: dict[str, object] | str = "dry_run"
     sandbox_order_status = "not_requested"
     if not args.dry_run:
         readonly_status = await _sandbox_readonly_status(config=config, tokens=tokens)

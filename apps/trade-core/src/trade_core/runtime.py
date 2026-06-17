@@ -7,7 +7,6 @@ import os
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, time, timedelta
-from decimal import Decimal
 from pathlib import Path
 from threading import Thread
 from time import perf_counter
@@ -27,6 +26,7 @@ from trade_core.broker_gateway import (
     CancelOrderRequest,
     CandleRequest,
     InstrumentRef,
+    InstrumentResolveRequest,
     LastPricesRequest,
     OrderBookRequest,
     OrderPlacementRequest,
@@ -45,6 +45,8 @@ from trade_core.infra.tbank import (
     TBankBrokerGateway,
     load_tbank_tokens_for_launch,
 )
+from trade_core.infra.tbank.sdk_clients import load_tbank_sdk
+from trade_core.instruments import InstrumentResolverService
 from trade_core.market_data import (
     Bar,
     BarEngine,
@@ -77,27 +79,34 @@ from trade_core.session import (
     TradingSchedule,
 )
 from trade_core.strategy import (
+    CancelReasonCode,
     ConfigDrivenStrategyConfig,
     ConfigDrivenStrategyEngine,
     DefaultExecutionEngine,
     DefaultReconciliationService,
     DefaultRiskEngine,
+    LoadedStrategyConfig,
     OrderIntentRequest,
     PortfolioSnapshot,
     RiskAssessmentInput,
     RiskLimits,
     SignalCandidateDecision,
     SqlAlchemyStrategyEventStore,
+    StrategyConfigLoader,
     StrategyEvaluationContext,
     StrategyState,
 )
 from trading_common import LaunchModePolicy, RuntimeMode, ServiceName, TradingMetrics
 from trading_common.db.base import Base
-from trading_common.db.models import AuditEvent, InstrumentRegistry, OrderIntent, RobotCommand
+from trading_common.db.config import (
+    build_database_url_from_mapping,
+    database_backend_from_url,
+    redact_database_url,
+)
+from trading_common.db.models import AuditEvent, OrderIntent, RobotCommand
 from trading_common.db.repositories import (
     BlockerEventRepository,
     CandidateStageResultRepository,
-    InstrumentRepository,
     MarketContextSnapshotRepository,
     OrderRepository,
     RiskEventRepository,
@@ -116,13 +125,18 @@ MSK = ZoneInfo("Europe/Moscow")
 LOGGER = get_logger(__name__)
 DEFAULT_ACCOUNT_ID = "local-runtime-account"
 DEFAULT_DATABASE_PATH = Path(".local/trade_core_runtime.db")
+LOCAL_SQLITE_ENV = "TRADING_RUNTIME_LOCAL_SQLITE"
 DEFAULT_EXCHANGE = "MOEX"
 DEFAULT_INSTRUMENTS: tuple[InstrumentRef, ...] = (
     InstrumentRef(
         instrument_id="MOEX:SBER",
-        instrument_uid="sber-runtime-placeholder",
         class_code="TQBR",
         ticker="SBER",
+    ),
+    InstrumentRef(
+        instrument_id="MOEX:GAZP",
+        class_code="TQBR",
+        ticker="GAZP",
     ),
 )
 
@@ -137,6 +151,8 @@ class TradeCoreRuntimeConfig:
     tick_interval_seconds: float = 1.0
     database_url: str | None = None
     auto_create_sqlite_schema: bool = False
+    strategy_id: str = "baseline"
+    session_template: str = SessionType.WEEKDAY_MAIN.value
     micro_session_freeze_seconds: int = 90
     position_snapshot_freshness_seconds: int = 900
     stream_names: tuple[str, ...] = (
@@ -151,12 +167,14 @@ class TradeCoreRuntimeConfig:
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> TradeCoreRuntimeConfig:
         env = environ if environ is not None else os.environ
-        database_url = env.get("TRADING_DATABASE_URL") or env.get("DATABASE_URL")
+        database_url: str
         auto_create_sqlite_schema = False
-        if not database_url:
+        if _local_sqlite_requested(env):
             DEFAULT_DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
             database_url = f"sqlite+pysqlite:///{DEFAULT_DATABASE_PATH.as_posix()}"
             auto_create_sqlite_schema = True
+        else:
+            database_url = build_database_url_from_mapping(env)
 
         return cls(
             account_id=env.get("TRADING_ACCOUNT_ID", DEFAULT_ACCOUNT_ID),
@@ -165,6 +183,11 @@ class TradeCoreRuntimeConfig:
             tick_interval_seconds=float(env.get("TRADE_CORE_TICK_INTERVAL_SECONDS", "1.0")),
             database_url=database_url,
             auto_create_sqlite_schema=auto_create_sqlite_schema,
+            strategy_id=env.get("TRADING_STRATEGY_ID", "baseline"),
+            session_template=env.get(
+                "TRADING_STRATEGY_SESSION_TEMPLATE",
+                SessionType.WEEKDAY_MAIN.value,
+            ),
             micro_session_freeze_seconds=int(
                 env.get("TRADE_CORE_MICRO_SESSION_FREEZE_SECONDS", "90")
             ),
@@ -172,6 +195,14 @@ class TradeCoreRuntimeConfig:
                 env.get("TRADE_CORE_POSITION_SNAPSHOT_FRESHNESS_SECONDS", "900")
             ),
         )
+
+    @property
+    def database_backend(self) -> str:
+        return database_backend_from_url(_required_database_url(self))
+
+    @property
+    def database_url_redacted(self) -> str:
+        return redact_database_url(_required_database_url(self))
 
 
 @dataclass(slots=True)
@@ -212,6 +243,36 @@ class SafeNoopBrokerGateway:
                     _window_payload(window) for window in default_trading_schedule(moment).windows
                 ],
             },
+            headers={},
+        )
+
+    async def resolve_instruments(
+        self,
+        request: InstrumentResolveRequest,
+        metadata: RequestMetadata | None = None,
+    ) -> BrokerUnaryResponse:
+        del metadata
+        instruments = [
+            {
+                "instrument_id": f"safe-noop-{ticker.lower()}-uid",
+                "instrument_uid": f"safe-noop-{ticker.lower()}-uid",
+                "ticker": ticker.upper(),
+                "class_code": request.class_code,
+                "figi": None,
+                "name": ticker.upper(),
+                "lot_size": 1,
+                "min_price_increment": "0.01",
+                "currency": "RUB",
+                "api_trade_available": True,
+                "short_available": True,
+                "supports_weekend": False,
+                "source": "safe_noop_resolver",
+            }
+            for ticker in request.tickers
+        ]
+        return BrokerUnaryResponse(
+            method_name="ResolveInstruments",
+            data={"instruments": instruments},
             headers={},
         )
 
@@ -432,6 +493,7 @@ class TradeCoreRuntime:
         self.config = config or TradeCoreRuntimeConfig.from_env()
         self.launch_policy = launch_policy or LaunchModePolicy.from_env()
         self.launch_policy.validate_startup()
+        self._assert_broker_sdk_available_when_required()
         self.identity = create_identity(self.launch_policy.mode)
         self.database = database or DatabaseService(_required_database_url(self.config))
         self.metrics = metrics or TradingMetrics(self.identity)
@@ -451,7 +513,13 @@ class TradeCoreRuntime:
             broker_gateway=self.broker_gateway,
             event_bus=self.market_event_bus,
         )
-        self.strategy_config = strategy_config or ConfigDrivenStrategyConfig.conservative_default()
+        self._strategy_config_injected = strategy_config is not None
+        default_strategy_config = replace(
+            ConfigDrivenStrategyConfig.conservative_default(),
+            strategy_id=self.config.strategy_id,
+            session_template=self.config.session_template,
+        )
+        self.strategy_config = strategy_config or default_strategy_config
         self.strategy_engine = ConfigDrivenStrategyEngine(self.strategy_config)
         self.risk_engine = DefaultRiskEngine()
         self.risk_limits = risk_limits or RiskLimits.from_strategy_config(self.strategy_config)
@@ -469,6 +537,7 @@ class TradeCoreRuntime:
         self.execution_engine: DefaultExecutionEngine | None = None
         self.reconciliation_service: DefaultReconciliationService | None = None
         self.strategy_event_store: SqlAlchemyStrategyEventStore | None = None
+        self.strategy_config_loader: StrategyConfigLoader | None = None
 
         self._stream_tasks: tuple[asyncio.Task[None], ...] = ()
         self._stop_event: asyncio.Event | None = None
@@ -479,6 +548,7 @@ class TradeCoreRuntime:
         self._latest_market_states: dict[str, MarketState] = {}
         self._latest_closed_bars: dict[str, dict[Timeframe, Bar]] = {}
         self._strategy_states: dict[str, StrategyState] = {}
+        self._loaded_strategy_config_identity: tuple[str, int, str | None] | None = None
 
     @classmethod
     def from_env(
@@ -511,8 +581,10 @@ class TradeCoreRuntime:
         if self.stats.started:
             return
         self._session = self.database.session_factory()
-        self._ensure_instruments_registered()
+        await self._resolve_runtime_instruments()
         session = self._require_session()
+        self.strategy_config_loader = StrategyConfigLoader(session)
+        self._reload_strategy_config_if_changed(force=True)
         self._session_state_store = SqlAlchemySessionStateStore(
             session,
             strategy_id=self.strategy_config.strategy_id,
@@ -592,6 +664,8 @@ class TradeCoreRuntime:
             component="runtime",
             runtime_id=str(self.runtime_id),
             launch_mode=self.launch_policy.mode.value,
+            database_backend=self.config.database_backend,
+            database_url_redacted=self.config.database_url_redacted,
             stream_tasks=self.stats.stream_tasks_started,
         )
 
@@ -654,7 +728,8 @@ class TradeCoreRuntime:
 
         if not self.stats.started:
             await self.start()
-        self.process_robot_commands()
+        await self.process_robot_commands_async()
+        self._reload_strategy_config_if_changed()
         observed_at = _ensure_msk(now or datetime.now(tz=MSK))
         instrument = self.config.instruments[0]
         schedule = await self.refresh_trading_schedule(now=observed_at)
@@ -852,6 +927,16 @@ class TradeCoreRuntime:
             )
 
     def process_robot_commands(self) -> int:
+        """Synchronous compatibility wrapper for tests and local scripts."""
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self.process_robot_commands_async())
+        msg = "process_robot_commands() cannot run inside an active event loop"
+        raise RuntimeError(msg)
+
+    async def process_robot_commands_async(self) -> int:
         """Apply durable operator commands written by the API control plane."""
 
         session = self._session
@@ -865,7 +950,7 @@ class TradeCoreRuntime:
             previous_state = self.robot_control_state
             repository.mark_accepted(command, accepted_at=now)
             try:
-                reason_code, result_payload = self._apply_robot_command(command)
+                reason_code, result_payload = await self._apply_robot_command(command)
                 result_payload = {
                     **result_payload,
                     "previous_robot_control_state": previous_state,
@@ -899,7 +984,85 @@ class TradeCoreRuntime:
             session.commit()
         return processed
 
-    def _apply_robot_command(self, command: RobotCommand) -> tuple[str, JsonPayload]:
+    def _reload_strategy_config_if_changed(self, *, force: bool = False) -> None:
+        if self._strategy_config_injected:
+            return
+        loader = self.strategy_config_loader
+        if loader is None:
+            return
+        template = self._strategy_config_session_template()
+        try:
+            loaded = loader.load_active(
+                strategy_id=self.config.strategy_id,
+                session_template=template,
+                fallback=self.strategy_config,
+            )
+        except Exception as exc:
+            log_event(
+                logger=LOGGER,
+                level="ERROR",
+                event_type="strategy_config_reload_failed",
+                component="runtime.strategy_config",
+                strategy_id=self.config.strategy_id,
+                session_template=template,
+                error_code=type(exc).__name__,
+                error_message=str(exc),
+            )
+            self._write_audit_event(
+                action="strategy_config_reload_failed",
+                severity="error",
+                payload={
+                    "strategy_id": self.config.strategy_id,
+                    "session_template": template,
+                    "error_code": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+            )
+            return
+
+        identity = _loaded_config_identity(loaded)
+        if not force and identity == self._loaded_strategy_config_identity:
+            return
+        previous_identity = self._loaded_strategy_config_identity
+        self.strategy_config = loaded.config
+        self.strategy_engine = ConfigDrivenStrategyEngine(self.strategy_config)
+        self.risk_limits = loaded.risk_limits
+        self._loaded_strategy_config_identity = identity
+        action = (
+            "strategy_config_loaded"
+            if previous_identity is None
+            else "strategy_config_reloaded"
+        )
+        payload = {
+            "strategy_id": self.strategy_config.strategy_id,
+            "strategy_version": self.strategy_config.strategy_version,
+            "session_template": template,
+            "source": loaded.source,
+            "strategy_config_id": loaded.strategy_config_id,
+            "allow_long": self.strategy_config.allow_long,
+            "allow_short": self.strategy_config.allow_short,
+            "max_position_lots": self.risk_limits.max_position_lots,
+            "max_daily_loss_rub": str(self.risk_limits.max_daily_loss_rub),
+            "assumed_commission_bps_per_side": str(
+                self.risk_limits.assumed_commission_bps_per_side
+            ),
+            "assumed_slippage_bps": str(self.risk_limits.assumed_slippage_bps),
+        }
+        log_event(
+            logger=LOGGER,
+            event_type=action,
+            component="runtime.strategy_config",
+            details=payload,
+        )
+        self._write_audit_event(action=action, payload=payload)
+
+    def _strategy_config_session_template(self) -> str:
+        snapshot = self._current_snapshot
+        if snapshot is not None:
+            return snapshot.session_type.value
+        return self.config.session_template
+
+    async def _apply_robot_command(self, command: RobotCommand) -> tuple[str, JsonPayload]:
         command_type = command.command_type
         if command_type in {"start", "resume"}:
             self.robot_control_state = "running"
@@ -914,23 +1077,114 @@ class TradeCoreRuntime:
             }
             return "runtime_safe_stopped", {"new_entries_allowed": False}
         if command_type == "emergency_stop":
-            cancelled_open_orders = self.stats.open_orders
-            self.robot_control_state = "emergency_stopped"
-            self.stats.open_orders = 0
-            self.metrics.set_open_orders(0)
+            result = await self._apply_emergency_stop(command)
             self._strategy_states = {
                 instrument_id: StrategyState.STOPPED for instrument_id in self._strategy_states
             }
-            return (
-                "runtime_emergency_stopped",
-                {
-                    "new_entries_allowed": False,
-                    "cancel_reason_code": "manual_operator_emergency_stop",
-                    "cancelled_open_orders": cancelled_open_orders,
-                },
-            )
+            return result
         msg = f"unsupported robot command: {command_type}"
         raise ValueError(msg)
+
+    async def _apply_emergency_stop(self, command: RobotCommand) -> tuple[str, JsonPayload]:
+        del command
+        session = self._require_session()
+        execution = self._require_execution_engine()
+        reconciliation = self._require_reconciliation_service()
+        order_repository = OrderRepository(session)
+        working_statuses = ("submitted", "working", "partially_filled", "cancel_requested")
+        intents = list(
+            session.execute(
+                select(OrderIntent)
+                .where(OrderIntent.status.in_(working_statuses))
+                .order_by(OrderIntent.created_ts, OrderIntent.order_intent_id)
+            ).scalars()
+        )
+        cancelled = 0
+        failed = 0
+        cancel_results: list[JsonPayload] = []
+        for intent in intents:
+            broker_order = order_repository.get_broker_order_by_request_order_id(
+                intent.request_order_id
+            )
+            exchange_order_id = (
+                broker_order.exchange_order_id if broker_order is not None else None
+            )
+            try:
+                cancel_result = await execution.cancel_order(
+                    intent,
+                    account_id=_account_id_from_intent(intent, fallback=self.config.account_id),
+                    cancel_reason_code=CancelReasonCode.MANUAL_OPERATOR_EMERGENCY_STOP,
+                    cancel_payload={
+                        "source": "robot_command",
+                        "command_type": "emergency_stop",
+                        "runtime_id": str(self.runtime_id),
+                    },
+                    exchange_order_id=exchange_order_id,
+                )
+                await reconciliation.reconcile_order(
+                    account_id=_account_id_from_intent(intent, fallback=self.config.account_id),
+                    request_order_id=intent.request_order_id,
+                    exchange_order_id=cancel_result.exchange_order_id or exchange_order_id,
+                )
+                cancelled += 1
+                cancel_results.append(
+                    {
+                        "order_intent_id": str(intent.order_intent_id),
+                        "request_order_id": str(intent.request_order_id),
+                        "exchange_order_id": cancel_result.exchange_order_id,
+                        "status": cancel_result.status,
+                        "broker_status": cancel_result.broker_status,
+                    }
+                )
+            except Exception as exc:
+                failed += 1
+                self.metrics.inc_emergency_cancel_failed(result=type(exc).__name__)
+                cancel_results.append(
+                    {
+                        "order_intent_id": str(intent.order_intent_id),
+                        "request_order_id": str(intent.request_order_id),
+                        "exchange_order_id": exchange_order_id,
+                        "status": "failed",
+                        "error_code": type(exc).__name__,
+                        "error_message": str(exc),
+                    }
+                )
+                self._write_audit_event(
+                    action="runtime_emergency_cancel_failed",
+                    severity="error",
+                    payload=cancel_results[-1],
+                )
+
+        remaining = self._working_order_count()
+        self.stats.open_orders = remaining
+        self.metrics.set_open_orders(remaining)
+        self.metrics.set_working_orders_after_stop(remaining)
+        self.metrics.inc_emergency_stop(result="degraded" if failed else "applied")
+        self.robot_control_state = "degraded" if failed else "emergency_stopped"
+        reason_code = (
+            "runtime_emergency_stop_degraded" if failed else "runtime_emergency_stopped"
+        )
+        return (
+            reason_code,
+            {
+                "new_entries_allowed": False,
+                "cancel_reason_code": CancelReasonCode.MANUAL_OPERATOR_EMERGENCY_STOP.value,
+                "matched_working_orders": len(intents),
+                "cancelled_open_orders": cancelled,
+                "failed_cancellations": failed,
+                "working_orders_after_stop": remaining,
+                "cancel_results": cancel_results,
+            },
+        )
+
+    def _working_order_count(self) -> int:
+        session = self._session
+        if session is None:
+            return self.stats.open_orders
+        stmt = select(OrderIntent).where(
+            OrderIntent.status.in_(("submitted", "working", "partially_filled", "cancel_requested"))
+        )
+        return len(list(session.execute(stmt).scalars()))
 
     async def _snapshot_positions(self, *, reason: str, now: datetime) -> None:
         position_service = self.position_service
@@ -1009,6 +1263,19 @@ class TradeCoreRuntime:
         tokens = load_tbank_tokens_for_launch(self.launch_policy)
         return cast(BrokerGateway, TBankBrokerGateway(config=config, tokens=tokens))
 
+    def _assert_broker_sdk_available_when_required(self) -> None:
+        if self.launch_policy.mode is RuntimeMode.HISTORICAL_REPLAY:
+            return
+        try:
+            load_tbank_sdk()
+        except Exception as exc:
+            msg = (
+                "T-Bank SDK extra is required for sandbox/shadow/production. "
+                "Install with: python -m pip install -e \".[tbank]\" --extra-index-url "
+                "https://opensource.tbank.ru/api/v4/projects/238/packages/pypi/simple"
+            )
+            raise RuntimeError(msg) from exc
+
     def _install_broker_gap_recovery_hook(self) -> None:
         setter = getattr(self.broker_gateway, "set_stream_gap_recovery_hook", None)
         if callable(setter):
@@ -1062,27 +1329,18 @@ class TradeCoreRuntime:
         )
         return tuple(session.execute(stmt).scalars())
 
-    def _ensure_instruments_registered(self) -> None:
-        repository = InstrumentRepository(self._require_session())
-        for instrument in self.config.instruments:
-            repository.upsert(
-                InstrumentRegistry(
-                    instrument_id=instrument.instrument_id,
-                    ticker=instrument.ticker or instrument.instrument_id.rsplit(":", 1)[-1],
-                    class_code=instrument.class_code or "TQBR",
-                    figi=None,
-                    instrument_uid=instrument.instrument_uid,
-                    name=instrument.ticker or instrument.instrument_id,
-                    lot_size=1,
-                    min_price_increment=Decimal("0.01"),
-                    currency="RUB",
-                    is_enabled=True,
-                    supports_morning=True,
-                    supports_evening=True,
-                    supports_weekend=False,
-                    instrument_payload={"source": "trade_core_runtime_bootstrap"},
-                )
-            )
+    async def _resolve_runtime_instruments(self) -> None:
+        resolver = InstrumentResolverService(
+            broker_gateway=self.broker_gateway,
+            session=self._require_session(),
+            launch_policy=self.launch_policy,
+            exchange=self.config.exchange,
+        )
+        resolved = await resolver.resolve_startup_instruments(self.config.instruments)
+        self.config = replace(self.config, instruments=resolved)
+        setter = getattr(self.broker_gateway, "set_market_stream_instruments", None)
+        if callable(setter):
+            setter(resolved)
         self.flush_domain_events()
 
     def _session_context_for(self, instrument_id: str) -> SessionEventContext:
@@ -1451,7 +1709,13 @@ class TradeCoreRuntime:
             )
         )
 
-    def _write_audit_event(self, *, action: str) -> None:
+    def _write_audit_event(
+        self,
+        *,
+        action: str,
+        severity: str = "info",
+        payload: Mapping[str, object] | None = None,
+    ) -> None:
         session = self._session
         if session is None:
             return
@@ -1474,10 +1738,13 @@ class TradeCoreRuntime:
                 action=action,
                 entity_type="trade_core_runtime",
                 entity_id=str(self.runtime_id),
-                severity="info",
+                severity=severity,
                 correlation_id=str(self.runtime_id),
                 audit_payload={
                     "launch_policy": self.launch_policy.as_payload(),
+                    "database_backend": self.config.database_backend,
+                    "database_url_redacted": self.config.database_url_redacted,
+                    **dict(payload or {}),
                     "stats": {
                         "cycles": self.stats.cycles,
                         "processed_closed_bars": self.stats.processed_closed_bars,
@@ -1565,6 +1832,18 @@ def _required_database_url(config: TradeCoreRuntimeConfig) -> str:
         msg = "TradeCoreRuntimeConfig.database_url is required"
         raise RuntimeError(msg)
     return config.database_url
+
+
+def _loaded_config_identity(loaded: LoadedStrategyConfig) -> tuple[str, int, str | None]:
+    return (
+        loaded.config.strategy_id,
+        loaded.config.strategy_version,
+        loaded.strategy_config_id,
+    )
+
+
+def _local_sqlite_requested(env: Mapping[str, str]) -> bool:
+    return env.get(LOCAL_SQLITE_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _build_report_job_dispatcher() -> ReportJobDispatcher:
@@ -1707,6 +1986,11 @@ def _stream_name_for_event(event: MarketDataEvent) -> str:
 
 def _active_position_lots(portfolio: PortfolioSnapshot) -> int:
     return portfolio.long_position_lots + portfolio.short_position_lots
+
+
+def _account_id_from_intent(intent: OrderIntent, *, fallback: str) -> str:
+    value = intent.intent_payload.get("account_id")
+    return value if isinstance(value, str) and value else fallback
 
 
 def _window_payload(window: ScheduleWindow) -> JsonPayload:

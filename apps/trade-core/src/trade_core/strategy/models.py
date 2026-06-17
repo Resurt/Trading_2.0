@@ -86,6 +86,7 @@ class CancelReasonCode(StrEnum):
     STALE_ORDER = "stale_order"
     PRICE_MOVED = "price_moved"
     MANUAL_OPERATOR_ACTION = "manual_operator_action"
+    MANUAL_OPERATOR_EMERGENCY_STOP = "manual_operator_emergency_stop"
     BROKER_REJECT_FOLLOWUP = "broker_reject_followup"
 
 

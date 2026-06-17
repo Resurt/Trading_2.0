@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from trading_api import create_fastapi_app
 from trading_api.schemas import (
@@ -676,3 +677,67 @@ def test_websocket_dashboard_stays_live(tmp_path: Path) -> None:
     assert first["type"] == "dashboard.snapshot"
     assert second["type"] == "dashboard.snapshot"
     assert second["payload"]["sequence"] == 1
+
+
+def test_production_auth_rejects_role_header_without_bearer(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("TRADING_AUTH_MODE", "static_bearer")
+    monkeypatch.setenv("TRADING_API_OBSERVER_TOKEN", "observer-token")
+    monkeypatch.setenv("TRADING_WS_TICKET_SECRET", "test-ws-secret")
+    database = DatabaseService(f"sqlite+pysqlite:///{tmp_path / 'api-prod-auth.db'}")
+    Base.metadata.create_all(database.engine)
+    seed_database(database)
+    app = create_fastapi_app(
+        database=database,
+        report_task_client=FakeReportTaskClient(),
+        runtime_mode=RuntimeMode.PRODUCTION,
+    )
+    client = TestClient(app)
+
+    assert client.get("/auth/status").status_code == 401
+    role_only = client.get("/auth/status", headers={"X-API-Role": "admin"})
+    assert role_only.status_code == 401
+    authenticated = client.get(
+        "/auth/status",
+        headers={"Authorization": "Bearer observer-token"},
+    )
+    assert authenticated.status_code == 200
+    assert authenticated.json()["auth_mode"] == "static_bearer"
+
+
+def test_websocket_ticket_auth_accepts_valid_and_rejects_bad_ticket(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("TRADING_AUTH_MODE", "static_bearer")
+    monkeypatch.setenv("TRADING_API_OBSERVER_TOKEN", "observer-token")
+    monkeypatch.setenv("TRADING_WS_TICKET_SECRET", "test-ws-secret")
+    database = DatabaseService(f"sqlite+pysqlite:///{tmp_path / 'api-ws-ticket.db'}")
+    Base.metadata.create_all(database.engine)
+    seed_database(database)
+    app = create_fastapi_app(
+        database=database,
+        report_task_client=FakeReportTaskClient(),
+        runtime_mode=RuntimeMode.PRODUCTION,
+    )
+    app.state.ws_push_interval_seconds = 0.05
+    client = TestClient(app)
+
+    ticket_response = client.post(
+        "/auth/ws-ticket",
+        headers={"Authorization": "Bearer observer-token"},
+    )
+    assert ticket_response.status_code == 200
+    ticket = ticket_response.json()["ticket"]
+
+    with client.websocket_connect(f"/ws/dashboard?ticket={ticket}") as websocket:
+        assert websocket.receive_json()["type"] == "dashboard.snapshot"
+
+    with (
+        pytest.raises(WebSocketDisconnect) as exc_info,
+        client.websocket_connect("/ws/dashboard?ticket=bad-ticket") as websocket,
+    ):
+        websocket.receive_json()
+    assert exc_info.value.code == 1008

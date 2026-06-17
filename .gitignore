@@ -8,6 +8,9 @@ secrets/
 *.key
 *.p12
 *.pfx
+*.docx
+*.xlsx
+*.pdf
 id_rsa*
 id_ed25519*
 *_deploy_ed25519*

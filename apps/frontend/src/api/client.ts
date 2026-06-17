@@ -1,4 +1,5 @@
 import type {
+  AuthStatusResponse,
   BlockerAnalyticsResponse,
   CandidateFunnelResponse,
   CanceledOrderDiagnosticsResponse,
@@ -17,13 +18,38 @@ import type {
   SignalResponse,
   StrategyConfigResponse,
   StrategyConfigUpdateRequest,
+  WebSocketTicketResponse,
 } from "./types";
 
 const DEFAULT_API_BASE_URL = "http://localhost:8000";
 const DEFAULT_WS_BASE_URL = "ws://localhost:8000";
+const DEFAULT_RUNTIME_MODE = "historical_replay";
+const DEFAULT_API_AUTH_MODE = "dev";
 
 export const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? DEFAULT_API_BASE_URL;
 export const wsBaseUrl = import.meta.env.VITE_WS_BASE_URL ?? DEFAULT_WS_BASE_URL;
+export const runtimeMode =
+  import.meta.env.VITE_TRADING_RUNTIME_MODE ?? import.meta.env.VITE_RUNTIME_MODE ?? DEFAULT_RUNTIME_MODE;
+
+type FrontendRuntimeConfig = {
+  apiAuthMode?: string;
+  apiBearerToken?: string;
+  apiActor?: string;
+};
+
+type GlobalWithRuntimeConfig = typeof globalThis & {
+  __TRADING_FRONTEND_CONFIG__?: FrontendRuntimeConfig;
+};
+
+const runtimeConfig = (globalThis as GlobalWithRuntimeConfig).__TRADING_FRONTEND_CONFIG__ ?? {};
+export const apiAuthMode =
+  runtimeConfig.apiAuthMode ?? import.meta.env.VITE_API_AUTH_MODE ?? DEFAULT_API_AUTH_MODE;
+export const apiActor =
+  runtimeConfig.apiActor ?? import.meta.env.VITE_API_ACTOR ?? "frontend_operator";
+
+const apiBearerToken = runtimeConfig.apiBearerToken ?? import.meta.env.VITE_API_BEARER_TOKEN ?? "";
+
+export type ApiRole = "observer" | "operator" | "admin";
 
 export type QueryValue = string | number | boolean | null | undefined;
 
@@ -38,14 +64,37 @@ export function withQuery(path: string, query: Record<string, QueryValue>): stri
   return suffix ? `${path}?${suffix}` : path;
 }
 
+function isProductionRuntime(): boolean {
+  return runtimeMode === "production";
+}
+
+function shouldUseDevRoleHeader(): boolean {
+  return apiAuthMode === "dev" && !isProductionRuntime();
+}
+
+function shouldUseBearer(): boolean {
+  return apiAuthMode === "static_bearer" && apiBearerToken.length > 0;
+}
+
+function applyAuthHeaders(headers: Headers, role: ApiRole): void {
+  if (shouldUseBearer()) {
+    headers.set("Authorization", `Bearer ${apiBearerToken}`);
+    return;
+  }
+  if (shouldUseDevRoleHeader()) {
+    headers.set("X-API-Role", role);
+    headers.set("X-API-Actor", apiActor);
+  }
+}
+
 async function requestJson<T>(
   path: string,
   init: RequestInit = {},
-  role: "observer" | "operator" | "admin" = "observer",
+  role: ApiRole = "observer",
 ): Promise<T> {
   const headers = new Headers(init.headers);
   headers.set("Accept", "application/json");
-  headers.set("X-API-Role", role);
+  applyAuthHeaders(headers, role);
   if (init.body !== undefined && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
@@ -59,6 +108,9 @@ async function requestJson<T>(
 }
 
 export const apiClient = {
+  authStatus: () => requestJson<AuthStatusResponse>("/auth/status"),
+  wsTicket: (role: ApiRole = "observer") =>
+    requestJson<WebSocketTicketResponse>("/auth/ws-ticket", { method: "POST" }, role),
   robotStatus: () => requestJson<RobotStatusResponse>("/robot/status"),
   currentSession: () => requestJson<SessionSnapshotResponse>("/session/current"),
   positions: () => requestJson<PositionResponse[]>("/positions"),
@@ -110,4 +162,16 @@ export const apiClient = {
 
 export function websocketUrl(path: string): string {
   return `${wsBaseUrl}${path}`;
+}
+
+export async function openAuthenticatedWebSocket(
+  path: string,
+  role: ApiRole = "observer",
+): Promise<WebSocket> {
+  const url = new URL(websocketUrl(path));
+  if (apiAuthMode === "static_bearer") {
+    const ticket = await apiClient.wsTicket(role);
+    url.searchParams.set("ticket", ticket.ticket);
+  }
+  return new WebSocket(url.toString());
 }

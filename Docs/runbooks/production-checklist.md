@@ -10,11 +10,14 @@ $env:TRADING_PRODUCTION_CONFIRM = "I_UNDERSTAND_LIVE_ORDERS"
 $env:TBANK_ENVIRONMENT = "live"
 $env:SSL_TBANK_VERIFY = "true"
 $env:TBANK_UNARY_TIMEOUT_FLOOR_SECONDS = "5.0"
+$env:TRADING_AUTH_MODE = "static_bearer"
 ```
 
 ## Final Live Checklist
 
 - Docker Compose secrets exist for `tbank_full_access_token`, `tbank_readonly_token`, `postgres_password`, `grafana_admin_password`.
+- Static API bearer tokens are configured through `TRADING_API_*_TOKEN_FILE` and `TRADING_WS_TICKET_SECRET_FILE`; production must reject `X-API-Role`-only requests.
+- `python scripts/run_launch_readiness.py --mode production-preflight` is green.
 - T-Bank SDK TLS verification is enabled with `SSL_TBANK_VERIFY=true`; Russian Trusted Root/Sub CA is trusted in the runtime environment or T-Invest endpoints are excluded from HTTPS inspection.
 - No real token is present in git, `.env`, docs, shell history snippets, or CI config.
 - `python scripts/run_controlled_launch_acceptance.py` is green locally or in a staging workspace.
@@ -27,6 +30,8 @@ $env:TBANK_UNARY_TIMEOUT_FLOOR_SECONDS = "5.0"
 - `make report-worker-smoke` completes a queued `build_hourly_report` result in Redis before live start.
 - Report worker is running and can build hourly/daily reports without FastAPI BackgroundTasks.
 - `TRADING_RUNTIME_MODE=production` is visible in service health/log context.
+- `trade-core` startup log/audit shows `database_backend=postgresql` and a redacted Postgres URL shared with `api` and `report-worker`.
+- `SBER`/`GAZP` are resolved through the broker instruments API; no `runtime-placeholder` instrument UID remains.
 - Risk limits and max position limits are reviewed for the session template.
 - `allow_long`, `allow_short`, `max_long_lots`, `max_short_lots`,
   `max_gross_exposure_rub` and `max_net_exposure_rub` are reviewed per
@@ -40,6 +45,7 @@ $env:TBANK_UNARY_TIMEOUT_FLOOR_SECONDS = "5.0"
 - Session manager shows the correct `session_type`, `session_phase`, `trading_date`, `calendar_date`.
 - Alerts for stream freshness, rejected orders, report backlog and health are active.
 - Operator stop path through `POST /robot/stop` is tested.
+- `emergency_stop` cancellation path is tested: working/submitted/partially-filled orders receive `cancel_reason_code=manual_operator_emergency_stop`; failures put runtime into `degraded`.
 
 ## Start
 

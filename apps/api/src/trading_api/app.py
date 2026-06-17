@@ -27,6 +27,7 @@ from trading_api.auth import (
     auth_context_from_request,
     authenticate_websocket,
     build_auth_provider,
+    build_ws_ticket_manager,
     require_role,
 )
 from trading_api.read_service import BffReadService
@@ -34,6 +35,7 @@ from trading_api.report_tasks import CeleryReportTaskClient, ReportTaskClient
 from trading_api.robot_control import RobotControlService
 from trading_api.schemas import (
     ApiRole,
+    AuthStatusResponse,
     BlockerAnalyticsResponse,
     CanceledOrderDiagnosticsResponse,
     CandidateFunnelResponse,
@@ -55,6 +57,7 @@ from trading_api.schemas import (
     StrategyConfigResponse,
     StrategyConfigUpdateRequest,
     WebSocketEnvelope,
+    WebSocketTicketResponse,
 )
 from trading_common import AppIdentity, RuntimeMode, ServiceHealth, ServiceName, parse_runtime_mode
 from trading_common.db.config import build_database_url_from_env
@@ -113,6 +116,7 @@ def create_fastapi_app(
     app.state.identity = identity
     app.state.database = database
     app.state.auth_provider = build_auth_provider(runtime_mode=runtime_mode)
+    app.state.ws_ticket_manager = build_ws_ticket_manager(runtime_mode=runtime_mode)
     app.state.report_task_client = report_task_client or CeleryReportTaskClient.from_env(
         database=database
     )
@@ -134,6 +138,31 @@ def create_fastapi_app(
         return Response(
             content=render_metrics(metrics),
             media_type=CONTENT_TYPE_TEXT,
+        )
+
+    @app.get("/auth/status", response_model=AuthStatusResponse, tags=["auth"])
+    def auth_status(auth: AuthDep) -> AuthStatusResponse:
+        return AuthStatusResponse(
+            auth_mode=auth.auth_mode,
+            role=auth.role,
+            subject=auth.subject,
+            production_like=runtime_mode is RuntimeMode.PRODUCTION,
+        )
+
+    @app.post("/auth/ws-ticket", response_model=WebSocketTicketResponse, tags=["auth"])
+    def ws_ticket(request: Request, auth: AuthDep) -> WebSocketTicketResponse:
+        require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
+        manager = getattr(request.app.state, "ws_ticket_manager", None)
+        if manager is None:
+            raise HTTPException(
+                status_code=503,
+                detail="WebSocket tickets are not configured in this runtime mode",
+            )
+        ticket = manager.issue(auth)
+        return WebSocketTicketResponse(
+            ticket=ticket.ticket,
+            expires_at=ticket.expires_at,
+            auth_mode=auth.auth_mode,
         )
 
     @app.post("/robot/start", response_model=RobotCommandResponse, tags=["robot"])

@@ -261,6 +261,19 @@ export interface StrategyConfigUpdateRequest {
   actor: string;
 }
 
+export interface AuthStatusResponse {
+  auth_mode: string;
+  role: string;
+  subject: string;
+  production_like: boolean;
+}
+
+export interface WebSocketTicketResponse {
+  ticket: string;
+  expires_at: string;
+  auth_mode: string;
+}
+
 export interface WebSocketEnvelope<TPayload = unknown> {
   message_id: string;
   ts_utc: string;

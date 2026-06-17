@@ -45,6 +45,19 @@ class RobotCommandResponse(BaseModel):
     message: str
 
 
+class AuthStatusResponse(BaseModel):
+    auth_mode: str
+    role: ApiRole
+    subject: str
+    production_like: bool
+
+
+class WebSocketTicketResponse(BaseModel):
+    ticket: str
+    expires_at: datetime
+    auth_mode: str
+
+
 class MoneyBalance(BaseModel):
     currency: str = "RUB"
     available: Decimal = Decimal("0")

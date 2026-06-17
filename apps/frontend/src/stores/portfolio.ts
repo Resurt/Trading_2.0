@@ -1,7 +1,7 @@
 import { computed, ref } from "vue";
 import { defineStore } from "pinia";
 
-import { apiClient, websocketUrl } from "../api/client";
+import { apiClient, openAuthenticatedWebSocket } from "../api/client";
 import type { ConnectionState, OrderResponse, PositionResponse, WebSocketEnvelope } from "../api/types";
 
 export const usePortfolioStore = defineStore("portfolio", () => {
@@ -36,12 +36,18 @@ export const usePortfolioStore = defineStore("portfolio", () => {
     }
   }
 
-  function connectOrdersSocket(): void {
+  async function connectOrdersSocket(): Promise<void> {
     if (ordersSocket && ordersSocket.readyState < WebSocket.CLOSING) {
       return;
     }
     liveConnection.value = "loading";
-    ordersSocket = new WebSocket(websocketUrl("/ws/orders"));
+    try {
+      ordersSocket = await openAuthenticatedWebSocket("/ws/orders");
+    } catch (unknownError) {
+      error.value = unknownError instanceof Error ? unknownError.message : "Orders WS auth failed";
+      liveConnection.value = "degraded";
+      return;
+    }
     ordersSocket.onopen = () => {
       liveConnection.value = "live";
     };

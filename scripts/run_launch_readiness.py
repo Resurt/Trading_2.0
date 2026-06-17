@@ -1,0 +1,483 @@
+"""Run controlled-launch readiness gates for local/compose/sandbox/shadow/prod."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from collections.abc import Mapping, Sequence
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from urllib.error import URLError
+from urllib.request import Request, urlopen
+
+ROOT = Path(__file__).resolve().parents[1]
+FRONTEND = ROOT / "apps" / "frontend"
+OUTPUT_TAIL_CHARS = 5000
+PRODUCTION_CONFIRM = "I_UNDERSTAND_LIVE_ORDERS"
+SANDBOX_ORDER_CONFIRM = "I_UNDERSTAND_SANDBOX_ORDERS"
+SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bTINVEST_TOKEN\s*=\s*t\.", re.IGNORECASE),
+    re.compile(r"\bTBANK_(?:FULL_ACCESS|READONLY)_TOKEN\s*=\s*t\.", re.IGNORECASE),
+    re.compile(r"\bAuthorization\s*:\s*Bearer\s+[A-Za-z0-9._-]{20,}", re.IGNORECASE),
+    re.compile(r"\b(?:token|secret|password|credential)\s*[:=]\s*['\"]?t\.", re.IGNORECASE),
+)
+TEXT_SUFFIXES = {
+    ".cfg",
+    ".conf",
+    ".env",
+    ".ini",
+    ".json",
+    ".md",
+    ".ps1",
+    ".py",
+    ".sql",
+    ".toml",
+    ".ts",
+    ".vue",
+    ".yaml",
+    ".yml",
+}
+BLOCKED_BINARY_SUFFIXES = {".docx", ".xlsx", ".pdf"}
+
+
+@dataclass(frozen=True, slots=True)
+class GateResult:
+    name: str
+    passed: bool
+    command: str
+    details: dict[str, object]
+
+
+def main() -> None:
+    args = parse_args()
+    env = os.environ.copy()
+    results = run_mode(args, env)
+    passed = all(result.passed for result in results)
+    payload = {
+        "passed": passed,
+        "mode": args.mode,
+        "gates": [asdict(result) for result in results],
+    }
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    raise SystemExit(0 if passed else 1)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--mode",
+        choices=("local", "compose", "sandbox", "shadow", "production-preflight"),
+        default="local",
+    )
+    parser.add_argument("--date", default="2026-06-12")
+    parser.add_argument("--strategy-id", default="baseline")
+    parser.add_argument("--shadow-minutes", type=float, default=0.0)
+    parser.add_argument("--skip-build", action="store_true")
+    parser.add_argument("--skip-compose-up", action="store_true")
+    return parser.parse_args()
+
+
+def run_mode(args: argparse.Namespace, env: Mapping[str, str]) -> list[GateResult]:
+    if args.mode == "local":
+        return run_local(args)
+    if args.mode == "compose":
+        return run_compose(args)
+    if args.mode == "sandbox":
+        return run_sandbox(args, env)
+    if args.mode == "shadow":
+        return run_shadow(args, env)
+    if args.mode == "production-preflight":
+        return run_production_preflight(args, env)
+    raise ValueError(args.mode)
+
+
+def run_local(args: argparse.Namespace) -> list[GateResult]:
+    return [
+        run_cmd("python_scripts_check", [sys.executable, "scripts/check.py"], timeout_seconds=360),
+        run_cmd(
+            "analytics_smoke",
+            [
+                sys.executable,
+                "scripts/run_logging_analytics_acceptance.py",
+                "--date",
+                args.date,
+                "--strategy-id",
+                args.strategy_id,
+            ],
+        ),
+        run_cmd("replay_day", [sys.executable, "scripts/run_replay_day.py", "--date", args.date]),
+        run_secret_scan_gate(),
+    ]
+
+
+def run_compose(args: argparse.Namespace) -> list[GateResult]:
+    results = [
+        run_cmd(
+            "docker_compose_config",
+            ["docker", "compose", "config", "--quiet"],
+            timeout_seconds=120,
+        ),
+        run_compose_shared_db_gate(),
+    ]
+    if not args.skip_compose_up:
+        results.append(
+            run_cmd(
+                "docker_compose_up",
+                ["docker", "compose", "up", "-d", "--build"],
+                timeout_seconds=900,
+            )
+        )
+        results.extend(
+            [
+                run_cmd(
+                    "postgres_migration_upgrade",
+                    [
+                        "docker",
+                        "compose",
+                        "exec",
+                        "-T",
+                        "api",
+                        "python",
+                        "-m",
+                        "alembic",
+                        "upgrade",
+                        "head",
+                    ],
+                    timeout_seconds=180,
+                ),
+                run_health_gate("api_health", "http://localhost:8000/health"),
+                run_health_gate("trade_core_health", "http://localhost:8001/health"),
+                run_health_gate("report_worker_health", "http://localhost:8002/health"),
+                run_cmd(
+                    "report_worker_smoke",
+                    [sys.executable, "scripts/run_report_worker_smoke.py"],
+                ),
+                run_cmd(
+                    "frontend_build",
+                    [npm_cmd(), "run", "build"],
+                    cwd=FRONTEND,
+                    timeout_seconds=180,
+                ),
+            ]
+        )
+    return results
+
+
+def run_sandbox(args: argparse.Namespace, env: Mapping[str, str]) -> list[GateResult]:
+    results = [
+        run_cmd(
+            "tbank_sdk_import_check",
+            [sys.executable, "scripts/run_tbank_sdk_import_check.py"],
+        ),
+        run_cmd("sandbox_readonly_smoke", [sys.executable, "scripts/run_sandbox_smoke.py"]),
+    ]
+    if env.get("TRADING_SANDBOX_ORDERS_CONFIRM") == SANDBOX_ORDER_CONFIRM:
+        results.append(
+            GateResult(
+                name="sandbox_real_order_gate",
+                passed=True,
+                command="TRADING_SANDBOX_ORDERS_CONFIRM",
+                details={"status": "explicitly_confirmed"},
+            )
+        )
+    else:
+        results.append(
+            GateResult(
+                name="sandbox_real_order_gate",
+                passed=True,
+                command="TRADING_SANDBOX_ORDERS_CONFIRM",
+                details={"status": "not_confirmed_no_real_orders"},
+            )
+        )
+    return results
+
+
+def run_shadow(args: argparse.Namespace, env: Mapping[str, str]) -> list[GateResult]:
+    results = [
+        env_gate("shadow_mode_selected", env.get("TRADING_RUNTIME_MODE") == "shadow"),
+        env_gate("shadow_no_real_orders", "TRADING_PRODUCTION_CONFIRM" not in env),
+        run_cmd("replay_day", [sys.executable, "scripts/run_replay_day.py", "--date", args.date]),
+        run_cmd(
+            "report_rebuild",
+            [
+                sys.executable,
+                "scripts/run_report_rebuild.py",
+                "--date",
+                args.date,
+                "--strategy-id",
+                args.strategy_id,
+            ],
+        ),
+    ]
+    if args.shadow_minutes > 0:
+        results.append(wait_gate("shadow_live_market_data_window", args.shadow_minutes))
+    return results
+
+
+def run_production_preflight(args: argparse.Namespace, env: Mapping[str, str]) -> list[GateResult]:
+    return [
+        env_gate(
+            "production_confirmation_present",
+            env.get("TRADING_PRODUCTION_CONFIRM") == PRODUCTION_CONFIRM,
+            details={"expected": PRODUCTION_CONFIRM},
+        ),
+        env_gate(
+            "production_auth_token_present",
+            any(key.startswith("TRADING_API_") and key.endswith("_TOKEN") for key in env)
+            or any(key.startswith("TRADING_API_") and key.endswith("_TOKEN_FILE") for key in env),
+        ),
+        env_gate("dev_auth_disabled", env.get("TRADING_AUTH_MODE", "static_bearer") != "dev"),
+        run_cmd(
+            "production_safety_tests",
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "tests/test_trade_core_runtime.py::test_runtime_requires_tbank_sdk_for_production_like_modes",
+                "tests/test_trade_core_runtime.py::test_emergency_stop_cancels_working_orders",
+                "tests/test_api_bff.py::test_production_refuses_dev_auth_without_auth_service",
+                "tests/test_api_bff.py::test_production_auth_rejects_role_header_without_bearer",
+                "-q",
+            ],
+        ),
+        run_compose_shared_db_gate(),
+        run_no_placeholder_instrument_gate(),
+        run_secret_scan_gate(),
+    ]
+
+
+def run_cmd(
+    name: str,
+    argv: Sequence[str],
+    *,
+    cwd: Path = ROOT,
+    timeout_seconds: int = 240,
+) -> GateResult:
+    try:
+        completed = subprocess.run(
+            list(argv),
+            cwd=cwd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return GateResult(
+            name=name,
+            passed=False,
+            command=format_cmd(argv),
+            details={
+                "status": "timeout",
+                "stdout_tail": tail(exc.stdout or ""),
+                "stderr_tail": tail(exc.stderr or ""),
+            },
+        )
+    return GateResult(
+        name=name,
+        passed=completed.returncode == 0,
+        command=format_cmd(argv),
+        details={
+            "status": "completed",
+            "returncode": completed.returncode,
+            "stdout_tail": tail(completed.stdout),
+            "stderr_tail": tail(completed.stderr),
+        },
+    )
+
+
+def run_health_gate(name: str, url: str) -> GateResult:
+    deadline = time.monotonic() + 60
+    last_error = ""
+    while time.monotonic() < deadline:
+        try:
+            request = Request(url, headers={"Accept": "application/json"})
+            with urlopen(request, timeout=5) as response:
+                body = response.read().decode("utf-8", errors="replace")
+            return GateResult(
+                name=name,
+                passed=True,
+                command=f"GET {url}",
+                details={"status": "ok", "body_tail": tail(body)},
+            )
+        except (OSError, URLError) as exc:
+            last_error = str(exc)
+            time.sleep(2)
+    return GateResult(
+        name=name,
+        passed=False,
+        command=f"GET {url}",
+        details={"status": "failed", "error_message": last_error},
+    )
+
+
+def run_compose_shared_db_gate() -> GateResult:
+    completed = subprocess.run(
+        ["docker", "compose", "config", "--format", "json"],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if completed.returncode != 0:
+        return GateResult(
+            name="shared_postgres_config",
+            passed=False,
+            command="docker compose config --format json",
+            details={"stderr_tail": tail(completed.stderr)},
+        )
+    config = json.loads(completed.stdout)
+    services = config.get("services", {})
+    service_env = {
+        name: normalize_environment(services.get(name, {}).get("environment", {}))
+        for name in ("trade-core", "api", "report-worker")
+    }
+    db_keys = ("POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_DB", "POSTGRES_USER")
+    values = {
+        service: {key: env.get(key) for key in db_keys}
+        for service, env in service_env.items()
+    }
+    expected = values.get("api")
+    same = all(value == expected for value in values.values())
+    no_sqlite = all(
+        "sqlite"
+        not in (
+            service_env[service].get("DATABASE_URL", "")
+            + service_env[service].get("TRADING_DATABASE_URL", "")
+        )
+        for service in service_env
+    )
+    return GateResult(
+        name="shared_postgres_config",
+        passed=bool(expected) and same and no_sqlite,
+        command="docker compose config --format json",
+        details={"values": values, "no_sqlite": no_sqlite},
+    )
+
+
+def run_no_placeholder_instrument_gate() -> GateResult:
+    placeholder_patterns = (
+        "runtime-placeholder",
+        "sber-runtime-placeholder",
+        "gazp-runtime-placeholder",
+    )
+    files = [
+        ROOT / "apps" / "trade-core" / "src" / "trade_core" / "runtime.py",
+        ROOT / "apps" / "trade-core" / "src" / "trade_core" / "infra" / "tbank" / "sdk_clients.py",
+    ]
+    hits: list[str] = []
+    for path in files:
+        text = path.read_text(encoding="utf-8")
+        for pattern in placeholder_patterns:
+            if pattern in text:
+                hits.append(f"{path.relative_to(ROOT)}:{pattern}")
+    return GateResult(
+        name="no_placeholder_instrument_uid",
+        passed=not hits,
+        command="source scan",
+        details={"hits": hits},
+    )
+
+
+def run_secret_scan_gate() -> GateResult:
+    leaks = scan_text_secrets()
+    blocked_binary_files = tracked_binary_docs()
+    return GateResult(
+        name="no_raw_secrets_or_unreviewed_binary_docs",
+        passed=not leaks and not blocked_binary_files,
+        command="git ls-files + text secret scan",
+        details={
+            "leak_count": len(leaks),
+            "leaks": leaks[:20],
+            "blocked_binary_files": blocked_binary_files,
+        },
+    )
+
+
+def scan_text_secrets() -> list[dict[str, object]]:
+    leaks: list[dict[str, object]] = []
+    for path in tracked_files():
+        if path.suffix.lower() not in TEXT_SUFFIXES:
+            continue
+        content = path.read_text(encoding="utf-8", errors="ignore")
+        for line_number, line in enumerate(content.splitlines(), start=1):
+            if any(pattern.search(line) for pattern in SECRET_PATTERNS):
+                leaks.append({"path": str(path.relative_to(ROOT)), "line": line_number})
+    return leaks
+
+
+def tracked_binary_docs() -> list[str]:
+    return [
+        str(path.relative_to(ROOT))
+        for path in tracked_files()
+        if path.suffix.lower() in BLOCKED_BINARY_SUFFIXES
+    ]
+
+
+def tracked_files() -> list[Path]:
+    completed = subprocess.run(
+        ["git", "ls-files", "-z"],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+    )
+    if completed.returncode != 0:
+        return []
+    paths = completed.stdout.decode("utf-8", errors="replace").split("\0")
+    return [ROOT / path for path in paths if path]
+
+
+def normalize_environment(raw: object) -> dict[str, str]:
+    if isinstance(raw, dict):
+        return {str(key): str(value) for key, value in raw.items()}
+    if isinstance(raw, list):
+        env: dict[str, str] = {}
+        for item in raw:
+            key, _, value = str(item).partition("=")
+            env[key] = value
+        return env
+    return {}
+
+
+def env_gate(name: str, passed: bool, *, details: dict[str, object] | None = None) -> GateResult:
+    return GateResult(
+        name=name,
+        passed=passed,
+        command="environment check",
+        details=details or {},
+    )
+
+
+def wait_gate(name: str, minutes: float) -> GateResult:
+    seconds = max(0.0, minutes * 60.0)
+    time.sleep(seconds)
+    return GateResult(
+        name=name,
+        passed=True,
+        command=f"sleep {seconds:.0f}",
+        details={"waited_seconds": seconds},
+    )
+
+
+def npm_cmd() -> str:
+    return "npm.cmd" if os.name == "nt" else "npm"
+
+
+def format_cmd(argv: Sequence[str]) -> str:
+    return " ".join(str(part) for part in argv)
+
+
+def tail(value: str | bytes) -> str:
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    return value[-OUTPUT_TAIL_CHARS:]
+
+
+if __name__ == "__main__":
+    main()

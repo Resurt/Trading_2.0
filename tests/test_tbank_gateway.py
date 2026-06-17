@@ -9,6 +9,7 @@ import pytest
 
 from trade_core.broker_gateway import (
     InstrumentRef,
+    InstrumentResolveRequest,
     OrderPlacementRequest,
     OrderStateRequest,
 )
@@ -132,6 +133,27 @@ def test_secret_loading_supports_env_fallback(monkeypatch: pytest.MonkeyPatch) -
 
     assert bundle.full_access_token == "full-from-env"
     assert bundle.readonly_token == "readonly-from-env"
+
+
+def test_secret_loading_supports_ignored_local_dev_files(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    secrets_dir = tmp_path / "secrets"
+    secrets_dir.mkdir()
+    (secrets_dir / "tbank_full_access_token").write_text("full-local\n", encoding="utf-8")
+    (secrets_dir / "tbank_readonly_token").write_text("readonly-local\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv(FULL_ACCESS_TOKEN_FILE_ENV, raising=False)
+    monkeypatch.delenv(READONLY_TOKEN_FILE_ENV, raising=False)
+    monkeypatch.delenv(FULL_ACCESS_TOKEN_ENV, raising=False)
+    monkeypatch.delenv(READONLY_TOKEN_ENV, raising=False)
+    monkeypatch.delenv(LEGACY_DEV_TOKEN_ENV, raising=False)
+
+    bundle = load_tbank_tokens()
+
+    assert bundle.full_access_token == "full-local"
+    assert bundle.readonly_token == "readonly-local"
 
 
 def test_retry_logic_retries_transient_broker_errors() -> None:
@@ -274,6 +296,42 @@ def test_gateway_response_contains_captured_headers() -> None:
 
     assert response.headers["x_tracking_id"] == "tracking-2"
     assert response.headers["x_ratelimit_remaining"] == "98"
+
+
+def test_gateway_resolves_instruments_with_readonly_token() -> None:
+    fake_client = FakeUnaryClient(
+        [
+            UnaryCallResult(
+                data={
+                    "instruments": [
+                        {
+                            "instrument_id": "uid-sber",
+                            "instrument_uid": "uid-sber",
+                            "ticker": "SBER",
+                        }
+                    ]
+                }
+            )
+        ]
+    )
+    gateway = TBankBrokerGateway(
+        config=config(),
+        tokens=tokens(),
+        unary_client=fake_client,
+        backoff=ExponentialBackoff(initial_seconds=0.0, max_seconds=0.0),
+    )
+
+    response = asyncio.run(
+        gateway.resolve_instruments(InstrumentResolveRequest(tickers=("SBER",)))
+    )
+
+    assert response.data["instruments"][0]["instrument_uid"] == "uid-sber"
+    call = fake_client.calls[0]
+    assert call["method_name"] == "ResolveInstruments"
+    assert call["payload"] == {"tickers": ["SBER"], "class_code": "TQBR"}
+    metadata = call["metadata"]
+    assert isinstance(metadata, tuple)
+    assert any(item == ("authorization", "Bearer readonly-token-for-tests") for item in metadata)
 
 
 def test_error_mapping_maps_tbank_codes_and_statuses() -> None:

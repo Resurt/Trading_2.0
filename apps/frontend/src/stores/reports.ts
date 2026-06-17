@@ -1,7 +1,7 @@
 import { computed, reactive, ref } from "vue";
 import { defineStore } from "pinia";
 
-import { apiClient, websocketUrl } from "../api/client";
+import { apiClient, openAuthenticatedWebSocket } from "../api/client";
 import type {
   BlockerAnalyticsResponse,
   CandidateFunnelResponse,
@@ -232,12 +232,18 @@ export const useReportsStore = defineStore("reports", () => {
     latestJobStatus.value = await apiClient.reportJobStatus(latestJob.value.job_id);
   }
 
-  function connectReportsSocket(): void {
+  async function connectReportsSocket(): Promise<void> {
     if (reportsSocket && reportsSocket.readyState < WebSocket.CLOSING) {
       return;
     }
     liveConnection.value = "loading";
-    reportsSocket = new WebSocket(websocketUrl("/ws/reports"));
+    try {
+      reportsSocket = await openAuthenticatedWebSocket("/ws/reports");
+    } catch (unknownError) {
+      error.value = unknownError instanceof Error ? unknownError.message : "Reports WS auth failed";
+      liveConnection.value = "degraded";
+      return;
+    }
     reportsSocket.onopen = () => {
       liveConnection.value = "live";
     };

@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
-import { RefreshCw, Save } from "@lucide/vue";
+import { RefreshCw, Save, ShieldCheck } from "@lucide/vue";
 
-import { apiClient } from "../api/client";
-import type { StrategyConfigResponse } from "../api/types";
+import { apiAuthMode, apiClient, runtimeMode } from "../api/client";
+import type { AuthStatusResponse, StrategyConfigResponse } from "../api/types";
 import DataPanel from "../components/ui/DataPanel.vue";
 import EmptyState from "../components/ui/EmptyState.vue";
 import MetricTile from "../components/ui/MetricTile.vue";
@@ -15,7 +15,9 @@ const robot = useRobotStore();
 const strategyId = ref("baseline");
 const sessionTemplate = ref("weekday_main");
 const config = ref<StrategyConfigResponse | null>(null);
+const authStatus = ref<AuthStatusResponse | null>(null);
 const error = ref<string | null>(null);
+const authError = ref<string | null>(null);
 const saving = ref(false);
 
 async function loadConfig(): Promise<void> {
@@ -25,6 +27,16 @@ async function loadConfig(): Promise<void> {
   } catch (unknownError) {
     error.value = unknownError instanceof Error ? unknownError.message : "Strategy config load failed";
     config.value = null;
+  }
+}
+
+async function loadAuthStatus(): Promise<void> {
+  authError.value = null;
+  try {
+    authStatus.value = await apiClient.authStatus();
+  } catch (unknownError) {
+    authError.value = unknownError instanceof Error ? unknownError.message : "Auth status load failed";
+    authStatus.value = null;
   }
 }
 
@@ -51,6 +63,7 @@ async function saveConfig(): Promise<void> {
 
 onMounted(() => {
   void loadConfig();
+  void loadAuthStatus();
 });
 </script>
 
@@ -65,7 +78,13 @@ onMounted(() => {
     </div>
 
     <div class="metric-grid">
-      <MetricTile label="Runtime mode" value="historical_replay" code="historical_replay" />
+      <MetricTile label="Runtime mode" :value="runtimeMode" :code="runtimeMode" />
+      <MetricTile
+        label="Auth mode"
+        :value="authStatus?.auth_mode ?? apiAuthMode"
+        :detail="authStatus ? `${authStatus.role} / ${authStatus.subject}` : 'token value hidden'"
+        :tone="authStatus?.production_like ? 'warn' : 'info'"
+      />
       <MetricTile
         label="Active instruments"
         :value="robot.status.active_instruments.length"
@@ -78,6 +97,34 @@ onMounted(() => {
       />
       <MetricTile label="Secret values" value="hidden" detail="status only; values are not rendered" tone="warn" />
     </div>
+
+    <DataPanel>
+      <template #eyebrow>control-plane auth</template>
+      <template #title>Frontend auth status</template>
+      <template #action>
+        <button class="icon-button" type="button" @click="loadAuthStatus">
+          <ShieldCheck :size="16" aria-hidden="true" />
+          <span>Check</span>
+        </button>
+      </template>
+
+      <EmptyState v-if="authError" title="Auth status degraded" :detail="authError" tone="warn" />
+      <dl v-else-if="authStatus" class="definition-grid definition-grid--wide">
+        <dt>auth_mode</dt>
+        <dd><code>{{ authStatus.auth_mode }}</code></dd>
+        <dt>role</dt>
+        <dd><code>{{ authStatus.role }}</code></dd>
+        <dt>subject</dt>
+        <dd><code>{{ authStatus.subject }}</code></dd>
+        <dt>production_like</dt>
+        <dd>{{ authStatus.production_like }}</dd>
+      </dl>
+      <EmptyState
+        v-else
+        title="Auth status is loading"
+        detail="Frontend never renders bearer token or websocket ticket values."
+      />
+    </DataPanel>
 
     <DataPanel>
       <template #eyebrow>strategy_config</template>

@@ -5,14 +5,23 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import cast
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import pytest
 from sqlalchemy import func, select
 
-from trade_core.broker_gateway import BrokerGateway, BrokerUnaryResponse, CandleRequest
+from trade_core.broker_gateway import (
+    BrokerGateway,
+    BrokerUnaryResponse,
+    CandleRequest,
+    InstrumentRef,
+    InstrumentResolveRequest,
+)
 from trade_core.market_data import Candle, OrderBookSnapshot, PriceLevel, Timeframe
 from trade_core.runtime import (
+    DEFAULT_INSTRUMENTS,
+    LOCAL_SQLITE_ENV,
     SafeNoopBrokerGateway,
     TradeCoreRuntime,
     TradeCoreRuntimeConfig,
@@ -22,10 +31,12 @@ from trading_common.db.models import (
     BlockerEvent,
     BrokerOrder,
     CandidateStageResult,
+    InstrumentRegistry,
     OrderIntent,
     PositionSnapshot,
     RobotCommand,
     SignalCandidate,
+    StrategyConfig,
 )
 from trading_common.db.repositories import RobotCommandRepository
 from trading_common.db.service import DatabaseService
@@ -44,6 +55,46 @@ def runtime_config(tmp_path: Path) -> TradeCoreRuntimeConfig:
         tick_interval_seconds=0.01,
         micro_session_freeze_seconds=60,
     )
+
+
+def test_runtime_config_compose_env_builds_postgres_url(tmp_path: Path) -> None:
+    password_file = tmp_path / "postgres_password"
+    password_file.write_text("compose-secret", encoding="utf-8")
+
+    config = TradeCoreRuntimeConfig.from_env(
+        {
+            "POSTGRES_HOST": "postgres",
+            "POSTGRES_PORT": "5432",
+            "POSTGRES_DB": "trading_2_0",
+            "POSTGRES_USER": "trading_app",
+            "POSTGRES_PASSWORD_FILE": str(password_file),
+        }
+    )
+
+    assert config.database_backend == "postgresql"
+    assert "postgres:5432/trading_2_0" in (config.database_url or "")
+    assert "compose-secret" not in config.database_url_redacted
+    assert "***@postgres:5432" in config.database_url_redacted
+    assert config.auto_create_sqlite_schema is False
+
+
+def test_runtime_config_requires_explicit_local_sqlite() -> None:
+    with pytest.raises(RuntimeError, match="Set DATABASE_URL"):
+        TradeCoreRuntimeConfig.from_env({"POSTGRES_PASSWORD_FILE": "missing-postgres-secret"})
+
+
+def test_runtime_config_allows_explicit_local_sqlite() -> None:
+    config = TradeCoreRuntimeConfig.from_env({LOCAL_SQLITE_ENV: "1"})
+
+    assert config.database_backend == "sqlite"
+    assert config.auto_create_sqlite_schema is True
+
+
+def test_default_runtime_instruments_have_no_placeholder_uid() -> None:
+    tickers = {instrument.ticker for instrument in DEFAULT_INSTRUMENTS}
+
+    assert {"SBER", "GAZP"} <= tickers
+    assert all(instrument.instrument_uid is None for instrument in DEFAULT_INSTRUMENTS)
 
 
 def build_runtime(
@@ -69,6 +120,47 @@ class FailingRecoveryGateway(SafeNoopBrokerGateway):
     ) -> BrokerUnaryResponse:
         del request, metadata
         raise RuntimeError("gap backfill failed")
+
+
+class ResolvingGateway(SafeNoopBrokerGateway):
+    def __init__(self, *, now: datetime | None = None) -> None:
+        super().__init__(now=now)
+        self.stream_instruments: tuple[InstrumentRef, ...] = ()
+        self.resolve_calls: list[InstrumentResolveRequest] = []
+
+    async def resolve_instruments(
+        self,
+        request: InstrumentResolveRequest,
+        metadata: object | None = None,
+    ) -> BrokerUnaryResponse:
+        del metadata
+        self.resolve_calls.append(request)
+        return BrokerUnaryResponse(
+            method_name="ResolveInstruments",
+            data={
+                "instruments": [
+                    {
+                        "instrument_id": f"uid-{ticker.lower()}",
+                        "instrument_uid": f"uid-{ticker.lower()}",
+                        "ticker": ticker,
+                        "class_code": request.class_code,
+                        "figi": f"figi-{ticker.lower()}",
+                        "name": ticker,
+                        "lot_size": 10,
+                        "min_price_increment": "0.01",
+                        "currency": "RUB",
+                        "api_trade_available": True,
+                        "short_available": ticker == "SBER",
+                        "supports_weekend": False,
+                    }
+                    for ticker in request.tickers
+                ]
+            },
+            headers={},
+        )
+
+    def set_market_stream_instruments(self, instruments: tuple[InstrumentRef, ...]) -> None:
+        self.stream_instruments = instruments
 
 
 def test_runtime_starts_historical_replay_without_tokens(
@@ -118,6 +210,91 @@ def test_runtime_rejects_unconfirmed_production(tmp_path: Path) -> None:
         )
 
 
+def test_runtime_requires_tbank_sdk_for_production_like_modes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def fail_sdk_import() -> object:
+        raise RuntimeError("sdk missing in test image")
+
+    monkeypatch.setattr("trade_core.runtime.load_tbank_sdk", fail_sdk_import)
+
+    with pytest.raises(RuntimeError, match="T-Bank SDK extra is required"):
+        TradeCoreRuntime(
+            config=runtime_config(tmp_path),
+            launch_policy=LaunchModePolicy.from_mode(RuntimeMode.SHADOW),
+            database=DatabaseService(runtime_config(tmp_path).database_url or ""),
+            broker_gateway=cast(BrokerGateway, SafeNoopBrokerGateway()),
+        )
+
+
+def test_runtime_resolves_default_instruments_for_shadow_streams(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr("trade_core.runtime.load_tbank_sdk", lambda: object())
+    gateway = ResolvingGateway(now=msk(2026, 6, 12, 10))
+    runtime = build_runtime(tmp_path, mode=RuntimeMode.SHADOW, gateway=gateway)
+
+    asyncio.run(runtime.start())
+
+    assert gateway.resolve_calls[0].tickers == ("SBER", "GAZP")
+    assert tuple(instrument.instrument_id for instrument in runtime.config.instruments) == (
+        "uid-sber",
+        "uid-gazp",
+    )
+    assert tuple(instrument.instrument_id for instrument in gateway.stream_instruments) == (
+        "uid-sber",
+        "uid-gazp",
+    )
+    with runtime.database.session_factory() as session:
+        rows = session.execute(
+            select(InstrumentRegistry).order_by(InstrumentRegistry.ticker)
+        ).scalars()
+        registry = {row.ticker: row for row in rows}
+    assert registry["SBER"].instrument_id == "uid-sber"
+    assert registry["SBER"].instrument_uid == "uid-sber"
+    assert registry["GAZP"].instrument_id == "uid-gazp"
+    asyncio.run(runtime.shutdown())
+
+
+def test_runtime_loads_strategy_config_from_database(tmp_path: Path) -> None:
+    runtime = build_runtime(tmp_path)
+    with runtime.database.session_scope() as session:
+        session.add(
+            StrategyConfig(
+                strategy_id="baseline",
+                version=7,
+                session_template="weekday_main",
+                is_active=True,
+                valid_from=datetime.now(tz=UTC),
+                valid_to=None,
+                config_payload={
+                    "allow_long": True,
+                    "allow_short": True,
+                    "assumed_commission_bps_per_side": "6",
+                    "assumed_slippage_bps": "2",
+                },
+                risk_limits={
+                    "max_position_lots": 3,
+                    "max_daily_loss_rub": "1500",
+                    "min_edge_after_costs_bps": "4",
+                },
+            )
+        )
+
+    asyncio.run(runtime.start())
+
+    assert runtime.strategy_config.strategy_id == "baseline"
+    assert runtime.strategy_config.strategy_version == 7
+    assert runtime.strategy_config.allow_short is True
+    assert runtime.risk_limits.max_position_lots == 3
+    assert runtime.risk_limits.max_daily_loss_rub == Decimal("1500")
+    assert runtime.risk_limits.assumed_commission_bps_per_side == Decimal("6")
+    assert runtime.risk_limits.assumed_slippage_bps == Decimal("2")
+    asyncio.run(runtime.shutdown())
+
+
 def test_runtime_micro_session_rollover_requests_report(tmp_path: Path) -> None:
     runtime = build_runtime(tmp_path)
 
@@ -140,6 +317,100 @@ def test_runtime_micro_session_rollover_requests_report(tmp_path: Path) -> None:
             "micro_session_session_run_opened",
             "micro_session_snapshot_taken",
         }
+    asyncio.run(runtime.shutdown())
+
+
+def test_emergency_stop_cancels_working_orders(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr("trade_core.runtime.load_tbank_sdk", lambda: object())
+    gateway = ResolvingGateway(now=msk(2026, 6, 12, 10))
+    config = runtime_config(tmp_path)
+    runtime = TradeCoreRuntime(
+        config=config,
+        launch_policy=LaunchModePolicy.from_mode(
+            RuntimeMode.SANDBOX,
+            sandbox_orders_confirmed=True,
+        ),
+        database=DatabaseService(config.database_url or ""),
+        broker_gateway=cast(BrokerGateway, gateway),
+    )
+    order_intent_id = uuid4()
+
+    async def run() -> None:
+        await runtime.run_cycle(now=msk(2026, 6, 12, 10))
+        assert runtime.current_snapshot is not None
+        request_order_id = uuid4()
+        with runtime.database.session_scope() as session:
+            session.add(
+                OrderIntent(
+                    calendar_date=runtime.current_snapshot.calendar_date,
+                    trading_date=runtime.current_snapshot.trading_date,
+                    session_type=runtime.current_snapshot.session_type.value,
+                    session_phase=runtime.current_snapshot.session_phase.value,
+                    micro_session_id=runtime.current_snapshot.micro_session_id or "unassigned",
+                    broker_trading_status=runtime.current_snapshot.broker_trading_status,
+                    order_intent_id=order_intent_id,
+                    candidate_id=None,
+                    instrument_id="uid-sber",
+                    timeframe="5m",
+                    strategy_id=runtime.strategy_config.strategy_id,
+                    strategy_version=runtime.strategy_config.strategy_version,
+                    side="buy",
+                    order_action="place",
+                    order_type="limit",
+                    lot_qty=1,
+                    intended_price=Decimal("100"),
+                    time_in_force="day",
+                    request_order_id=request_order_id,
+                    tracking_id="tracking-open",
+                    idempotency_key=f"test:{request_order_id}",
+                    execution_policy_version=1,
+                    status="submitted",
+                    cancel_reason_code=None,
+                    reject_reason_code=None,
+                    created_ts=datetime.now(tz=UTC),
+                    submitted_ts=datetime.now(tz=UTC),
+                    terminal_ts=None,
+                    intent_payload={
+                        "account_id": "account-1",
+                        "instrument_uid": "uid-sber",
+                        "ticker": "SBER",
+                        "class_code": "TQBR",
+                    },
+                )
+            )
+            session.add(
+                RobotCommand(
+                    command_type="emergency_stop",
+                    requested_by="desk-operator",
+                    requested_role="operator",
+                    requested_at=datetime.now(tz=UTC),
+                    status="requested",
+                    reason_code=None,
+                    accepted_at=None,
+                    applied_at=None,
+                    finished_at=None,
+                    payload={"source": "test"},
+                    result_payload={},
+                )
+            )
+        processed = await runtime.process_robot_commands_async()
+        assert processed == 1
+
+    asyncio.run(run())
+
+    assert len(gateway.cancel_order_calls) == 1
+    cancel_request = gateway.cancel_order_calls[0]
+    assert cancel_request.payload["cancel_reason_code"] == "manual_operator_emergency_stop"
+    assert runtime.robot_control_state == "emergency_stopped"
+    assert runtime.stats.open_orders == 0
+    with runtime.database.session_factory() as session:
+        intent = session.get(OrderIntent, order_intent_id)
+        assert intent is not None
+        assert intent.status == "cancelled"
+        assert intent.cancel_reason_code == "manual_operator_emergency_stop"
     asyncio.run(runtime.shutdown())
 
 
@@ -222,11 +493,16 @@ def test_stream_gap_recovery_failure_marks_runtime_degraded(tmp_path: Path) -> N
     asyncio.run(runtime.shutdown())
 
 
-async def _run_candidate_path(runtime: TradeCoreRuntime) -> None:
+async def _run_candidate_path(
+    runtime: TradeCoreRuntime,
+    *,
+    instrument_id: str | None = None,
+) -> None:
     await runtime.run_cycle(now=msk(2026, 6, 12, 10))
+    resolved_instrument_id = instrument_id or runtime.config.instruments[0].instrument_id
     await runtime.process_order_book(
         OrderBookSnapshot(
-            instrument_id="MOEX:SBER",
+            instrument_id=resolved_instrument_id,
             bids=(PriceLevel(price=Decimal("99.99"), quantity_lots=Decimal("100")),),
             asks=(PriceLevel(price=Decimal("100.01"), quantity_lots=Decimal("100")),),
             depth=1,
@@ -239,7 +515,7 @@ async def _run_candidate_path(runtime: TradeCoreRuntime) -> None:
         close_ts = open_ts + timedelta(minutes=1)
         await runtime.process_candle(
             Candle(
-                instrument_id="MOEX:SBER",
+                instrument_id=resolved_instrument_id,
                 timeframe=Timeframe.M1,
                 open_ts_utc=open_ts.astimezone(UTC),
                 close_ts_utc=close_ts.astimezone(UTC),

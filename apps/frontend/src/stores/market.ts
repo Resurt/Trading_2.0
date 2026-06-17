@@ -1,7 +1,7 @@
 import { computed, ref } from "vue";
 import { defineStore } from "pinia";
 
-import { apiClient, websocketUrl } from "../api/client";
+import { apiClient, openAuthenticatedWebSocket } from "../api/client";
 import type {
   ConnectionState,
   JsonPayload,
@@ -66,12 +66,18 @@ export const useMarketStore = defineStore("market", () => {
     }
   }
 
-  function connectMarketSocket(): void {
+  async function connectMarketSocket(): Promise<void> {
     if (marketSocket && marketSocket.readyState < WebSocket.CLOSING) {
       return;
     }
     liveConnection.value = "loading";
-    marketSocket = new WebSocket(websocketUrl("/ws/market"));
+    try {
+      marketSocket = await openAuthenticatedWebSocket("/ws/market");
+    } catch (unknownError) {
+      error.value = unknownError instanceof Error ? unknownError.message : "Market WS auth failed";
+      liveConnection.value = "degraded";
+      return;
+    }
     marketSocket.onopen = () => {
       liveConnection.value = "live";
     };

@@ -114,9 +114,12 @@ def test_prometheus_metrics_are_registered_and_rendered() -> None:
     metrics.inc_stream_reconnect(stream_type="market_data", result="success")
     metrics.inc_rejected_order(status="broker_rejected")
     metrics.inc_risk_event(result="spread_too_wide")
+    metrics.inc_emergency_stop(result="applied")
+    metrics.inc_emergency_cancel_failed(result="cancel_failed")
     metrics.inc_counterfactual_job(status="success")
     metrics.inc_report_job_failed(status="error")
     metrics.set_open_orders(2)
+    metrics.set_working_orders_after_stop(0)
     metrics.set_active_positions(1, instrument="MOEX:SBER")
     metrics.set_market_stream_alive(
         True,

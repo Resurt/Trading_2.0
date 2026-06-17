@@ -37,10 +37,10 @@ onMounted(() => {
     portfolio.fetchSnapshot(),
     reports.fetchReports(),
   ]);
-  robot.connectDashboardSocket();
-  market.connectMarketSocket();
-  portfolio.connectOrdersSocket();
-  reports.connectReportsSocket();
+  void robot.connectDashboardSocket();
+  void market.connectMarketSocket();
+  void portfolio.connectOrdersSocket();
+  void reports.connectReportsSocket();
 });
 </script>
 

@@ -140,6 +140,8 @@ services:
     build:
       context: .
       dockerfile: deploy/docker/python-service.Dockerfile
+      args:
+        INSTALL_TBANK_EXTRA: ${INSTALL_TBANK_EXTRA:-true}
     container_name: trading-trade-core
     command: ["python", "-m", "trade_core.service"]
     environment:
@@ -147,6 +149,13 @@ services:
       PORT: 8001
       TRADING_RUNTIME_MODE: ${TRADING_RUNTIME_MODE:-historical_replay}
       TRADING_PRODUCTION_CONFIRM: ${TRADING_PRODUCTION_CONFIRM:-}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-trading_2_0}
+      POSTGRES_USER: ${POSTGRES_USER:-trading_app}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
       TBANK_ENVIRONMENT: ${TBANK_ENVIRONMENT:-sandbox}
       SSL_TBANK_VERIFY: ${SSL_TBANK_VERIFY:-true}
       TBANK_UNARY_TIMEOUT_FLOOR_SECONDS: ${TBANK_UNARY_TIMEOUT_FLOOR_SECONDS:-5.0}
@@ -155,6 +164,7 @@ services:
     secrets:
       - tbank_full_access_token
       - tbank_readonly_token
+      - postgres_password
     ports:
       - "${TRADE_CORE_PORT:-8001}:8001"
     depends_on:
@@ -196,6 +206,11 @@ services:
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
       CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
+      TRADING_AUTH_MODE: ${TRADING_AUTH_MODE:-dev}
+      TRADING_API_OBSERVER_TOKEN_FILE: ${TRADING_API_OBSERVER_TOKEN_FILE:-}
+      TRADING_API_OPERATOR_TOKEN_FILE: ${TRADING_API_OPERATOR_TOKEN_FILE:-}
+      TRADING_API_ADMIN_TOKEN_FILE: ${TRADING_API_ADMIN_TOKEN_FILE:-}
+      TRADING_WS_TICKET_SECRET_FILE: ${TRADING_WS_TICKET_SECRET_FILE:-}
     secrets:
       - postgres_password
     ports:
@@ -307,6 +322,11 @@ services:
     build:
       context: .
       dockerfile: deploy/docker/frontend.Dockerfile
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
+        VITE_WS_BASE_URL: ${VITE_WS_BASE_URL:-ws://localhost:8000}
+        VITE_TRADING_RUNTIME_MODE: ${TRADING_RUNTIME_MODE:-historical_replay}
+        VITE_API_AUTH_MODE: ${VITE_API_AUTH_MODE:-dev}
     container_name: trading-frontend
     ports:
       - "${FRONTEND_PORT:-5173}:80"

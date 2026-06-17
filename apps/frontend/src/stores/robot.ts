@@ -1,7 +1,7 @@
 import { computed, ref } from "vue";
 import { defineStore } from "pinia";
 
-import { apiClient, websocketUrl } from "../api/client";
+import { apiClient, openAuthenticatedWebSocket } from "../api/client";
 import type {
   ConnectionState,
   DashboardSnapshotPayload,
@@ -75,12 +75,18 @@ export const useRobotStore = defineStore("robot", () => {
     }
   }
 
-  function connectDashboardSocket(): void {
+  async function connectDashboardSocket(): Promise<void> {
     if (dashboardSocket && dashboardSocket.readyState < WebSocket.CLOSING) {
       return;
     }
     liveConnection.value = "loading";
-    dashboardSocket = new WebSocket(websocketUrl("/ws/dashboard"));
+    try {
+      dashboardSocket = await openAuthenticatedWebSocket("/ws/dashboard");
+    } catch (unknownError) {
+      error.value = unknownError instanceof Error ? unknownError.message : "Dashboard WS auth failed";
+      liveConnection.value = "degraded";
+      return;
+    }
 
     dashboardSocket.onopen = () => {
       liveConnection.value = "live";

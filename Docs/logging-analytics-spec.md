@@ -171,15 +171,19 @@ Legacy aliases `session_phase` and `instrument_id` пока поддержива
 - `strategy_state_changed`
 - `risk_event_recorded`
 - `session_snapshot_written`
-- `market_status_changed`
-- `bar_closed`
+- `strategy_config_loaded`
+- `strategy_config_reloaded`
+- `strategy_config_reload_failed`
 - `stream_gap_recovery_requested`
 - `stream_gap_backfill_started`
 - `stream_gap_backfill_completed`
-- `stream_gap_recovery_completed`
 - `stream_gap_recovery_failed`
 - `order_reconciliation_completed`
 - `position_reconciliation_completed`
+- `runtime_emergency_cancel_failed`
+- `market_status_changed`
+- `bar_closed`
+- `stream_gap_recovery_completed`
 
 Свободный текст может быть в `message`, но смысл события должен задаваться `event_type` и structured fields.
 
@@ -791,6 +795,27 @@ Gauges:
 - `market_stream_alive`
 - `last_stream_message_age_seconds`
 - `celery_queue_backlog`
+- `emergency_stop_total`
+- `emergency_cancel_failed_total`
+- `working_orders_after_stop`
+- `gap_recovery_duration_seconds`
+- `recovered_candles_total`
+- `reconciliation_mismatch_total`
+
+### Launch readiness audit fields
+
+`trade-core` startup logs and `audit_event` must include:
+
+- `database_backend`: expected `postgresql` in compose/sandbox/shadow/production;
+- `database_url_redacted`: credentials must be replaced with `***`;
+- `runtime_mode`;
+- `strategy_id`;
+- `strategy_version`;
+- `resolved_instrument_count`.
+
+SQLite is allowed only when `TRADING_RUNTIME_LOCAL_SQLITE=1` is set explicitly for local experiments. Compose readiness must fail if `trade-core`, `api` and `report-worker` are not pointed at the same PostgreSQL config.
+
+Strategy config reloads are domain/audit facts, not only technical logs. Events `strategy_config_loaded`, `strategy_config_reloaded` and `strategy_config_reload_failed` must carry strategy id, version, session template and machine-readable failure code when present.
 
 Prometheus labels не должны содержать raw ids, exception text, arbitrary order id,
 candidate id, request id или tracking id. Все такие значения остаются в JSON body логов

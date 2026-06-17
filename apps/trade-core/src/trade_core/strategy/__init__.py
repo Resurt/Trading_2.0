@@ -1,5 +1,6 @@
 """Strategy/risk/execution public API for trade-core."""
 
+from trade_core.strategy.config_loader import LoadedStrategyConfig, StrategyConfigLoader
 from trade_core.strategy.execution_engine import DefaultExecutionEngine
 from trade_core.strategy.interfaces import (
     ExecutionEngine,
@@ -44,6 +45,7 @@ __all__ = [
     "DefaultReconciliationService",
     "DefaultRiskEngine",
     "ExecutionEngine",
+    "LoadedStrategyConfig",
     "OrderAction",
     "OrderIntentRequest",
     "OrderLifecycleResult",
@@ -60,6 +62,7 @@ __all__ = [
     "SignalCandidateDecision",
     "SqlAlchemyStrategyEventStore",
     "StrategyDecision",
+    "StrategyConfigLoader",
     "StrategyEngine",
     "StrategyEvaluationContext",
     "StrategyState",

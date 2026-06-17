@@ -127,6 +127,14 @@ class FakeExecutionReportStatus(Enum):
     EXECUTION_REPORT_STATUS_REJECTED = 3
 
 
+class FakeInstrumentIdType(Enum):
+    INSTRUMENT_ID_TYPE_TICKER = 1
+
+
+class FakeInstrumentType(Enum):
+    INSTRUMENT_TYPE_SHARE = 1
+
+
 class FakeStatus(Enum):
     INVALID_ARGUMENT = 1
 
@@ -210,6 +218,7 @@ class FakeMarketDataService:
 class FakeInstrumentsService:
     def __init__(self) -> None:
         self.trading_schedules_kwargs: dict[str, object] | None = None
+        self.share_by_kwargs: dict[str, object] | None = None
 
     def trading_schedules(self, **kwargs: object) -> Box:
         self.trading_schedules_kwargs = dict(kwargs)
@@ -231,6 +240,28 @@ class FakeInstrumentsService:
                     ]
                 )
             ]
+        )
+
+    def share_by(self, **kwargs: object) -> Box:
+        self.share_by_kwargs = dict(kwargs)
+        ticker = str(kwargs["id"])
+        return Box(
+            instrument=Box(
+                figi=f"figi-{ticker.lower()}",
+                uid=f"uid-{ticker.lower()}",
+                ticker=ticker,
+                class_code=str(kwargs["class_code"]),
+                name=ticker,
+                lot=10,
+                currency="rub",
+                min_price_increment=Box(units=0, nano=10_000_000),
+                api_trade_available_flag=True,
+                buy_available_flag=True,
+                sell_available_flag=True,
+                short_enabled_flag=ticker != "GAZP",
+                weekend_flag=False,
+                exchange="MOEX",
+            )
         )
 
 
@@ -530,6 +561,8 @@ def fake_sdk() -> SimpleNamespace:
         ExchangeOrderType=FakeExchangeOrderType,
         TakeProfitType=FakeTakeProfitType,
         OrderIdType=FakeOrderIdType,
+        InstrumentIdType=FakeInstrumentIdType,
+        InstrumentType=FakeInstrumentType,
         SubscriptionAction=FakeSubscriptionAction,
         SubscriptionInterval=FakeSubscriptionInterval,
         TradeSourceType=FakeTradeSourceType,
@@ -748,6 +781,37 @@ def test_sdk_unary_maps_market_payload_shapes() -> None:
     )
     assert order_book.data["bids"][0]["price"] == "300"
     assert order_book.data["asks"][0]["quantity_lots"] == "8"
+
+
+def test_sdk_unary_resolves_share_instruments_by_ticker() -> None:
+    services = FakeServices()
+    client = TBankSdkUnaryClient(
+        config=config(),
+        sdk_module=fake_sdk(),
+        services_factory=services_factory(services),
+    )
+    metadata = auth_metadata("readonly-token-for-tests", "Resurt.Trading_2_0")
+
+    resolved = asyncio.run(
+        client.call_unary(
+            "ResolveInstruments",
+            {"tickers": ["SBER"], "class_code": "TQBR"},
+            metadata=metadata,
+            timeout_seconds=1.0,
+        )
+    )
+
+    assert services.instruments.share_by_kwargs == {
+        "id_type": FakeInstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
+        "class_code": "TQBR",
+        "id": "SBER",
+    }
+    instrument_payload = resolved.data["instruments"][0]
+    assert instrument_payload["instrument_id"] == "uid-sber"
+    assert instrument_payload["instrument_uid"] == "uid-sber"
+    assert instrument_payload["ticker"] == "SBER"
+    assert instrument_payload["lot_size"] == 10
+    assert instrument_payload["min_price_increment"] == "0.01"
 
 
 def test_sdk_unary_maps_portfolio_positions_and_accounts_payload_shapes() -> None:

@@ -48,6 +48,7 @@ SECRET_FILE_SUFFIXES = {
     ".yaml",
     ".yml",
 }
+BLOCKED_BINARY_SUFFIXES = {".docx", ".xlsx", ".pdf"}
 SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"t\.CUtCVmpY"),
     re.compile(r"\bTINVEST_TOKEN\s*=\s*t\.", re.IGNORECASE),
@@ -245,14 +246,16 @@ def run_sqlite_migration_gate() -> GateResult:
 
 def run_secret_scan_gate(root: Path) -> GateResult:
     leaks = secret_scan(root)
+    blocked_binary_files = tracked_binary_docs(root)
     return GateResult(
         name="no_raw_secrets",
-        passed=not leaks,
+        passed=not leaks and not blocked_binary_files,
         command="python secret scan",
         details={
             "status": "completed",
             "leak_count": len(leaks),
             "leaks": leaks[:20],
+            "blocked_binary_files": blocked_binary_files,
         },
     )
 
@@ -286,6 +289,23 @@ def iter_secret_scan_files(root: Path) -> list[Path]:
             continue
         files.append(path)
     return files
+
+
+def tracked_binary_docs(root: Path) -> list[str]:
+    completed = subprocess.run(
+        ["git", "ls-files", "-z"],
+        cwd=root,
+        check=False,
+        capture_output=True,
+    )
+    if completed.returncode != 0:
+        return []
+    paths = completed.stdout.decode("utf-8", errors="replace").split("\0")
+    return [
+        path
+        for path in paths
+        if Path(path).suffix.lower() in BLOCKED_BINARY_SUFFIXES
+    ]
 
 
 def format_command(argv: Sequence[str]) -> str:

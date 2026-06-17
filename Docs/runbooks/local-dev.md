@@ -103,7 +103,13 @@ Invoke-WebRequest http://localhost:8001/metrics
 - пишет `signal_candidate`, `candidate_stage_result`, `order_intent`, `broker_order` как domain facts;
 - на shutdown пишет `audit_event`.
 
-Если `TRADING_DATABASE_URL`/`DATABASE_URL` не задан, локальный runtime создаёт SQLite файл `.local/trade_core_runtime.db`. Для compose-режима используйте PostgreSQL через переменные окружения compose и Alembic migrations.
+Если `TRADING_DATABASE_URL`/`DATABASE_URL` не задан, runtime не должен молча уходить в SQLite. Для одно-процессного локального эксперимента без Postgres выставьте явный флаг:
+
+```powershell
+$env:TRADING_RUNTIME_LOCAL_SQLITE = "1"
+```
+
+В Docker Compose этот флаг не используется: `trade-core`, `api` и `report-worker` должны смотреть в один PostgreSQL через `POSTGRES_HOST=postgres`, `POSTGRES_DB`, `POSTGRES_USER` и `POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password`.
 
 ## FastAPI BFF
 
@@ -246,6 +252,18 @@ python scripts/run_controlled_launch_acceptance.py --skip-full-check
 SQLite migration `upgrade -> downgrade -1 -> upgrade`, sandbox dry-run, production safety guards
 и secret scan. Прямой `python -m alembic upgrade head` использует PostgreSQL из `alembic.ini`/env
 и должен запускаться только после поднятого `postgres` или с явно заданным `DATABASE_URL`.
+
+Расширенный launch-readiness gate:
+
+```powershell
+python scripts/run_launch_readiness.py --mode local
+python scripts/run_launch_readiness.py --mode compose
+python scripts/run_launch_readiness.py --mode sandbox
+python scripts/run_launch_readiness.py --mode shadow
+python scripts/run_launch_readiness.py --mode production-preflight
+```
+
+`compose` mode проверяет общий PostgreSQL config, health endpoints, Celery/report worker smoke и frontend build. `production-preflight` падает без `TRADING_PRODUCTION_CONFIRM`, production auth token, отключения dev auth, resolved instrument ids и shared Postgres.
 
 На Windows, если PowerShell блокирует `npm.ps1`, используйте `npm.cmd` напрямую из `apps/frontend`.
 

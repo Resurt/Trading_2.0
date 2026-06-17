@@ -97,6 +97,18 @@ any active state -> degraded -> stopped
 Цель этого слоя - long/short framework, journaling и калибровка. Он не является
 заявлением о прибыльности стратегии.
 
+### Runtime config loading
+
+`TradeCoreRuntime` больше не живёт на одном `conservative_default`. На startup и затем при reload/version check он использует `StrategyConfigLoader`:
+
+- выбирает active `strategy_config` по `strategy_id + session_template`;
+- маппит `config_payload` в `ConfigDrivenStrategyConfig`;
+- маппит `risk_limits` в `RiskLimits`;
+- пишет `audit_event`: `strategy_config_loaded`, `strategy_config_reloaded`, `strategy_config_reload_failed`;
+- применяет новые `allow_long`, `allow_short`, cost model, exposure и loss limits без перезапуска `trade-core`.
+
+Frontend/API update strategy config становится активным для runtime после reload/version check. Reload не должен менять исторические events: новая версия фиксируется через `strategy_version`.
+
 ## Cost model v1
 
 Risk gate `total_expected_costs` считает:
@@ -218,6 +230,17 @@ Launch-mode safety:
 - `cancel_reason_code`;
 - структурированный `cancel_payload`;
 - связь с `order_intent_id` и `request_order_id`.
+
+### Emergency stop
+
+`emergency_stop` является отдельной operator policy, а не сбросом счётчика open orders. При получении команды runtime:
+
+1. freeze new entries;
+2. находит все `order_intent` в `submitted`, `working`, `partially_filled`, `cancel_requested`;
+3. вызывает `DefaultExecutionEngine.cancel_order`;
+4. пишет `cancel_reason_code=manual_operator_emergency_stop`;
+5. запускает reconciliation до terminal state или переводит runtime в `degraded`;
+6. обновляет метрики `emergency_stop_total`, `emergency_cancel_failed_total`, `working_orders_after_stop`.
 
 ## Reconciliation
 

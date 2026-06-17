@@ -229,6 +229,10 @@ PostgreSQL хранит доменные сущности:
 - `counterfactual_result`
 - `audit_event`
 
+В Docker Compose `trade-core`, `api` и `report-worker` обязаны использовать один PostgreSQL (`POSTGRES_HOST=postgres`, общие `POSTGRES_DB`/`POSTGRES_USER`, `POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password`). `trade-core` не имеет права молча переключаться на SQLite в compose/sandbox/shadow/production. SQLite fallback разрешён только для явного local режима `TRADING_RUNTIME_LOCAL_SQLITE=1`.
+
+На startup `trade-core` пишет в structured log и `audit_event` поля `database_backend` и `database_url_redacted`. Launch readiness должен падать, если backend не `postgresql` или URL отличается от API/report-worker.
+
 Таблицы с большим числом событий проектируются с учетом partitioning:
 
 - `fill_event`

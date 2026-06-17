@@ -1,0 +1,1 @@
+window.__TRADING_FRONTEND_CONFIG__ = window.__TRADING_FRONTEND_CONFIG__ || {};

@@ -15,6 +15,8 @@ READONLY_TOKEN_ENV = "TBANK_READONLY_TOKEN"
 LEGACY_DEV_TOKEN_ENV = "TINVEST_TOKEN"
 DEFAULT_FULL_ACCESS_TOKEN_FILE = "/run/secrets/tbank_full_access_token"
 DEFAULT_READONLY_TOKEN_FILE = "/run/secrets/tbank_readonly_token"
+LOCAL_DEV_FULL_ACCESS_TOKEN_FILE = "secrets/tbank_full_access_token"
+LOCAL_DEV_READONLY_TOKEN_FILE = "secrets/tbank_readonly_token"
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,10 +51,19 @@ def _read_secret_file(path: str | None) -> str | None:
     return value or None
 
 
-def _load_token(file_env: str, default_file: str, value_env: str) -> str | None:
+def _load_token(
+    file_env: str,
+    default_file: str,
+    value_env: str,
+    local_dev_file: str,
+) -> str | None:
     token_from_file = _read_secret_file(os.getenv(file_env, default_file))
     if token_from_file:
         return token_from_file
+    if file_env not in os.environ:
+        token_from_local_dev_file = _read_secret_file(local_dev_file)
+        if token_from_local_dev_file:
+            return token_from_local_dev_file
     return os.getenv(value_env) or None
 
 
@@ -63,11 +74,13 @@ def load_tbank_tokens(*, allow_legacy_dev_token: bool = True) -> TBankTokenBundl
         FULL_ACCESS_TOKEN_FILE_ENV,
         DEFAULT_FULL_ACCESS_TOKEN_FILE,
         FULL_ACCESS_TOKEN_ENV,
+        LOCAL_DEV_FULL_ACCESS_TOKEN_FILE,
     )
     readonly_token = _load_token(
         READONLY_TOKEN_FILE_ENV,
         DEFAULT_READONLY_TOKEN_FILE,
         READONLY_TOKEN_ENV,
+        LOCAL_DEV_READONLY_TOKEN_FILE,
     )
 
     if allow_legacy_dev_token and not full_access_token and not readonly_token:

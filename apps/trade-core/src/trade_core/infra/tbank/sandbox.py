@@ -20,7 +20,7 @@ class SandboxSmokePlan:
     readonly_token_configured: bool
     dry_run: bool
     allow_sandbox_orders: bool
-    readonly_call_status: str
+    readonly_call_status: object
     sandbox_order_status: str
 
     def as_payload(self) -> dict[str, object]:
@@ -45,7 +45,7 @@ def build_sandbox_smoke_plan(
     tokens: TBankTokenBundle,
     dry_run: bool,
     allow_sandbox_orders: bool = False,
-    readonly_call_status: str = "not_requested",
+    readonly_call_status: object = "not_requested",
     sandbox_order_status: str = "not_requested",
 ) -> SandboxSmokePlan:
     """Validate that sandbox smoke cannot accidentally use live order transport."""

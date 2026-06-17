@@ -24,12 +24,15 @@ PROMETHEUS_METRIC_NAMES: tuple[str, ...] = (
     "reconciliation_mismatch_total",
     "rejected_orders_total",
     "risk_events_total",
+    "emergency_stop_total",
+    "emergency_cancel_failed_total",
     "counterfactual_jobs_total",
     "report_jobs_failed_total",
     "market_stream_alive",
     "last_stream_message_age_seconds",
     "open_orders",
     "active_positions",
+    "working_orders_after_stop",
     "celery_queue_backlog",
 )
 
@@ -144,6 +147,18 @@ class TradingMetrics:
             ("service", "result"),
             registry=self.registry,
         )
+        self.emergency_stop_total = Counter(
+            "emergency_stop_total",
+            "Operator emergency-stop commands applied by result.",
+            ("service", "result"),
+            registry=self.registry,
+        )
+        self.emergency_cancel_failed_total = Counter(
+            "emergency_cancel_failed_total",
+            "Emergency-stop order cancellations that failed.",
+            ("service", "result"),
+            registry=self.registry,
+        )
         self.counterfactual_jobs_total = Counter(
             "counterfactual_jobs_total",
             "Counterfactual analysis jobs by completion status.",
@@ -178,6 +193,12 @@ class TradingMetrics:
             "active_positions",
             "Current active positions by instrument.",
             ("service", "instrument"),
+            registry=self.registry,
+        )
+        self.working_orders_after_stop = Gauge(
+            "working_orders_after_stop",
+            "Working orders remaining after stop or emergency-stop policy.",
+            ("service",),
             registry=self.registry,
         )
         self.celery_queue_backlog = Gauge(
@@ -317,6 +338,12 @@ class TradingMetrics:
             result=result or reason_code or "unknown",
         ).inc()
 
+    def inc_emergency_stop(self, *, result: str = "applied") -> None:
+        self.emergency_stop_total.labels(**self._base_labels, result=result).inc()
+
+    def inc_emergency_cancel_failed(self, *, result: str = "error") -> None:
+        self.emergency_cancel_failed_total.labels(**self._base_labels, result=result).inc()
+
     def inc_counterfactual_job(self, *, status: str = "success") -> None:
         self.counterfactual_jobs_total.labels(**self._base_labels, status=status).inc()
 
@@ -337,6 +364,9 @@ class TradingMetrics:
             **self._base_labels,
             instrument=self._instrument_label(instrument=instrument, instrument_id=instrument_id),
         ).set(count)
+
+    def set_working_orders_after_stop(self, count: int) -> None:
+        self.working_orders_after_stop.labels(**self._base_labels).set(count)
 
     def set_market_stream_alive(
         self,
@@ -432,12 +462,15 @@ class TradingMetrics:
         ).inc(0)
         self.rejected_orders_total.labels(**self._base_labels, status="unknown").inc(0)
         self.risk_events_total.labels(**self._base_labels, result="unknown").inc(0)
+        self.emergency_stop_total.labels(**self._base_labels, result="applied").inc(0)
+        self.emergency_cancel_failed_total.labels(**self._base_labels, result="error").inc(0)
         self.counterfactual_jobs_total.labels(**self._base_labels, status="success").inc(0)
         self.report_jobs_failed_total.labels(**self._base_labels, status="error").inc(0)
         self.set_market_stream_alive(False, stream_type="market_data")
         self.set_last_stream_message_age(0, stream_type="market_data")
         self.set_open_orders(0)
         self.set_active_positions(0, instrument="all")
+        self.set_working_orders_after_stop(0)
         self.set_celery_queue_backlog(0)
 
     @staticmethod

@@ -130,6 +130,16 @@ python -m trade_core.service
 
 Production не стартует без явного `TRADING_PRODUCTION_CONFIRM=I_UNDERSTAND_LIVE_ORDERS`.
 
+### Launch blocker fixes
+
+- В Docker Compose `trade-core`, `api` и `report-worker` используют один PostgreSQL через `POSTGRES_HOST=postgres`, `POSTGRES_DB`, `POSTGRES_USER` и `POSTGRES_PASSWORD_FILE`.
+- Runtime больше не уходит в SQLite молча. SQLite fallback разрешён только при явном `TRADING_RUNTIME_LOCAL_SQLITE=1` для локальных одно-процессных экспериментов.
+- `trade-core` пишет в startup log/audit `database_backend` и `database_url_redacted`.
+- Sandbox/shadow/production проверяют наличие T-Bank SDK extra; контейнерный build ставит `.[tbank]` через официальный T-Bank package index.
+- Инструменты `SBER,GAZP` резолвятся через T-Bank instruments API в реальные `instrument_uid`/canonical `instrument_id`; placeholder UID запрещён для sandbox/shadow/production.
+- API production использует `TRADING_AUTH_MODE=static_bearer`; браузерные WebSocket соединения получают короткоживущий ticket через `POST /auth/ws-ticket`.
+- Для расширенной приёмки используйте `python scripts/run_launch_readiness.py --mode local|compose|sandbox|shadow|production-preflight`.
+
 Приёмка logging/analytics слоя для калибровки:
 
 ```bash

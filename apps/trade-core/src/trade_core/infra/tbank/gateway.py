@@ -15,6 +15,7 @@ from trade_core.broker_gateway import (
     CancelOrderRequest,
     CandleRequest,
     InstrumentRef,
+    InstrumentResolveRequest,
     LastPricesRequest,
     OrderBookRequest,
     OrderPlacementRequest,
@@ -83,6 +84,14 @@ class TBankBrokerGateway:
 
         self._gap_recovery_hook = hook
 
+    def set_market_stream_instruments(self, instruments: tuple[InstrumentRef, ...]) -> None:
+        """Use resolved broker IDs for all subsequent market stream subscriptions."""
+
+        stream_ids = tuple(
+            instrument.instrument_uid or instrument.instrument_id for instrument in instruments
+        )
+        self._stream_client = TBankSdkStreamClient(config=self.config, instruments=stream_ids)
+
     async def trading_schedules(
         self,
         request: TradingSchedulesRequest,
@@ -94,6 +103,20 @@ class TBankBrokerGateway:
                 "exchange": request.exchange,
                 "from": _datetime_to_iso(request.from_),
                 "to": _datetime_to_iso(request.to),
+            },
+            metadata,
+        )
+
+    async def resolve_instruments(
+        self,
+        request: InstrumentResolveRequest,
+        metadata: RequestMetadata | None = None,
+    ) -> BrokerUnaryResponse:
+        return await self._call_readonly(
+            "ResolveInstruments",
+            {
+                "tickers": list(request.tickers),
+                "class_code": request.class_code,
             },
             metadata,
         )

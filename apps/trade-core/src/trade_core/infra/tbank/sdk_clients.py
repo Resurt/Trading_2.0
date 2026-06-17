@@ -202,6 +202,15 @@ def normalize_sdk_response(
     request_payload = request_payload or {}
     if method_name == "TradingSchedules":
         return _trading_schedules_payload(response)
+    if method_name == "ResolveInstruments":
+        if isinstance(response, Mapping):
+            return {str(key): value for key, value in response.items()}
+        return {
+            "instruments": [
+                _instrument_catalog_payload(instrument)
+                for instrument in _list_attr(response, "instruments")
+            ]
+        }
     if method_name == "GetTradingStatus":
         return _trading_status_payload(response, request_payload=request_payload)
     if method_name == "GetCandles":
@@ -344,6 +353,36 @@ def _call_sdk_method(sdk: Any, services: Any, method_name: str, payload: JsonPay
             from_=_datetime_from_payload(payload["from"]),
             to=_datetime_from_payload(payload["to"]),
         )
+    if method_name == "ResolveInstruments":
+        tickers = tuple(str(ticker).upper() for ticker in payload.get("tickers", ()))
+        class_code = str(payload.get("class_code") or "TQBR")
+        instruments: list[JsonPayload] = []
+        for ticker in tickers:
+            try:
+                response = services.instruments.share_by(
+                    id_type=_enum(sdk, "InstrumentIdType", "INSTRUMENT_ID_TYPE_TICKER"),
+                    class_code=class_code,
+                    id=ticker,
+                )
+                instrument = _attr(response, "instrument")
+            except Exception:
+                response = services.instruments.find_instrument(
+                    query=ticker,
+                    instrument_kind=_enum_or_none(
+                        sdk,
+                        "InstrumentType",
+                        "INSTRUMENT_TYPE_SHARE",
+                    ),
+                    api_trade_available_flag=None,
+                )
+                instrument = _best_instrument_for_ticker(
+                    _list_attr(response, "instruments"),
+                    ticker=ticker,
+                    class_code=class_code,
+                )
+            if _is_present(instrument):
+                instruments.append(_instrument_catalog_payload(instrument))
+        return {"instruments": instruments}
     if method_name == "GetTradingStatus":
         return services.market_data.get_trading_status(
             instrument_id=_instrument_id(payload["instrument"])
@@ -357,9 +396,9 @@ def _call_sdk_method(sdk: Any, services: Any, method_name: str, payload: JsonPay
             candle_source_type=_enum_or_none(sdk, "CandleSource", "CANDLE_SOURCE_EXCHANGE"),
         )
     if method_name == "GetLastPrices":
-        instruments = cast_list_of_dict(payload["instruments"])
+        last_price_instruments = cast_list_of_dict(payload["instruments"])
         return services.market_data.get_last_prices(
-            instrument_id=[_instrument_id(item) for item in instruments],
+            instrument_id=[_instrument_id(item) for item in last_price_instruments],
             last_price_type=_enum_or_none(sdk, "LastPriceType", "LAST_PRICE_EXCHANGE"),
         )
     if method_name == "GetOrderBook":
@@ -547,6 +586,7 @@ def _ping_settings_request(sdk: Any, ping_interval_seconds: float) -> Any:
 
 @contextmanager
 def _real_services(sdk: Any, token: str, target: str, app_name: str) -> Iterator[Any]:
+    os.environ.setdefault("SSL_TBANK_VERIFY", "true")
     with sdk.Client(token, target=target, app_name=app_name) as services:
         yield services
 
@@ -1082,6 +1122,53 @@ def _account_payload(account: Any) -> JsonPayload:
         "access_level": _enum_name(_attr(account, "access_level")),
         "opened_date": _iso_or_none(_attr(account, "opened_date")),
         "closed_date": _iso_or_none(_attr(account, "closed_date")),
+    }
+
+
+def _best_instrument_for_ticker(
+    instruments: list[Any],
+    *,
+    ticker: str,
+    class_code: str,
+) -> Any | None:
+    for instrument in instruments:
+        if (
+            _str_or_none(_attr(instrument, "ticker")) == ticker
+            and _str_or_none(_attr(instrument, "class_code")) == class_code
+        ):
+            return instrument
+    for instrument in instruments:
+        if _str_or_none(_attr(instrument, "ticker")) == ticker:
+            return instrument
+    return instruments[0] if instruments else None
+
+
+def _instrument_catalog_payload(instrument: Any) -> JsonPayload:
+    instrument_uid = _str_or_none(_attr(instrument, "uid")) or _str_or_none(
+        _attr(instrument, "instrument_uid")
+    )
+    ticker = _str_or_none(_attr(instrument, "ticker"))
+    class_code = _str_or_none(_attr(instrument, "class_code"))
+    return {
+        "instrument_id": instrument_uid or _str_or_none(_attr(instrument, "figi")) or ticker,
+        "instrument_uid": instrument_uid,
+        "figi": _str_or_none(_attr(instrument, "figi")),
+        "ticker": ticker,
+        "class_code": class_code,
+        "name": _str_or_none(_attr(instrument, "name")) or ticker or instrument_uid,
+        "lot_size": int(_attr(instrument, "lot", default=1) or 1),
+        "min_price_increment": str(
+            _decimal_from_quotation(_attr(instrument, "min_price_increment"))
+        ),
+        "currency": (_str_or_none(_attr(instrument, "currency")) or "RUB").upper(),
+        "api_trade_available": _bool_attr(instrument, "api_trade_available_flag", default=False),
+        "buy_available": _bool_attr(instrument, "buy_available_flag", default=False),
+        "sell_available": _bool_attr(instrument, "sell_available_flag", default=False),
+        "short_available": _bool_attr(instrument, "short_enabled_flag", default=False),
+        "supports_weekend": _bool_attr(instrument, "weekend_flag", default=False),
+        "exchange": _str_or_none(_attr(instrument, "exchange")),
+        "real_exchange": _enum_name(_attr(instrument, "real_exchange")),
+        "instrument_exchange": _enum_name(_attr(instrument, "instrument_exchange")),
     }
 
 

@@ -31,6 +31,7 @@ RECOMMENDED_DEADLINES_MS: Mapping[str, int] = MappingProxyType(
         "GetPortfolio": 500,
         "GetPositions": 500,
         "GetAccounts": 500,
+        "ResolveInstruments": 500,
         "PostStopOrder": 1500,
     }
 )

@@ -10,6 +10,8 @@ Run on live market data without real order submission. Shadow mode must write th
 - Strategy and risk logic run normally.
 - Execution creates pseudo-orders only.
 - No real `PostOrder` call is made.
+- No real `CancelOrder` call is made for pseudo-orders.
+- T-Bank SDK extra must be installed and instruments must be resolved to real `instrument_uid` values before live market streams start.
 - Long/short gates run normally: `allow_short=false` blocks short candidates
   with `short_not_allowed_by_config`, while long candidates still pass through
   cost/exposure/session gates.
@@ -19,6 +21,7 @@ Run on live market data without real order submission. Shadow mode must write th
 
 ## Validation Checklist
 
+- `python scripts/run_launch_readiness.py --mode shadow` is green for replay/report determinism before a live shadow run.
 - `python scripts/run_controlled_launch_acceptance.py --skip-full-check` is green before starting.
 - Live dashboard shows market state.
 - Candidate funnel is populated.
@@ -42,6 +45,7 @@ $env:TRADING_RUNTIME_MODE = "shadow"
 $env:TBANK_ENVIRONMENT = "live"
 $env:SSL_TBANK_VERIFY = "true"
 $env:TBANK_UNARY_TIMEOUT_FLOOR_SECONDS = "5.0"
+python scripts/run_tbank_sdk_import_check.py
 docker compose up -d --build trade-core api report-worker frontend
 python -m alembic upgrade head
 ```
@@ -62,3 +66,5 @@ Do not kill `trade-core` for hourly rollovers. Micro-sessions are logical and mu
 - `broker_order.broker_status=pseudo_posted` for pseudo submissions.
 - `cancel_reason_code` is present for any pseudo cancellation.
 - Daily reports and counterfactual rows are buildable after market data is available.
+- `stream_gap_recovery_requested/completed` events appear after reconnect tests.
+- `position_snapshot` rows are written on micro-session boundaries and before risk-sensitive decisions.
