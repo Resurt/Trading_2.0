@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from sqlalchemy import func, select
 
-from trade_core.broker_gateway import BrokerGateway
+from trade_core.broker_gateway import BrokerGateway, BrokerUnaryResponse, CandleRequest
 from trade_core.market_data import Candle, OrderBookSnapshot, PriceLevel, Timeframe
 from trade_core.runtime import (
     SafeNoopBrokerGateway,
@@ -59,6 +59,16 @@ def build_runtime(
         database=DatabaseService(runtime_config(tmp_path).database_url or ""),
         broker_gateway=cast(BrokerGateway, broker_gateway),
     )
+
+
+class FailingRecoveryGateway(SafeNoopBrokerGateway):
+    async def get_candles(
+        self,
+        request: CandleRequest,
+        metadata: object | None = None,
+    ) -> BrokerUnaryResponse:
+        del request, metadata
+        raise RuntimeError("gap backfill failed")
 
 
 def test_runtime_starts_historical_replay_without_tokens(
@@ -192,6 +202,23 @@ def test_closed_bar_candidate_risk_order_path_is_deterministic(tmp_path: Path) -
     assert broker_order.broker_status == "pseudo_posted"
     assert runtime.stats.candidates_created == 1
     assert runtime.stats.order_intents_created == 1
+    asyncio.run(runtime.shutdown())
+
+
+def test_stream_gap_recovery_failure_marks_runtime_degraded(tmp_path: Path) -> None:
+    runtime = build_runtime(
+        tmp_path,
+        gateway=FailingRecoveryGateway(now=msk(2026, 6, 12, 10)),
+    )
+
+    async def run() -> None:
+        await runtime.run_cycle(now=msk(2026, 6, 12, 10))
+        with pytest.raises(RuntimeError, match="gap backfill failed"):
+            await runtime._recover_stream_gap_from_gateway("candles", "account-1")
+
+    asyncio.run(run())
+
+    assert runtime.robot_control_state == "degraded"
     asyncio.run(runtime.shutdown())
 
 

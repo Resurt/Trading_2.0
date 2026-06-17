@@ -4,7 +4,11 @@ import asyncio
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import cast
+from uuid import uuid4
 from zoneinfo import ZoneInfo
+
+from sqlalchemy import create_engine, func, select
+from sqlalchemy.orm import Session
 
 from trade_core.broker_gateway import (
     BrokerGateway,
@@ -12,6 +16,7 @@ from trade_core.broker_gateway import (
     CandleRequest,
     InstrumentRef,
     OrdersRequest,
+    OrderStateRequest,
 )
 from trade_core.market_data import (
     Bar,
@@ -31,7 +36,10 @@ from trade_core.market_data import (
     Timeframe,
 )
 from trade_core.market_data.calculators import FeedFreshnessCalculator
+from trade_core.market_data.persistence import SqlAlchemyMarketDataStore
 from trade_core.session.models import SessionEventContext
+from trading_common.db import Base
+from trading_common.db.models import MarketCandle
 from trading_common.enums import SessionPhase, SessionType
 
 MSK = ZoneInfo("Europe/Moscow")
@@ -59,6 +67,25 @@ def one_minute_candle(minute: int, *, closed: bool = True) -> Candle:
         volume_lots=Decimal("10"),
         is_closed=closed,
     )
+
+
+def recovered_candle_payload(minute: int) -> dict[str, object]:
+    candle = one_minute_candle(minute)
+    return {
+        "instrument_id": candle.instrument_id,
+        "timeframe": candle.timeframe.value,
+        "open_ts_utc": candle.open_ts_utc.isoformat(),
+        "close_ts_utc": candle.close_ts_utc.isoformat(),
+        "exchange_open_ts": candle.exchange_open_ts.isoformat(),
+        "exchange_close_ts": candle.exchange_close_ts.isoformat(),
+        "open": str(candle.open_price),
+        "high": str(candle.high_price),
+        "low": str(candle.low_price),
+        "close": str(candle.close_price),
+        "volume": str(candle.volume_lots),
+        "is_closed": True,
+        "source": "backfill",
+    }
 
 
 def session_context(instrument_id: str = "MOEX:SBER") -> SessionEventContext:
@@ -134,9 +161,17 @@ def test_market_quality_and_stale_data_detection() -> None:
 
 
 class FakeRecoveryGateway:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        candles_by_interval: dict[str, list[dict[str, object]]] | None = None,
+        raise_on_candles: bool = False,
+    ) -> None:
+        self.candles_by_interval = candles_by_interval or {}
+        self.raise_on_candles = raise_on_candles
         self.candle_requests: list[CandleRequest] = []
         self.orders_requests: list[OrdersRequest] = []
+        self.order_state_requests: list[OrderStateRequest] = []
 
     async def get_candles(
         self,
@@ -144,6 +179,14 @@ class FakeRecoveryGateway:
         metadata: object | None = None,
     ) -> BrokerUnaryResponse:
         self.candle_requests.append(request)
+        if self.raise_on_candles:
+            raise RuntimeError("gap backfill failed")
+        candles = self.candles_by_interval.get(request.interval)
+        if candles is not None:
+            return BrokerUnaryResponse(
+                method_name="GetCandles",
+                data={"candles": candles},
+            )
         return BrokerUnaryResponse(
             method_name="GetCandles",
             data={
@@ -173,17 +216,39 @@ class FakeRecoveryGateway:
         self.orders_requests.append(request)
         return BrokerUnaryResponse(method_name="GetOrders", data={"orders": []})
 
+    async def reconcile_order_state(
+        self,
+        request: OrderStateRequest,
+        metadata: object | None = None,
+    ) -> BrokerUnaryResponse:
+        self.order_state_requests.append(request)
+        return BrokerUnaryResponse(
+            method_name="GetOrderState",
+            data={
+                "request_order_id": str(request.request_order_id)
+                if request.request_order_id is not None
+                else None,
+                "exchange_order_id": request.exchange_order_id,
+                "broker_status": "observed",
+            },
+        )
+
 
 def test_reconnect_recovery_backfills_candles_and_refreshes_account_state() -> None:
     fake_gateway = FakeRecoveryGateway()
     event_bus = MarketEventBus()
+    audit_events: list[tuple[str, dict[str, object]]] = []
     positions_refreshes: list[str] = []
+    request_order_id = uuid4()
 
     async def run() -> None:
         coordinator = GapRecoveryCoordinator(
             broker_gateway=cast(BrokerGateway, fake_gateway),
             event_bus=event_bus,
             refresh_positions_hook=lambda account_id: positions_refreshes.append(account_id),
+            audit_event_hook=lambda event_type, payload: audit_events.append(
+                (event_type, payload)
+            ),
         )
         await coordinator.recover_after_reconnect(
             GapRecoveryRequest(
@@ -192,6 +257,7 @@ def test_reconnect_recovery_backfills_candles_and_refreshes_account_state() -> N
                 from_ts_utc=utc(2026, 6, 12, 7),
                 to_ts_utc=utc(2026, 6, 12, 7, 5),
                 account_id="account-1",
+                working_order_request_ids=(request_order_id,),
             )
         )
 
@@ -199,13 +265,119 @@ def test_reconnect_recovery_backfills_candles_and_refreshes_account_state() -> N
 
     assert [request.interval for request in fake_gateway.candle_requests] == ["1m", "5m"]
     assert [request.account_id for request in fake_gateway.orders_requests] == ["account-1"]
+    assert [request.request_order_id for request in fake_gateway.order_state_requests] == [
+        request_order_id
+    ]
     assert positions_refreshes == ["account-1"]
+    assert {
+        event_type for event_type, _payload in audit_events
+    } >= {
+        "stream_gap_recovery_requested",
+        "stream_gap_backfill_started",
+        "stream_gap_backfill_completed",
+        "order_reconciliation_completed",
+        "position_reconciliation_completed",
+    }
     assert [event.event_type for event in event_bus.published_events] == [
         MarketEventType.RECOVERY_REQUESTED,
         MarketEventType.CANDLE,
         MarketEventType.CANDLE,
         MarketEventType.RECOVERY_COMPLETED,
     ]
+
+
+def test_reconnect_after_missing_candles_restores_bars() -> None:
+    fake_gateway = FakeRecoveryGateway(
+        candles_by_interval={
+            Timeframe.M1.value: [recovered_candle_payload(minute) for minute in range(5)]
+        }
+    )
+    event_bus = MarketEventBus()
+    pipeline = MarketDataPipeline(
+        event_bus=event_bus,
+        session_context_provider=lambda instrument_id: session_context(instrument_id),
+        bar_engine=BarEngine(target_timeframes=(Timeframe.M5,)),
+        read_models=MarketReadModelStore(),
+    )
+    pipeline.register()
+
+    async def run() -> None:
+        coordinator = GapRecoveryCoordinator(
+            broker_gateway=cast(BrokerGateway, fake_gateway),
+            event_bus=event_bus,
+        )
+        coordinator.record_good_event(
+            stream_name="candles",
+            instrument_id="MOEX:SBER",
+            timeframe=Timeframe.M1,
+            ts_utc=utc(2026, 6, 12, 7),
+        )
+        result = await coordinator.recover_after_reconnect(
+            GapRecoveryRequest(
+                instruments=(InstrumentRef(instrument_id="MOEX:SBER"),),
+                candle_timeframes=(Timeframe.M1,),
+                from_ts_utc=utc(2026, 6, 12, 7),
+                to_ts_utc=utc(2026, 6, 12, 7, 5),
+                stream_name="candles",
+            )
+        )
+        assert result.recovered_candles == 5
+
+    asyncio.run(run())
+
+    closed_bars = [
+        event.payload
+        for event in event_bus.published_events
+        if event.event_type is MarketEventType.BAR_CLOSED
+    ]
+    assert len(closed_bars) == 1
+    bar = cast(Bar, closed_bars[0])
+    assert bar.timeframe is Timeframe.M5
+    assert bar.close_ts_utc == utc(2026, 6, 12, 7, 5)
+    assert bar.source_candle_count == 5
+
+
+def test_duplicate_recovered_candle_does_not_duplicate_market_candle() -> None:
+    candle_payload = recovered_candle_payload(0)
+    fake_gateway = FakeRecoveryGateway(
+        candles_by_interval={Timeframe.M1.value: [candle_payload, candle_payload]}
+    )
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    event_bus = MarketEventBus()
+
+    with Session(engine) as session:
+        pipeline = MarketDataPipeline(
+            event_bus=event_bus,
+            session_context_provider=lambda instrument_id: session_context(instrument_id),
+            store=SqlAlchemyMarketDataStore(session),
+        )
+        pipeline.register()
+
+        async def run() -> None:
+            coordinator = GapRecoveryCoordinator(
+                broker_gateway=cast(BrokerGateway, fake_gateway),
+                event_bus=event_bus,
+            )
+            await coordinator.recover_after_reconnect(
+                GapRecoveryRequest(
+                    instruments=(InstrumentRef(instrument_id="MOEX:SBER"),),
+                    candle_timeframes=(Timeframe.M1,),
+                    from_ts_utc=utc(2026, 6, 12, 7),
+                    to_ts_utc=utc(2026, 6, 12, 7, 1),
+                    stream_name="candles",
+                )
+            )
+
+        asyncio.run(run())
+        session.commit()
+        market_candle_count = session.scalar(select(func.count()).select_from(MarketCandle))
+
+    published_candles = [
+        event for event in event_bus.published_events if event.event_type is MarketEventType.CANDLE
+    ]
+    assert len(published_candles) == 1
+    assert market_candle_count == 1
 
 
 def test_pipeline_updates_live_dashboard_read_models() -> None:

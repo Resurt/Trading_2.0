@@ -174,7 +174,12 @@ Legacy aliases `session_phase` and `instrument_id` пока поддержива
 - `market_status_changed`
 - `bar_closed`
 - `stream_gap_recovery_requested`
+- `stream_gap_backfill_started`
+- `stream_gap_backfill_completed`
 - `stream_gap_recovery_completed`
+- `stream_gap_recovery_failed`
+- `order_reconciliation_completed`
+- `position_reconciliation_completed`
 
 Свободный текст может быть в `message`, но смысл события должен задаваться `event_type` и structured fields.
 

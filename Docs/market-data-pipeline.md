@@ -119,18 +119,36 @@ MarketEventBus
 
 ## Gap Recovery
 
-`GapRecoveryCoordinator` после reconnect:
+`StreamGapRecoveryService` является текущей реализацией recovery-контура после reconnect/gap.
+`GapRecoveryCoordinator` оставлен как backward-compatible alias для старых импортов.
 
-1. публикует `recovery_requested`;
-2. вызывает `GetCandles` для backfill по инструментам и timeframe;
-3. публикует восстановленные `candle` events;
-4. вызывает `reconcile_open_orders`;
-5. вызывает явный `refresh_positions_hook`, если он передан;
-6. публикует `recovery_completed`.
+Flow:
 
-Отдельный hook для позиций выбран потому, что в текущем `BrokerGateway` еще нет
-SDK-neutral метода позиций. Добавлять его нужно отдельным архитектурным шагом,
-вместе с reconciliation/portfolio model.
+1. фиксирует `stream_gap_recovery_requested` в audit/domain контуре и публикует `recovery_requested`;
+2. определяет `last_good_event_ts` по ключу `stream_name + instrument_id + timeframe`;
+3. вызывает `BrokerGateway.get_candles()` только для пропущенных closed candles;
+4. отбрасывает duplicate/replayed candles, у которых `close_ts_utc <= recovery_cursor`;
+5. публикует восстановленные `candle` events в тот же `MarketEventBus`, поэтому `BarEngine`,
+   `MarketDataPipeline`, read models и DB store получают backfill без отдельной ветки логики;
+6. пишет `stream_gap_backfill_started` и `stream_gap_backfill_completed`;
+7. вызывает `BrokerGateway.reconcile_open_orders()`;
+8. вызывает `BrokerGateway.reconcile_order_state()` для всех known working orders;
+9. вызывает `PositionService.refresh_positions()` через runtime hook;
+10. пишет `order_reconciliation_completed` и `position_reconciliation_completed`;
+11. публикует `recovery_completed`;
+12. при ошибке пишет `stream_gap_recovery_failed`, метрику failed duration и переводит runtime в
+    degraded state через failure hook.
+
+Метрики recovery:
+
+- `stream_reconnect_total{stream_type,result}`;
+- `gap_recovery_duration_seconds{stream_type,status}`;
+- `recovered_candles_total{instrument,timeframe,status}`;
+- `reconciliation_mismatch_total{result}`.
+
+Дедупликация выполняется до публикации в event bus. Дополнительно `market_candle` хранится через
+repository-level upsert по `instrument_id + timeframe + open_ts_utc + trading_date`, поэтому повторный
+backfill не должен плодить факты для аналитики.
 
 ## Хранение
 

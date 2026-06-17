@@ -274,25 +274,34 @@ class StreamGapRecoveryService:
         recovered_candles = 0
         for instrument in request.instruments:
             for timeframe in request.candle_timeframes:
-                from_ts = (
+                recovery_cursor = (
                     self.last_good_event_ts(
                         stream_name=request.stream_name,
                         instrument_id=instrument.instrument_id,
                         timeframe=timeframe,
                     )
-                    or request.from_ts_utc
+                    or ensure_utc(request.from_ts_utc)
                 )
                 response = await self._broker_gateway.get_candles(
                     CandleRequest(
                         instrument=instrument,
                         interval=timeframe.value,
-                        from_=from_ts,
+                        from_=recovery_cursor,
                         to=request.to_ts_utc,
                     )
                 )
                 for candle_payload in _iter_candle_payloads(response.data):
                     candle = candle_from_mapping(candle_payload, received_at=request.to_ts_utc)
                     if not candle.is_closed:
+                        continue
+                    candle_close_ts = ensure_utc(candle.close_ts_utc)
+                    if candle_close_ts <= recovery_cursor:
+                        if self._metrics is not None:
+                            self._metrics.inc_recovered_candle(
+                                instrument=candle.instrument_id,
+                                timeframe=candle.timeframe.value,
+                                status="duplicate",
+                            )
                         continue
                     await self._event_bus.publish(
                         MarketDataEvent(
@@ -308,6 +317,7 @@ class StreamGapRecoveryService:
                         timeframe=candle.timeframe,
                         ts_utc=candle.close_ts_utc,
                     )
+                    recovery_cursor = candle_close_ts
                     if self._metrics is not None:
                         self._metrics.inc_recovered_candle(
                             instrument=candle.instrument_id,
