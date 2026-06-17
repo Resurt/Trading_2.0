@@ -19,6 +19,7 @@ Run on live market data without real order submission. Shadow mode must write th
 
 ## Validation Checklist
 
+- `python scripts/run_controlled_launch_acceptance.py --skip-full-check` is green before starting.
 - Live dashboard shows market state.
 - Candidate funnel is populated.
 - Blocker reasons are structured.

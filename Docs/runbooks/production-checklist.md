@@ -14,6 +14,7 @@ $env:TBANK_ENVIRONMENT = "live"
 
 - Docker Compose secrets exist for `tbank_full_access_token`, `tbank_readonly_token`, `postgres_password`, `grafana_admin_password`.
 - No real token is present in git, `.env`, docs, shell history snippets, or CI config.
+- `python scripts/run_controlled_launch_acceptance.py` is green locally or in a staging workspace.
 - `python -m alembic upgrade head` is applied.
 - `trade-core`, `api`, `report-worker`, `report-worker-health`, `frontend`, `postgres`, `redis` are healthy.
 - Prometheus, Grafana, Loki and Fluent Bit are reachable.

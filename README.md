@@ -81,6 +81,22 @@ cd apps/frontend && npm run test:unit
 python scripts/check.py
 ```
 
+Полный local controlled-launch acceptance без реальных broker orders:
+
+```bash
+python scripts/run_controlled_launch_acceptance.py
+```
+
+Быстрый вариант, если `scripts/check.py` уже запускался отдельно:
+
+```bash
+python scripts/run_controlled_launch_acceptance.py --skip-full-check
+```
+
+Этот gate проверяет analytics-smoke, report rebuild, replay-day,
+`docker compose config`, SQLite migration upgrade/downgrade/upgrade,
+sandbox dry-run, production safety guards и secret scan.
+
 Реальный T-Bank SDK wrapper подключается optional extra, чтобы обычный CI не зависел от
 T-Bank package index:
 

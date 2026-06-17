@@ -100,6 +100,33 @@ python scripts/run_sandbox_smoke.py --allow-sandbox-orders --account-id "<sandbo
 
 Sandbox results нельзя использовать как прямую оценку real execution quality. Это проверка инфраструктуры и adapter lifecycle.
 
+## Local acceptance gate
+
+Единая локальная команда controlled launch:
+
+```powershell
+python scripts/run_controlled_launch_acceptance.py
+```
+
+Она последовательно проверяет:
+
+- `python scripts/check.py`;
+- analytics-smoke;
+- report rebuild;
+- replay-day determinism;
+- `docker compose config --quiet`;
+- Alembic `upgrade -> downgrade -1 -> upgrade` на временной SQLite БД;
+- sandbox dry-run без токенов и без реальных orders;
+- production guard tests: production падает без `TRADING_PRODUCTION_CONFIRM`, а API production
+  не стартует с dev auth;
+- отсутствие raw token/Bearer secrets в отслеживаемых текстовых файлах.
+
+Для быстрого локального прохода после отдельного `python scripts/check.py`:
+
+```powershell
+python scripts/run_controlled_launch_acceptance.py --skip-full-check
+```
+
 ## Shadow mode
 
 Shadow mode использует live market data, но execution остается pseudo:

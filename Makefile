@@ -5,7 +5,7 @@ STRATEGY_ID ?= baseline
 REPORT_WORKER_SMOKE_MICRO_SESSION_ID ?= 2026-06-12:weekday_main:1000
 REPORT_WORKER_SMOKE_TIMEOUT ?= 30
 
-.PHONY: lint test up down logs frontend-build migrate migrate-down replay-smoke sandbox-smoke analytics-smoke report-rebuild replay-day observability-up report-worker-smoke celery-inspect
+.PHONY: lint test up down logs frontend-build migrate migrate-down replay-smoke sandbox-smoke analytics-smoke report-rebuild replay-day controlled-launch-acceptance observability-up report-worker-smoke celery-inspect
 
 lint:
 	$(PYTHON) -m ruff check .
@@ -46,6 +46,9 @@ report-rebuild:
 
 replay-day:
 	$(PYTHON) scripts/run_replay_day.py --date $(TRADING_DATE)
+
+controlled-launch-acceptance:
+	$(PYTHON) scripts/run_controlled_launch_acceptance.py --date $(TRADING_DATE) --strategy-id $(STRATEGY_ID)
 
 observability-up:
 	docker compose up -d prometheus grafana loki fluent-bit

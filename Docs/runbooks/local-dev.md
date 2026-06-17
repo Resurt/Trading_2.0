@@ -221,6 +221,23 @@ python scripts/run_replay_harness.py
 python scripts/run_sandbox_smoke.py --dry-run
 ```
 
+Полный локальный controlled-launch gate без реальных broker orders:
+
+```powershell
+python scripts/run_controlled_launch_acceptance.py
+```
+
+Если `python scripts/check.py` уже выполнен отдельно, можно ускорить приемку:
+
+```powershell
+python scripts/run_controlled_launch_acceptance.py --skip-full-check
+```
+
+Этот скрипт запускает analytics acceptance, report rebuild, replay-day, `docker compose config`,
+SQLite migration `upgrade -> downgrade -1 -> upgrade`, sandbox dry-run, production safety guards
+и secret scan. Прямой `python -m alembic upgrade head` использует PostgreSQL из `alembic.ini`/env
+и должен запускаться только после поднятого `postgres` или с явно заданным `DATABASE_URL`.
+
 На Windows, если PowerShell блокирует `npm.ps1`, используйте `npm.cmd` напрямую из `apps/frontend`.
 
 ## Controlled launch modes
