@@ -40,6 +40,8 @@ Run on live market data without real order submission. Shadow mode must write th
 ```powershell
 $env:TRADING_RUNTIME_MODE = "shadow"
 $env:TBANK_ENVIRONMENT = "live"
+$env:SSL_TBANK_VERIFY = "true"
+$env:TBANK_UNARY_TIMEOUT_FLOOR_SECONDS = "5.0"
 docker compose up -d --build trade-core api report-worker frontend
 python -m alembic upgrade head
 ```

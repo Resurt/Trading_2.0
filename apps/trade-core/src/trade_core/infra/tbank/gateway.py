@@ -433,7 +433,10 @@ class TBankBrokerGateway:
                     method_name,
                     payload,
                     metadata=outbound_metadata,
-                    timeout_seconds=deadline.seconds,
+                    timeout_seconds=max(
+                        deadline.seconds,
+                        self.config.unary_timeout_floor_seconds,
+                    ),
                 )
             except BrokerGatewayError:
                 raise

@@ -148,6 +148,8 @@ services:
       TRADING_RUNTIME_MODE: ${TRADING_RUNTIME_MODE:-historical_replay}
       TRADING_PRODUCTION_CONFIRM: ${TRADING_PRODUCTION_CONFIRM:-}
       TBANK_ENVIRONMENT: ${TBANK_ENVIRONMENT:-sandbox}
+      SSL_TBANK_VERIFY: ${SSL_TBANK_VERIFY:-true}
+      TBANK_UNARY_TIMEOUT_FLOOR_SECONDS: ${TBANK_UNARY_TIMEOUT_FLOOR_SECONDS:-5.0}
       TBANK_FULL_ACCESS_TOKEN_FILE: /run/secrets/tbank_full_access_token
       TBANK_READONLY_TOKEN_FILE: /run/secrets/tbank_readonly_token
     secrets:

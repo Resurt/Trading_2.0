@@ -8,11 +8,14 @@ Production mode is not default. Start only after every item is green.
 $env:TRADING_RUNTIME_MODE = "production"
 $env:TRADING_PRODUCTION_CONFIRM = "I_UNDERSTAND_LIVE_ORDERS"
 $env:TBANK_ENVIRONMENT = "live"
+$env:SSL_TBANK_VERIFY = "true"
+$env:TBANK_UNARY_TIMEOUT_FLOOR_SECONDS = "5.0"
 ```
 
 ## Final Live Checklist
 
 - Docker Compose secrets exist for `tbank_full_access_token`, `tbank_readonly_token`, `postgres_password`, `grafana_admin_password`.
+- T-Bank SDK TLS verification is enabled with `SSL_TBANK_VERIFY=true`; Russian Trusted Root/Sub CA is trusted in the runtime environment or T-Invest endpoints are excluded from HTTPS inspection.
 - No real token is present in git, `.env`, docs, shell history snippets, or CI config.
 - `python scripts/run_controlled_launch_acceptance.py` is green locally or in a staging workspace.
 - `python -m alembic upgrade head` is applied.

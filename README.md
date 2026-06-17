@@ -102,8 +102,16 @@ T-Bank package index:
 
 ```powershell
 python -m pip install -e ".[tbank]" --extra-index-url https://opensource.tbank.ru/api/v4/projects/238/packages/pypi/simple
+$env:SSL_TBANK_VERIFY = "true"
+$env:TBANK_UNARY_TIMEOUT_FLOOR_SECONDS = "5.0"
 python scripts/run_sandbox_smoke.py --dry-run
 ```
+
+Для реального readonly smoke без `--dry-run` токены должны лежать в ignored
+`secrets/tbank_full_access_token` / `secrets/tbank_readonly_token`, а переменные
+`TBANK_*_TOKEN_FILE` должны указывать на эти файлы. `SSL_TBANK_VERIFY=true`
+включает bundled Russian Trusted Root CA в официальном T-Bank SDK; TLS verification
+не отключается.
 
 ## Trade-core runtime
 

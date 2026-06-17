@@ -83,6 +83,7 @@ def config(max_retry_attempts: int = 3) -> TBankBrokerConfig:
         max_retry_attempts=max_retry_attempts,
         backoff_initial_seconds=0.0,
         backoff_max_seconds=0.0,
+        unary_timeout_floor_seconds=0.0,
     )
 
 
@@ -156,6 +157,36 @@ def test_retry_logic_retries_transient_broker_errors() -> None:
     assert response.data == {"ok": True}
     assert len(fake_client.calls) == 2
     assert fake_client.calls[0]["timeout_seconds"] == deadline_for("GetOrderState").seconds
+
+
+def test_config_reads_unary_timeout_floor_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TBANK_UNARY_TIMEOUT_FLOOR_SECONDS", "7.5")
+
+    loaded = TBankBrokerConfig.from_env()
+
+    assert loaded.unary_timeout_floor_seconds == 7.5
+
+
+def test_gateway_applies_unary_timeout_floor_for_cold_sdk_channel() -> None:
+    fake_client = FakeUnaryClient([UnaryCallResult(data={"status": "observed"})])
+    gateway = TBankBrokerGateway(
+        config=TBankBrokerConfig(
+            environment=TBankEnvironment.SANDBOX,
+            max_retry_attempts=1,
+            unary_timeout_floor_seconds=5.0,
+        ),
+        tokens=tokens(),
+        unary_client=fake_client,
+        backoff=ExponentialBackoff(initial_seconds=0.0, max_seconds=0.0),
+    )
+
+    asyncio.run(
+        gateway.get_order_state(
+            OrderStateRequest(account_id="account-1", request_order_id=None, exchange_order_id="42")
+        )
+    )
+
+    assert fake_client.calls[0]["timeout_seconds"] == 5.0
 
 
 def test_idempotent_order_id_generation_reuses_uuid_for_client_key() -> None:

@@ -19,6 +19,7 @@ class TBankEnvironment(StrEnum):
 LIVE_TARGET = "invest-public-api.tbank.ru:443"
 SANDBOX_TARGET = "sandbox-invest-public-api.tbank.ru:443"
 DEFAULT_APP_NAME = "Resurt.Trading_2_0"
+DEFAULT_UNARY_TIMEOUT_FLOOR_SECONDS = 5.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +36,7 @@ class TBankBrokerConfig:
     backoff_max_seconds: float = 60.0
     stream_ping_timeout_seconds: float = 180.0
     stream_ping_interval_seconds: float = 120.0
+    unary_timeout_floor_seconds: float = DEFAULT_UNARY_TIMEOUT_FLOOR_SECONDS
 
     @property
     def target(self) -> str:
@@ -51,6 +53,12 @@ class TBankBrokerConfig:
             live_target=os.getenv("TBANK_LIVE_TARGET", LIVE_TARGET),
             sandbox_target=os.getenv("TBANK_SANDBOX_TARGET", SANDBOX_TARGET),
             max_retry_attempts=int(os.getenv("TBANK_MAX_RETRY_ATTEMPTS", "3")),
+            unary_timeout_floor_seconds=float(
+                os.getenv(
+                    "TBANK_UNARY_TIMEOUT_FLOOR_SECONDS",
+                    str(DEFAULT_UNARY_TIMEOUT_FLOOR_SECONDS),
+                )
+            ),
         )
 
     @classmethod
@@ -79,4 +87,5 @@ class TBankBrokerConfig:
             backoff_max_seconds=self.backoff_max_seconds,
             stream_ping_timeout_seconds=self.stream_ping_timeout_seconds,
             stream_ping_interval_seconds=self.stream_ping_interval_seconds,
+            unary_timeout_floor_seconds=self.unary_timeout_floor_seconds,
         )
