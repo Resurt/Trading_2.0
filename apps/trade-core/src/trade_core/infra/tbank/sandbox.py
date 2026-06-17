@@ -56,6 +56,9 @@ def build_sandbox_smoke_plan(
     if config.environment is not TBankEnvironment.SANDBOX:
         msg = "sandbox smoke requires TBankBrokerConfig.environment=sandbox"
         raise RuntimeError(msg)
+    if allow_sandbox_orders and not policy.allows_real_orders:
+        msg = "sandbox PostOrder smoke requires confirmed LaunchModePolicy"
+        raise RuntimeError(msg)
     if allow_sandbox_orders and not tokens.full_access_token:
         msg = "sandbox PostOrder smoke requires full-access sandbox token"
         raise RuntimeError(msg)

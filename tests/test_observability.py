@@ -81,6 +81,11 @@ def test_strict_event_types_match_required_catalog() -> None:
         "bar_closed",
         "stream_gap_recovery_requested",
         "stream_gap_recovery_completed",
+        "stream_gap_backfill_started",
+        "stream_gap_backfill_completed",
+        "stream_gap_recovery_failed",
+        "order_reconciliation_completed",
+        "position_reconciliation_completed",
     }
     assert "request_order_id" in CONTEXT_FIELDS
 

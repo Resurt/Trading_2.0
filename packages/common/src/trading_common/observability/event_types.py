@@ -20,7 +20,12 @@ class DomainEventType(StrEnum):
     MARKET_STATUS_CHANGED = "market_status_changed"
     BAR_CLOSED = "bar_closed"
     STREAM_GAP_RECOVERY_REQUESTED = "stream_gap_recovery_requested"
+    STREAM_GAP_BACKFILL_STARTED = "stream_gap_backfill_started"
+    STREAM_GAP_BACKFILL_COMPLETED = "stream_gap_backfill_completed"
     STREAM_GAP_RECOVERY_COMPLETED = "stream_gap_recovery_completed"
+    STREAM_GAP_RECOVERY_FAILED = "stream_gap_recovery_failed"
+    ORDER_RECONCILIATION_COMPLETED = "order_reconciliation_completed"
+    POSITION_RECONCILIATION_COMPLETED = "position_reconciliation_completed"
 
 
 STRICT_DOMAIN_EVENT_TYPES = tuple(event_type.value for event_type in DomainEventType)

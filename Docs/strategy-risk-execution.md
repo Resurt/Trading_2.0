@@ -65,6 +65,61 @@ any active state -> degraded -> stopped
 - entry/exit condition объяснима: directional move closed bar выше `min_move_bps`;
 - `expected_edge_bps` не является прогнозом прибыли, а только входным числом для risk gates и последующей калибровки.
 
+### Production-safe long/short config
+
+`strategy_config` хранится версионированно в PostgreSQL: typed runtime-модель
+`ConfigDrivenStrategyConfig` проецируется в `strategy_config.config_payload` и
+`strategy_config.risk_limits`. Таблица остается JSONB-based для версионирования,
+но обязательные поля должны быть machine-readable:
+
+- `allow_long`;
+- `allow_short`;
+- `max_long_lots`;
+- `max_short_lots`;
+- `max_gross_exposure_rub`;
+- `max_net_exposure_rub`;
+- `min_expected_edge_bps`;
+- `assumed_commission_bps_per_side`;
+- `assumed_slippage_bps`;
+- `min_edge_after_total_costs_bps`;
+- `session_template`;
+- `instrument_id/timeframe overrides`.
+
+Консервативный default:
+
+- `allow_long=true`;
+- `allow_short=false`;
+- weekend template выключен;
+- комиссия не ниже `5 bps` на сторону;
+- round trip commission не ниже `10 bps`;
+- реальные заявки не включаются default launch mode.
+
+Цель этого слоя - long/short framework, journaling и калибровка. Он не является
+заявлением о прибыльности стратегии.
+
+## Cost model v1
+
+Risk gate `total_expected_costs` считает:
+
+```text
+total_expected_costs_bps =
+  commission_entry_bps
+  + commission_exit_bps
+  + current_spread_bps
+  + assumed_slippage_bps
+```
+
+Где:
+
+- `commission_entry_bps` и `commission_exit_bps` не ниже `5 bps`;
+- `round_trip_commission_bps` не ниже `10 bps`;
+- `spread_bps` берется из текущего `MarketState`;
+- `assumed_slippage_bps` задается конфигом.
+
+Если `expected_edge_bps - total_expected_costs_bps <
+min_edge_after_total_costs_bps`, кандидат блокируется с
+`blocker_code=total_costs_exceed_edge`.
+
 ## Risk blockers
 
 Канонические blocker codes текущего шага:
@@ -81,8 +136,61 @@ any active state -> degraded -> stopped
 | `max_drawdown_reached` | Достигнут max drawdown | Risk limits |
 | `open_order_conflict` | Есть конфликт открытой заявки | Execution safety |
 | `position_limit_reached` | Достигнут лимит позиции | Position limits |
+| `short_not_allowed_by_config` | Short выключен конфигом | Short policy |
+| `short_not_allowed_by_broker` | Short запрещен аккаунтом/инструментом | Short policy |
+| `insufficient_margin` | Недостаточно маржи/обеспечения | Margin policy |
+| `max_short_exposure_reached` | Достигнут short exposure limit | Exposure limits |
+| `max_long_exposure_reached` | Достигнут long exposure limit | Exposure limits |
+| `total_costs_exceed_edge` | Полные costs выше edge | Cost model |
+| `position_side_conflict` | Конфликт стороны позиции | Position policy |
+| `position_state_stale` | Локальный снимок позиции устарел | Position reconciliation |
+| `position_reconciliation_mismatch` | Broker position не совпала с локальным snapshot | Position reconciliation |
 
 `DefaultRiskEngine` сохраняет не только финальный blocker, но и всю causal chain как `blocker_event`. Failed gates дополнительно пишутся как `risk_event`.
+
+Long-specific gates:
+
+- `long_allowed_by_config`;
+- `max_long_position`;
+- `max_gross_exposure`;
+- `max_net_exposure`;
+- `no_new_entries_during_freeze`.
+
+Short-specific gates:
+
+- `short_allowed_by_config`;
+- `short_allowed_by_account`;
+- `short_allowed_by_instrument`;
+- `margin_or_collateral_available`;
+- `no_short_during_forbidden_session_phase`;
+- `forced_cover_policy`;
+- `max_short_position`;
+- `position_side_conflict`.
+
+Position reconciliation gates:
+
+- `position_state_freshness`;
+- `position_reconciliation`.
+
+## PositionService
+
+`PositionService` refreshes account positions through `BrokerGateway.get_positions`
+and `BrokerGateway.get_portfolio`, writes normalized `position_snapshot` rows and
+builds a `PortfolioSnapshot` for `DefaultRiskEngine`.
+
+Rules:
+
+- T-Bank `instrument_uid` / ticker aliases are normalized back to project `instrument_id`
+  through the configured `InstrumentRef`;
+- micro-session open/close snapshots call `refresh_positions(account_id)`;
+- before each entry candidate becomes an `order_intent`, runtime calls
+  `validate_before_entry(...)`;
+- stale local state blocks with `position_state_stale`;
+- local/broker mismatch blocks with `position_reconciliation_mismatch`;
+- long and short lots are tracked separately as `long_position_lots` and
+  `short_position_lots`, while gross/net exposure are kept in RUB when broker data
+  contains enough price/PnL fields;
+- stream gap recovery refreshes positions after candle backfill and order reconciliation.
 
 ## Execution lifecycle
 
@@ -95,6 +203,15 @@ any active state -> degraded -> stopped
 - `replace_order` как cancel старого intent + create/post replacement intent;
 - upsert `broker_order`;
 - обновление `order_intent.status`.
+
+Launch-mode safety:
+
+- `historical_replay` и `shadow` пишут только pseudo-orders;
+- `sandbox` по умолчанию тоже пишет pseudo-orders и делает real sandbox
+  `PostOrder` только при явном `TRADING_SANDBOX_ORDERS_CONFIRM=I_UNDERSTAND_SANDBOX_ORDERS`
+  или эквивалентном `LaunchModePolicy(..., sandbox_orders_confirmed=True)`;
+- `production` требует `TRADING_PRODUCTION_CONFIRM=I_UNDERSTAND_LIVE_ORDERS`;
+- `production` не является default mode.
 
 Любая отмена обязана иметь:
 
@@ -114,7 +231,6 @@ any active state -> degraded -> stopped
 ## Точки расширения
 
 - подключить реальные strategy configs из `strategy_config`;
-- добавить portfolio/position service вместо тестового `PortfolioSnapshot`;
 - заменить stub entry/exit rules на калиброванные правила после накопления отчетов;
 - расширить execution policy для stop/stop-limit и partial fill handling;
 - добавить replay harness для детерминированной проверки стратегий на исторических данных;
@@ -129,10 +245,12 @@ any active state -> degraded -> stopped
 1. `SqlAlchemyStrategyEventStore.record_candidate()` пишет `signal_candidate` и `market_context_snapshot`.
 2. `record_blockers()` пишет `candidate_stage_result` для каждого risk gate.
 3. Для непройденных gate создается `blocker_event` с `blocker_code`, `blocker_family`, `measured_value`, `threshold_value` и `is_final_blocker`.
-4. `DefaultExecutionEngine.create_order_intent()` пишет идемпотентный `order_intent`.
-5. `post_order()` и `cancel_order()` upsert-ят `broker_order`, сохраняют `latency_ms`, `tracking_id`, rate-limit headers и пишут `order_state_event`.
-6. `DefaultReconciliationService` пишет все наблюдаемые broker state transitions в `order_state_event`.
-7. Fills пишутся в `fill_event` только из source-of-truth по собственным ордерам: broker order state/reconciliation payload. Anonymous `market_trade` tape остается рыночным контекстом, а не источником собственных исполнений.
+4. Для финального blocked candidate пишется `market_context_snapshot` с
+   `snapshot_kind=counterfactual_seed_snapshot` и горизонтами `5/10/15`.
+5. `DefaultExecutionEngine.create_order_intent()` пишет идемпотентный `order_intent`.
+6. `post_order()` и `cancel_order()` upsert-ят `broker_order`, сохраняют `latency_ms`, `tracking_id`, rate-limit headers и пишут `order_state_event`.
+7. `DefaultReconciliationService` пишет все наблюдаемые broker state transitions в `order_state_event`.
+8. Fills пишутся в `fill_event` только из source-of-truth по собственным ордерам: broker order state/reconciliation payload. Anonymous `market_trade` tape остается рыночным контекстом, а не источником собственных исполнений.
 
 Idempotency:
 

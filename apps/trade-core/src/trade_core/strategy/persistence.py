@@ -213,9 +213,7 @@ class SqlAlchemyStrategyEventStore:
                         measured_value=blocker.observed_value,
                         threshold_value=blocker.limit_value,
                         explanation_payload={
-                            "event_type": (
-                                DomainEventType.CANDIDATE_STAGE_RESULT_RECORDED.value
-                            ),
+                            "event_type": (DomainEventType.CANDIDATE_STAGE_RESULT_RECORDED.value),
                             **blocker.reason_payload,
                         },
                     )
@@ -267,9 +265,7 @@ class SqlAlchemyStrategyEventStore:
                         is_final_blocker=blocker.is_final_blocker,
                         blocker_rank=blocker.gate_rank if not blocker.passed else None,
                         market_quality_score=(
-                            market_state.market_quality_score
-                            if market_state is not None
-                            else None
+                            market_state.market_quality_score if market_state is not None else None
                         ),
                         spread_bps=market_state.spread_bps if market_state is not None else None,
                         expected_edge_bps=candidate.expected_edge_bps,
@@ -293,6 +289,16 @@ class SqlAlchemyStrategyEventStore:
                     else None,
                 },
             )
+            if blocker.is_final_blocker and self._market_contexts is not None:
+                self._market_contexts.create_idempotent(
+                    _counterfactual_seed_snapshot(
+                        candidate=candidate,
+                        blocker_code=blocker.code.value,
+                        blocker_family=_blocker_family(blocker.code.value),
+                        market_state=market_state,
+                        ts_utc=ts_utc or datetime.now(tz=UTC),
+                    )
+                )
         if decision.allowed:
             self._candidates.update_status(candidate.candidate_id, "allowed")
         else:
@@ -359,6 +365,67 @@ def decimal_or_none(value: object) -> Decimal | None:
     return Decimal(str(value))
 
 
+def _counterfactual_seed_snapshot(
+    *,
+    candidate: SignalCandidate,
+    blocker_code: str,
+    blocker_family: str,
+    market_state: MarketState | None,
+    ts_utc: datetime,
+) -> MarketContextSnapshot:
+    return MarketContextSnapshot(
+        calendar_date=candidate.calendar_date,
+        trading_date=candidate.trading_date,
+        session_type=candidate.session_type,
+        session_phase=candidate.session_phase,
+        micro_session_id=candidate.micro_session_id,
+        broker_trading_status=candidate.broker_trading_status,
+        ts_utc=ts_utc,
+        exchange_ts=None,
+        received_ts=None,
+        candidate_id=candidate.candidate_id,
+        instrument_id=candidate.instrument_id,
+        timeframe=candidate.timeframe,
+        snapshot_kind="counterfactual_seed_snapshot",
+        last_price=candidate.last_price,
+        mid_price=market_state.mid_price if market_state is not None else candidate.mid_price,
+        best_bid_price=market_state.best_bid.price
+        if market_state is not None and market_state.best_bid is not None
+        else None,
+        best_ask_price=market_state.best_ask.price
+        if market_state is not None and market_state.best_ask is not None
+        else None,
+        spread_abs=market_state.spread_abs if market_state is not None else candidate.spread_abs,
+        spread_bps=market_state.spread_bps if market_state is not None else candidate.spread_bps,
+        bid_depth_lots=market_state.bid_depth_lots if market_state is not None else None,
+        ask_depth_lots=market_state.ask_depth_lots if market_state is not None else None,
+        book_imbalance=(
+            market_state.book_imbalance if market_state is not None else candidate.book_imbalance
+        ),
+        market_quality_score=market_state.market_quality_score
+        if market_state is not None
+        else candidate.market_quality_score,
+        candle_age_ms=candidate.candle_age_ms,
+        data_freshness_ms=market_state.feed_freshness.age_ms
+        if market_state is not None
+        else candidate.data_freshness_ms,
+        feature_snapshot=market_state.as_read_model() if market_state is not None else {},
+        explanation_payload={
+            "event_type": DomainEventType.MARKET_CONTEXT_SNAPSHOT_WRITTEN.value,
+            "snapshot_kind": "counterfactual_seed_snapshot",
+            "source_event_type": "blocked_candidate",
+            "blocker_code": blocker_code,
+            "blocker_family": blocker_family,
+            "counterfactual_horizons_minutes": [5, 10, 15],
+            "candidate_side": candidate.side,
+            "signal_type": candidate.signal_type,
+            "expected_edge_bps": str(candidate.expected_edge_bps)
+            if candidate.expected_edge_bps is not None
+            else None,
+        },
+    )
+
+
 def _blocker_family(blocker_code: str) -> str:
     if blocker_code in {"spread_too_wide", "market_quality_low", "stale_market_data"}:
         return "market_quality"
@@ -368,10 +435,21 @@ def _blocker_family(blocker_code: str) -> str:
         "risk_budget_exceeded",
         "max_drawdown_reached",
         "position_limit_reached",
+        "insufficient_margin",
+        "max_short_exposure_reached",
+        "max_long_exposure_reached",
+        "position_side_conflict",
     }:
         return "risk_limits"
+    if blocker_code in {
+        "short_not_allowed_by_config",
+        "short_not_allowed_by_broker",
+    }:
+        return "short_selling_policy"
     if blocker_code in {"open_order_conflict"}:
         return "execution_safety"
+    if blocker_code in {"total_costs_exceed_edge"}:
+        return "cost_model"
     return "strategy_edge"
 
 

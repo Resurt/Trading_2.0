@@ -23,6 +23,7 @@ from trading_common.db.models import (
     BrokerOrder,
     CandidateStageResult,
     OrderIntent,
+    PositionSnapshot,
     RobotCommand,
     SignalCandidate,
 )
@@ -118,6 +119,17 @@ def test_runtime_micro_session_rollover_requests_report(tmp_path: Path) -> None:
     assert runtime.stats.report_requests[0]["reason_code"] == "hourly_rollover"
     assert runtime.current_snapshot is not None
     assert runtime.current_snapshot.micro_session_id == "2026-06-12:weekday_main:20260612T1100"
+    with runtime.database.session_factory() as session:
+        snapshots = list(
+            session.execute(
+                select(PositionSnapshot).order_by(PositionSnapshot.snapshot_ts)
+            ).scalars()
+        )
+        assert len(snapshots) >= 2
+        assert {snapshot.snapshot_reason for snapshot in snapshots} >= {
+            "micro_session_session_run_opened",
+            "micro_session_snapshot_taken",
+        }
     asyncio.run(runtime.shutdown())
 
 
@@ -156,7 +168,22 @@ def test_closed_bar_candidate_risk_order_path_is_deterministic(tmp_path: Path) -
 
     with runtime.database.session_factory() as session:
         assert session.scalar(select(func.count()).select_from(SignalCandidate)) == 1
-        assert session.scalar(select(func.count()).select_from(CandidateStageResult)) == 9
+        stage_names = list(
+            session.execute(
+                select(CandidateStageResult.stage_name).order_by(
+                    CandidateStageResult.stage_seq
+                )
+            ).scalars()
+        )
+        assert len(stage_names) == 18
+        assert {
+            "position_state_freshness",
+            "position_reconciliation",
+            "long_allowed_by_config",
+            "total_expected_costs",
+            "max_gross_exposure",
+            "max_net_exposure",
+        } <= set(stage_names)
         assert session.scalar(select(func.count()).select_from(BlockerEvent)) == 0
         intent = session.execute(select(OrderIntent)).scalar_one()
         broker_order = session.execute(select(BrokerOrder)).scalar_one()

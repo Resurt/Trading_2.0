@@ -24,6 +24,15 @@ $env:TBANK_ENVIRONMENT = "live"
 - Report worker is running and can build hourly/daily reports without FastAPI BackgroundTasks.
 - `TRADING_RUNTIME_MODE=production` is visible in service health/log context.
 - Risk limits and max position limits are reviewed for the session template.
+- `allow_long`, `allow_short`, `max_long_lots`, `max_short_lots`,
+  `max_gross_exposure_rub` and `max_net_exposure_rub` are reviewed per
+  instrument/timeframe override.
+- Short selling is enabled only if broker/account/instrument availability and
+  margin/collateral are explicitly confirmed.
+- Cost assumptions are reviewed: commission not lower than `5 bps` per side,
+  spread included from market state, slippage assumption set.
+- `min_edge_after_total_costs_bps` is non-negative and documented for the
+  active strategy version.
 - Session manager shows the correct `session_type`, `session_phase`, `trading_date`, `calendar_date`.
 - Alerts for stream freshness, rejected orders, report backlog and health are active.
 - Operator stop path through `POST /robot/stop` is tested.

@@ -10,6 +10,11 @@ Run on live market data without real order submission. Shadow mode must write th
 - Strategy and risk logic run normally.
 - Execution creates pseudo-orders only.
 - No real `PostOrder` call is made.
+- Long/short gates run normally: `allow_short=false` blocks short candidates
+  with `short_not_allowed_by_config`, while long candidates still pass through
+  cost/exposure/session gates.
+- Cost gate uses commission not lower than `5 bps` per side, plus spread and
+  slippage assumptions.
 - Reports and counterfactual analysis run as in production.
 
 ## Validation Checklist
@@ -17,6 +22,8 @@ Run on live market data without real order submission. Shadow mode must write th
 - Live dashboard shows market state.
 - Candidate funnel is populated.
 - Blocker reasons are structured.
+- Blocked opportunities have both `signal_candidate_created` market snapshot
+  and `counterfactual_seed_snapshot`.
 - Pseudo-order lifecycle is visible.
 - Hourly and daily reports can be built.
 - Counterfactual windows are populated after enough market data exists.

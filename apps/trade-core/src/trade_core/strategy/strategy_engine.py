@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from decimal import Decimal
 
 from trade_core.market_data import Bar, Timeframe
@@ -49,7 +50,7 @@ class ConfigDrivenStrategyEngine:
         candidates: list[SignalCandidateDecision] = []
         missing_timeframes: list[str] = []
         for timeframe, rule in sorted(
-            template.rules_by_timeframe.items(),
+            self._rules_for_context(context, template.rules_by_timeframe).items(),
             key=lambda item: item[0].minutes,
         ):
             if timeframe not in SUPPORTED_SIGNAL_TIMEFRAMES or not rule.enabled:
@@ -77,8 +78,27 @@ class ConfigDrivenStrategyEngine:
             next_state=next_state,
             candidates=tuple(candidates),
             reason_code=reason_code,
-            decision_payload={"missing_timeframes": missing_timeframes},
+            decision_payload={
+                "missing_timeframes": missing_timeframes,
+                "session_template": template.session_template
+                or context.session_snapshot.session_type.value,
+                "allow_long": self._config.allow_long,
+                "allow_short": self._config.allow_short,
+            },
         )
+
+    def _rules_for_context(
+        self,
+        context: StrategyEvaluationContext,
+        base_rules: Mapping[Timeframe, TimeframeStrategyRule],
+    ) -> dict[Timeframe, TimeframeStrategyRule]:
+        rules = dict(base_rules)
+        overrides = self._config.instrument_timeframe_overrides.get(
+            context.instrument.instrument_id,
+            {},
+        )
+        rules.update(overrides)
+        return rules
 
     def _evaluate_rule(
         self,
@@ -128,7 +148,11 @@ class ConfigDrivenStrategyEngine:
             lot_qty=rule.lot_qty,
             intended_price=intended_price,
             time_in_force=rule.time_in_force,
-            expected_edge_bps=max(abs_move_bps, rule.min_expected_edge_bps),
+            expected_edge_bps=max(
+                abs_move_bps,
+                rule.min_expected_edge_bps,
+                self._config.min_expected_edge_bps,
+            ),
             expected_holding_minutes=rule.expected_holding_minutes,
             signal_fingerprint=fingerprint,
             condition_payload={
@@ -139,6 +163,14 @@ class ConfigDrivenStrategyEngine:
                 "bar_close_price": str(bar.close_price),
                 "move_bps": str(move_bps.quantize(Decimal("0.0001"))),
                 "min_move_bps": str(rule.min_move_bps),
+                "strategy_min_expected_edge_bps": str(self._config.min_expected_edge_bps),
+                "assumed_commission_bps_per_side": str(
+                    self._config.assumed_commission_bps_per_side
+                ),
+                "assumed_slippage_bps": str(self._config.assumed_slippage_bps),
+                "min_edge_after_total_costs_bps": str(self._config.min_edge_after_total_costs_bps),
+                "allow_long": self._config.allow_long,
+                "allow_short": self._config.allow_short,
                 "uses_closed_bar": bar.is_closed,
             },
         )

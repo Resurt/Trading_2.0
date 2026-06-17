@@ -18,7 +18,10 @@ PROMETHEUS_METRIC_NAMES: tuple[str, ...] = (
     "candle_close_delivery_lag_seconds",
     "session_rollover_duration_seconds",
     "report_generation_duration_seconds",
+    "gap_recovery_duration_seconds",
     "stream_reconnect_total",
+    "recovered_candles_total",
+    "reconciliation_mismatch_total",
     "rejected_orders_total",
     "risk_events_total",
     "counterfactual_jobs_total",
@@ -104,10 +107,29 @@ class TradingMetrics:
             buckets=(0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 15.0, 30.0, 60.0, 120.0, 300.0),
             registry=self.registry,
         )
+        self.gap_recovery_duration_seconds = Histogram(
+            "gap_recovery_duration_seconds",
+            "Duration of stream gap recovery attempts.",
+            ("service", "stream_type", "status"),
+            buckets=LATENCY_BUCKETS,
+            registry=self.registry,
+        )
         self.stream_reconnect_total = Counter(
             "stream_reconnect_total",
             "Reconnect attempts by stream type.",
             ("service", "stream_type", "result"),
+            registry=self.registry,
+        )
+        self.recovered_candles_total = Counter(
+            "recovered_candles_total",
+            "Closed candles recovered by gap backfill.",
+            ("service", "instrument", "timeframe", "status"),
+            registry=self.registry,
+        )
+        self.reconciliation_mismatch_total = Counter(
+            "reconciliation_mismatch_total",
+            "Detected reconciliation mismatches by bounded result code.",
+            ("service", "result"),
             registry=self.registry,
         )
         self.rejected_orders_total = Counter(
@@ -236,12 +258,42 @@ class TradingMetrics:
             status=status,
         ).observe(seconds)
 
+    def observe_gap_recovery_duration(
+        self,
+        seconds: float,
+        *,
+        stream_type: str,
+        status: str = "success",
+    ) -> None:
+        self.gap_recovery_duration_seconds.labels(
+            **self._base_labels,
+            stream_type=stream_type,
+            status=status,
+        ).observe(seconds)
+
     def inc_stream_reconnect(self, *, stream_type: str, result: str = "attempt") -> None:
         self.stream_reconnect_total.labels(
             **self._base_labels,
             stream_type=stream_type,
             result=result,
         ).inc()
+
+    def inc_recovered_candle(
+        self,
+        *,
+        instrument: str,
+        timeframe: str,
+        status: str = "success",
+    ) -> None:
+        self.recovered_candles_total.labels(
+            **self._base_labels,
+            instrument=instrument,
+            timeframe=timeframe,
+            status=status,
+        ).inc()
+
+    def inc_reconciliation_mismatch(self, *, result: str = "unknown") -> None:
+        self.reconciliation_mismatch_total.labels(**self._base_labels, result=result).inc()
 
     def inc_reconnect(self, *, stream_name: str) -> None:
         """Backward-compatible alias for the previous ``reconnect_total`` helper."""
@@ -358,10 +410,25 @@ class TradingMetrics:
             status="success",
         )
         self.report_generation_duration_seconds.labels(**self._base_labels, status="success")
+        self.gap_recovery_duration_seconds.labels(
+            **self._base_labels,
+            stream_type="market_data",
+            status="success",
+        )
         self.stream_reconnect_total.labels(
             **self._base_labels,
             stream_type="market_data",
             result="attempt",
+        ).inc(0)
+        self.recovered_candles_total.labels(
+            **self._base_labels,
+            instrument="all",
+            timeframe="all",
+            status="success",
+        ).inc(0)
+        self.reconciliation_mismatch_total.labels(
+            **self._base_labels,
+            result="unknown",
         ).inc(0)
         self.rejected_orders_total.labels(**self._base_labels, status="unknown").inc(0)
         self.risk_events_total.labels(**self._base_labels, result="unknown").inc(0)

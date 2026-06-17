@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import os
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
 from trade_core.broker_gateway import (
+    AccountsRequest,
     BrokerUnaryResponse,
     CancelOrderRequest,
     CandleRequest,
@@ -19,6 +20,8 @@ from trade_core.broker_gateway import (
     OrderPlacementRequest,
     OrdersRequest,
     OrderStateRequest,
+    PortfolioRequest,
+    PositionsRequest,
     RequestMetadata,
     StopOrderPlacementRequest,
     StreamEvent,
@@ -39,6 +42,7 @@ from trading_common.observability import DomainEventType
 from trading_common.telemetry import get_logger, log_event
 
 JsonPayload = dict[str, Any]
+StreamGapRecoveryHook = Callable[[str, str | None], Awaitable[None]]
 LOGGER = get_logger(__name__)
 DEFAULT_GAP_RECOVERY_INSTRUMENTS_ENV = "TBANK_STREAM_INSTRUMENT_IDS"
 GAP_RECOVERY_TIMEFRAMES_ENV = "TBANK_GAP_RECOVERY_TIMEFRAMES"
@@ -72,6 +76,12 @@ class TBankBrokerGateway:
             backoff=self._backoff,
             ping_timeout_seconds=self.config.stream_ping_timeout_seconds,
         )
+        self._gap_recovery_hook: StreamGapRecoveryHook | None = None
+
+    def set_stream_gap_recovery_hook(self, hook: StreamGapRecoveryHook | None) -> None:
+        """Delegate stream gap recovery to trade-core runtime when it is available."""
+
+        self._gap_recovery_hook = hook
 
     async def trading_schedules(
         self,
@@ -233,9 +243,39 @@ class TBankBrokerGateway:
     ) -> BrokerUnaryResponse:
         return await self.get_orders(request, metadata)
 
+    async def get_portfolio(
+        self,
+        request: PortfolioRequest,
+        metadata: RequestMetadata | None = None,
+    ) -> BrokerUnaryResponse:
+        return await self._call_readonly(
+            "GetPortfolio",
+            {"account_id": request.account_id},
+            metadata,
+        )
+
+    async def get_positions(
+        self,
+        request: PositionsRequest,
+        metadata: RequestMetadata | None = None,
+    ) -> BrokerUnaryResponse:
+        return await self._call_readonly(
+            "GetPositions",
+            {"account_id": request.account_id},
+            metadata,
+        )
+
+    async def get_accounts(
+        self,
+        request: AccountsRequest,
+        metadata: RequestMetadata | None = None,
+    ) -> BrokerUnaryResponse:
+        del request
+        return await self._call_readonly("GetAccounts", {}, metadata)
+
     def stream_market_data(self, stream_name: str) -> AsyncIterator[StreamEvent]:
         async def recover_gap(name: str) -> None:
-            await self.recover_after_stream_gap(name)
+            await self._recover_stream_gap(name)
 
         return self._stream_supervisor.run(
             stream_name=stream_name,
@@ -247,13 +287,23 @@ class TBankBrokerGateway:
         stream_name = "OrderStateStream"
 
         async def recover_gap(name: str) -> None:
-            await self.recover_after_stream_gap(name, account_id=account_id)
+            await self._recover_stream_gap(name, account_id=account_id)
 
         return self._stream_supervisor.run(
             stream_name=stream_name,
             stream_factory=lambda: self._open_order_stream(account_id),
             gap_recovery_hook=recover_gap,
         )
+
+    async def _recover_stream_gap(
+        self,
+        stream_name: str,
+        account_id: str | None = None,
+    ) -> None:
+        if self._gap_recovery_hook is not None:
+            await self._gap_recovery_hook(stream_name, account_id)
+            return
+        await self.recover_after_stream_gap(stream_name, account_id=account_id)
 
     async def recover_after_stream_gap(
         self,

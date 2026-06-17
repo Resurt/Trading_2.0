@@ -17,6 +17,9 @@
 - `cancel_order`
 - `get_order_state`
 - `get_orders`
+- `get_portfolio`
+- `get_positions`
+- `get_accounts`
 - `post_stop_order`
 - `reconcile_order_state`
 - `reconcile_open_orders`
@@ -83,6 +86,9 @@ Per-method deadlines зафиксированы по официальной та
 | `CancelOrder` | 1500 ms |
 | `GetOrderState` | 300 ms |
 | `GetOrders` | 500 ms |
+| `GetPortfolio` | 500 ms |
+| `GetPositions` | 500 ms |
+| `GetAccounts` | 500 ms |
 | `PostStopOrder` | 1500 ms |
 
 Источник: `https://developer.tbank.ru/invest/intro/developer/deadlines`.
@@ -171,3 +177,14 @@ Recovery best-effort: ошибка backfill/refresh логируется как 
 Contract coverage для SDK wrapper находится в `tests/test_tbank_sdk_clients.py`: тесты используют
 fake SDK без сети и проверяют unary payload shapes, stream subscription shapes, `waiting_close=True`,
 UUID `request_order_id`, headers, order lifecycle и machine-readable error mapping.
+
+## Portfolio / positions
+
+Portfolio and position state is part of the same `BrokerGateway` boundary. `trade-core`
+uses SDK-neutral `get_portfolio`, `get_positions` and `get_accounts` for account
+validation, `position_snapshot` writes and pre-entry reconciliation.
+
+The concrete SDK wrapper maps T-Bank `instrument_uid`, `figi` and ticker payloads
+into plain dictionaries. Upper layers normalize those broker aliases back to the
+project `instrument_id` through `InstrumentRef`; SDK/protobuf objects must not leak
+into strategy, risk, execution or reporting code.

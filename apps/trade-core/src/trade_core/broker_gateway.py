@@ -106,6 +106,21 @@ class OrdersRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class PortfolioRequest:
+    account_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class PositionsRequest:
+    account_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class AccountsRequest:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
 class StopOrderPlacementRequest:
     account_id: str
     instrument: InstrumentRef
@@ -204,6 +219,24 @@ class BrokerGateway(Protocol):
     async def reconcile_open_orders(
         self,
         request: OrdersRequest,
+        metadata: RequestMetadata | None = None,
+    ) -> BrokerUnaryResponse: ...
+
+    async def get_portfolio(
+        self,
+        request: PortfolioRequest,
+        metadata: RequestMetadata | None = None,
+    ) -> BrokerUnaryResponse: ...
+
+    async def get_positions(
+        self,
+        request: PositionsRequest,
+        metadata: RequestMetadata | None = None,
+    ) -> BrokerUnaryResponse: ...
+
+    async def get_accounts(
+        self,
+        request: AccountsRequest,
         metadata: RequestMetadata | None = None,
     ) -> BrokerUnaryResponse: ...
 

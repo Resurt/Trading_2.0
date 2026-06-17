@@ -65,6 +65,15 @@ class BlockerCode(StrEnum):
     MAX_DRAWDOWN_REACHED = "max_drawdown_reached"
     OPEN_ORDER_CONFLICT = "open_order_conflict"
     POSITION_LIMIT_REACHED = "position_limit_reached"
+    SHORT_NOT_ALLOWED_BY_CONFIG = "short_not_allowed_by_config"
+    SHORT_NOT_ALLOWED_BY_BROKER = "short_not_allowed_by_broker"
+    INSUFFICIENT_MARGIN = "insufficient_margin"
+    MAX_SHORT_EXPOSURE_REACHED = "max_short_exposure_reached"
+    MAX_LONG_EXPOSURE_REACHED = "max_long_exposure_reached"
+    TOTAL_COSTS_EXCEED_EDGE = "total_costs_exceed_edge"
+    POSITION_SIDE_CONFLICT = "position_side_conflict"
+    POSITION_STATE_STALE = "position_state_stale"
+    POSITION_RECONCILIATION_MISMATCH = "position_reconciliation_mismatch"
 
 
 class CancelReasonCode(StrEnum):
@@ -107,6 +116,7 @@ class SessionStrategyTemplate:
     session_type: SessionType
     enabled: bool
     rules_by_timeframe: Mapping[Timeframe, TimeframeStrategyRule]
+    session_template: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +126,21 @@ class ConfigDrivenStrategyConfig:
     strategy_id: str
     strategy_version: int
     session_templates: Mapping[SessionType, SessionStrategyTemplate]
+    allow_long: bool = True
+    allow_short: bool = False
+    max_long_lots: int = 10
+    max_short_lots: int = 0
+    max_gross_exposure_rub: Decimal = Decimal("100000")
+    max_net_exposure_rub: Decimal = Decimal("100000")
+    min_expected_edge_bps: Decimal = Decimal("0")
+    assumed_commission_bps_per_side: Decimal = Decimal("5")
+    assumed_slippage_bps: Decimal = Decimal("0")
+    min_edge_after_total_costs_bps: Decimal = Decimal("0")
+    session_template: str = "default"
+    instrument_timeframe_overrides: Mapping[
+        str,
+        Mapping[Timeframe, TimeframeStrategyRule],
+    ] = field(default_factory=dict)
 
     @classmethod
     def conservative_default(cls) -> ConfigDrivenStrategyConfig:
@@ -152,21 +177,25 @@ class ConfigDrivenStrategyConfig:
                     session_type=SessionType.WEEKDAY_MORNING,
                     enabled=True,
                     rules_by_timeframe=rules,
+                    session_template=SessionType.WEEKDAY_MORNING.value,
                 ),
                 SessionType.WEEKDAY_MAIN: SessionStrategyTemplate(
                     session_type=SessionType.WEEKDAY_MAIN,
                     enabled=True,
                     rules_by_timeframe=rules,
+                    session_template=SessionType.WEEKDAY_MAIN.value,
                 ),
                 SessionType.WEEKDAY_EVENING: SessionStrategyTemplate(
                     session_type=SessionType.WEEKDAY_EVENING,
                     enabled=True,
                     rules_by_timeframe=rules,
+                    session_template=SessionType.WEEKDAY_EVENING.value,
                 ),
                 SessionType.WEEKEND: SessionStrategyTemplate(
                     session_type=SessionType.WEEKEND,
                     enabled=False,
                     rules_by_timeframe=rules,
+                    session_template=SessionType.WEEKEND.value,
                 ),
             },
         )
@@ -215,21 +244,64 @@ class StrategyDecision:
 
 @dataclass(frozen=True, slots=True)
 class RiskLimits:
+    allow_long: bool = True
+    allow_short: bool = False
+    max_long_lots: int = 10
+    max_short_lots: int = 0
+    max_gross_exposure_rub: Decimal = Decimal("100000")
+    max_net_exposure_rub: Decimal = Decimal("100000")
+    min_expected_edge_bps: Decimal = Decimal("0")
+    assumed_commission_bps_per_side: Decimal = Decimal("5")
+    assumed_slippage_bps: Decimal = Decimal("0")
+    min_edge_after_total_costs_bps: Decimal = Decimal("0")
     max_spread_bps: Decimal = Decimal("20")
     min_market_quality_score: Decimal = Decimal("0.70")
     max_data_age_ms: int = 5_000
     min_edge_after_costs_bps: Decimal = Decimal("0")
-    assumed_cost_bps: Decimal = Decimal("4")
+    assumed_cost_bps: Decimal = Decimal("0")
     risk_budget_remaining_rub: Decimal = Decimal("100000")
     max_daily_loss_rub: Decimal = Decimal("10000")
     current_daily_pnl_rub: Decimal = Decimal("0")
     max_position_lots: int = 10
+    short_allowed_by_account: bool = True
+    short_allowed_by_instrument: bool = True
+    margin_or_collateral_available: bool = True
+    forced_cover_policy: bool = False
+    freeze_new_entries: bool = False
+
+    @classmethod
+    def from_strategy_config(cls, config: ConfigDrivenStrategyConfig) -> RiskLimits:
+        """Derive production-safe defaults from the versioned strategy config."""
+
+        return cls(
+            allow_long=config.allow_long,
+            allow_short=config.allow_short,
+            max_long_lots=config.max_long_lots,
+            max_short_lots=config.max_short_lots,
+            max_gross_exposure_rub=config.max_gross_exposure_rub,
+            max_net_exposure_rub=config.max_net_exposure_rub,
+            min_expected_edge_bps=config.min_expected_edge_bps,
+            assumed_commission_bps_per_side=config.assumed_commission_bps_per_side,
+            assumed_slippage_bps=config.assumed_slippage_bps,
+            min_edge_after_total_costs_bps=config.min_edge_after_total_costs_bps,
+            max_position_lots=max(config.max_long_lots, config.max_short_lots),
+        )
 
 
 @dataclass(frozen=True, slots=True)
 class PortfolioSnapshot:
     open_position_lots: int = 0
     open_order_count: int = 0
+    long_position_lots: int = 0
+    short_position_lots: int = 0
+    gross_exposure_rub: Decimal = Decimal("0")
+    net_exposure_rub: Decimal = Decimal("0")
+    position_state_fresh: bool = True
+    position_reconciliation_matched: bool = True
+    position_state_age_ms: int | None = None
+    local_position_lots: int | None = None
+    broker_position_lots: int | None = None
+    position_reason_code: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

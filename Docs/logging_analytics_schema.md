@@ -32,7 +32,7 @@ flowchart LR
 | --- | --- |
 | `session_run` | Существующий логический запуск торговой сессии/подсессии без рестарта `trade-core`. |
 | `micro_session` | Отдельная hourly micro-session как аналитический объект: статус, freeze/close time, snapshot rollover. |
-| `market_context_snapshot` | Feature snapshot рынка около кандидата, блокера или отчета: цены, spread, depth, imbalance, freshness. |
+| `market_context_snapshot` | Feature snapshot рынка около кандидата, блокера или отчета: цены, spread, depth, imbalance, freshness. Для blocked opportunity дополнительно пишется `snapshot_kind=counterfactual_seed_snapshot`. |
 | `signal_candidate` | Потенциальная сделка до прохождения risk/execution gates. |
 | `candidate_stage_result` | Decision journal по стадиям кандидата: `stage_seq`, `stage_name`, `stage_outcome`, метрики и пороги. |
 | `blocker_event` | Итоговые и промежуточные блокеры с `blocker_code`, `blocker_family`, measured/threshold values. |

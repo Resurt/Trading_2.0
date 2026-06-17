@@ -286,6 +286,83 @@ class FakeOrdersService:
         )
 
 
+class FakeOperationsService:
+    def __init__(self) -> None:
+        self.get_portfolio_kwargs: dict[str, object] | None = None
+        self.get_positions_kwargs: dict[str, object] | None = None
+
+    def get_portfolio(self, **kwargs: object) -> Box:
+        self.get_portfolio_kwargs = dict(kwargs)
+        return Box(
+            total_amount_portfolio=Box(units=30_000, nano=0),
+            expected_yield=Box(units=125, nano=500_000_000),
+            total_amount_shares=Box(units=30_000, nano=0),
+            total_amount_bonds=Box(units=0, nano=0),
+            total_amount_etf=Box(units=0, nano=0),
+            total_amount_currencies=Box(units=0, nano=0),
+            total_amount_futures=Box(units=0, nano=0),
+            available_margin=Box(units=10_000, nano=0),
+            positions=[
+                Box(
+                    figi="figi-sber",
+                    instrument_uid="uid-sber",
+                    position_uid="position-sber",
+                    instrument_type="share",
+                    quantity_lots=Box(units=10, nano=0),
+                    quantity=Box(units=10, nano=0),
+                    average_position_price=Box(units=299, nano=500_000_000),
+                    current_price=Box(units=300, nano=0),
+                    expected_yield=Box(units=5, nano=0),
+                    blocked_lots=Box(units=0, nano=0),
+                    short_enabled_flag=True,
+                )
+            ],
+        )
+
+    def get_positions(self, **kwargs: object) -> Box:
+        self.get_positions_kwargs = dict(kwargs)
+        return Box(
+            securities=[
+                Box(
+                    figi="figi-sber",
+                    instrument_uid="uid-sber",
+                    position_uid="position-sber",
+                    instrument_type="share",
+                    balance=10,
+                    blocked=0,
+                    exchange_blocked=False,
+                    short_enabled_flag=True,
+                )
+            ],
+            futures=[],
+            options=[],
+            money=[],
+            blocked=[],
+            limits_loading_in_progress=False,
+        )
+
+
+class FakeUsersService:
+    def __init__(self) -> None:
+        self.get_accounts_called = False
+
+    def get_accounts(self) -> Box:
+        self.get_accounts_called = True
+        return Box(
+            accounts=[
+                Box(
+                    id="account-1",
+                    name="Sandbox",
+                    type="broker",
+                    status="open",
+                    access_level="full_access",
+                    opened_date=datetime(2026, 1, 1, tzinfo=UTC),
+                    closed_date=None,
+                )
+            ]
+        )
+
+
 class FakeStopOrdersService:
     def __init__(self) -> None:
         self.post_stop_order_kwargs: dict[str, object] | None = None
@@ -413,6 +490,8 @@ class FakeServices:
         self.instruments = FakeInstrumentsService()
         self.market_data = FakeMarketDataService()
         self.orders = FakeOrdersService(raise_on_post=raise_on_post)
+        self.operations = FakeOperationsService()
+        self.users = FakeUsersService()
         self.stop_orders = FakeStopOrdersService()
         self.market_data_stream = FakeMarketDataStreamService()
         self.orders_stream = FakeOrdersStreamService()
@@ -669,6 +748,52 @@ def test_sdk_unary_maps_market_payload_shapes() -> None:
     )
     assert order_book.data["bids"][0]["price"] == "300"
     assert order_book.data["asks"][0]["quantity_lots"] == "8"
+
+
+def test_sdk_unary_maps_portfolio_positions_and_accounts_payload_shapes() -> None:
+    services = FakeServices()
+    client = TBankSdkUnaryClient(
+        config=config(),
+        sdk_module=fake_sdk(),
+        services_factory=services_factory(services),
+    )
+    metadata = auth_metadata("readonly-token-for-tests", "Resurt.Trading_2_0")
+
+    portfolio = asyncio.run(
+        client.call_unary(
+            "GetPortfolio",
+            {"account_id": "account-1"},
+            metadata=metadata,
+            timeout_seconds=1.0,
+        )
+    )
+    positions = asyncio.run(
+        client.call_unary(
+            "GetPositions",
+            {"account_id": "account-1"},
+            metadata=metadata,
+            timeout_seconds=1.0,
+        )
+    )
+    accounts = asyncio.run(
+        client.call_unary(
+            "GetAccounts",
+            {},
+            metadata=metadata,
+            timeout_seconds=1.0,
+        )
+    )
+
+    assert services.operations.get_portfolio_kwargs == {"account_id": "account-1"}
+    assert services.operations.get_positions_kwargs == {"account_id": "account-1"}
+    assert services.users.get_accounts_called is True
+    assert portfolio.data["total_amount_portfolio"] == "30000"
+    assert portfolio.data["positions"][0]["instrument_id"] == "uid-sber"
+    assert portfolio.data["positions"][0]["position_side"] == "long"
+    assert portfolio.data["positions"][0]["exposure"] == "3000"
+    assert positions.data["positions"][0]["qty_lots"] == "10"
+    assert positions.data["positions"][0]["short_available"] is True
+    assert accounts.data["accounts"][0]["account_id"] == "account-1"
 
 
 def test_sdk_unary_maps_order_lifecycle_payload_shapes() -> None:

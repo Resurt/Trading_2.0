@@ -7,7 +7,7 @@
 | Mode | Market data | Execution | Broker target | Для чего |
 | --- | --- | --- | --- | --- |
 | `historical_replay` | исторические candles/events | pseudo-orders, без broker calls | `none` | детерминированная проверка rollovers, blockers, reports и counterfactual |
-| `sandbox` | T-Bank sandbox | реальные sandbox orders | `sandbox-invest-public-api.tbank.ru:443` | smoke broker adapter и инфраструктуры без реальных денег |
+| `sandbox` | T-Bank sandbox | pseudo-orders по умолчанию; реальные sandbox orders только по явному подтверждению | `sandbox-invest-public-api.tbank.ru:443` | smoke broker adapter и инфраструктуры без реальных денег |
 | `shadow` | live market data | pseudo-orders, без `PostOrder`/`CancelOrder` | live readonly stream/unary | проверка сигналов, risk gates, analytics spine и dashboard на реальном рынке |
 | `production` | live market data | real broker orders | `invest-public-api.tbank.ru:443` | live trading после checklist |
 
@@ -30,6 +30,8 @@ TRADING_PRODUCTION_CONFIRM=I_UNDERSTAND_LIVE_ORDERS
 - Pseudo-order пишет `broker_order` со статусом `pseudo_posted`, `real_broker_call=false` и `reason_code`.
 - Cancel в pseudo mode пишет `cancel_reason_code`, `cancel_payload` и не вызывает `BrokerGateway.cancel_order()`.
 - `sandbox` разрешает broker calls только через sandbox config.
+- `sandbox` не отправляет real sandbox orders по умолчанию:
+  нужен `TRADING_SANDBOX_ORDERS_CONFIRM=I_UNDERSTAND_SANDBOX_ORDERS`.
 - `production` разрешает broker calls только после явного подтверждения и production checklist.
 
 ## Control plane
@@ -91,6 +93,10 @@ python -m pip install -e ".[tbank]" --extra-index-url https://opensource.tbank.r
 python scripts/run_sandbox_smoke.py
 python scripts/run_sandbox_smoke.py --allow-sandbox-orders --account-id "<sandbox-account>" --instrument-id "MOEX:SBER" --price 300.10
 ```
+
+`--allow-sandbox-orders` создает `LaunchModePolicy` с
+`sandbox_orders_confirmed=true`. Без этого даже sandbox execution layer обязан
+писать `order_submission_mode=sandbox_pseudo_order` и не вызывать `PostOrder`.
 
 Sandbox results нельзя использовать как прямую оценку real execution quality. Это проверка инфраструктуры и adapter lifecycle.
 

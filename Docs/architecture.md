@@ -297,7 +297,9 @@ Controlled launch policy:
 - default mode is `historical_replay`;
 - `production` requires `TRADING_PRODUCTION_CONFIRM=I_UNDERSTAND_LIVE_ORDERS`;
 - `historical_replay` and `shadow` must not call real `PostOrder` or `CancelOrder`;
-- `sandbox` may call broker methods only against sandbox target;
+- `sandbox` may call readonly broker methods against sandbox target, but real
+  sandbox `PostOrder`/`CancelOrder` requires explicit
+  `TRADING_SANDBOX_ORDERS_CONFIRM=I_UNDERSTAND_SANDBOX_ORDERS`;
 - `production` is enabled only after the final live checklist in `Docs/runbooks/production-checklist.md`.
 
 ## Секреты

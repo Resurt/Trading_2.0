@@ -11,6 +11,8 @@ from trading_common.enums import RuntimeMode
 TRADING_RUNTIME_MODE_ENV = "TRADING_RUNTIME_MODE"
 PRODUCTION_CONFIRM_ENV = "TRADING_PRODUCTION_CONFIRM"
 PRODUCTION_CONFIRM_VALUE = "I_UNDERSTAND_LIVE_ORDERS"
+SANDBOX_ORDERS_CONFIRM_ENV = "TRADING_SANDBOX_ORDERS_CONFIRM"
+SANDBOX_ORDERS_CONFIRM_VALUE = "I_UNDERSTAND_SANDBOX_ORDERS"
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +29,7 @@ class LaunchModePolicy:
     requires_full_access_token: bool
     requires_readonly_token: bool
     production_confirmed: bool = False
+    sandbox_orders_confirmed: bool = False
 
     @classmethod
     def from_mode(
@@ -34,6 +37,7 @@ class LaunchModePolicy:
         mode: RuntimeMode,
         *,
         production_confirmed: bool = False,
+        sandbox_orders_confirmed: bool = False,
     ) -> LaunchModePolicy:
         """Build a policy for a known mode without reading process env."""
 
@@ -49,19 +53,21 @@ class LaunchModePolicy:
                 requires_full_access_token=False,
                 requires_readonly_token=False,
                 production_confirmed=False,
+                sandbox_orders_confirmed=False,
             )
         if mode is RuntimeMode.SANDBOX:
             return cls(
                 mode=mode,
                 broker_environment="sandbox",
                 market_data_source="tbank_sandbox",
-                allows_real_orders=True,
-                uses_pseudo_orders=False,
+                allows_real_orders=sandbox_orders_confirmed,
+                uses_pseudo_orders=not sandbox_orders_confirmed,
                 writes_domain_events=True,
                 writes_reports=True,
                 requires_full_access_token=True,
                 requires_readonly_token=True,
                 production_confirmed=False,
+                sandbox_orders_confirmed=sandbox_orders_confirmed,
             )
         if mode is RuntimeMode.SHADOW:
             return cls(
@@ -75,6 +81,7 @@ class LaunchModePolicy:
                 requires_full_access_token=False,
                 requires_readonly_token=True,
                 production_confirmed=False,
+                sandbox_orders_confirmed=False,
             )
         return cls(
             mode=mode,
@@ -87,6 +94,7 @@ class LaunchModePolicy:
             requires_full_access_token=True,
             requires_readonly_token=True,
             production_confirmed=production_confirmed,
+            sandbox_orders_confirmed=False,
         )
 
     @classmethod
@@ -99,7 +107,14 @@ class LaunchModePolicy:
         env = environ if environ is not None else os.environ
         mode = parse_runtime_mode(env.get(TRADING_RUNTIME_MODE_ENV))
         production_confirmed = env.get(PRODUCTION_CONFIRM_ENV) == PRODUCTION_CONFIRM_VALUE
-        policy = cls.from_mode(mode, production_confirmed=production_confirmed)
+        sandbox_orders_confirmed = (
+            env.get(SANDBOX_ORDERS_CONFIRM_ENV) == SANDBOX_ORDERS_CONFIRM_VALUE
+        )
+        policy = cls.from_mode(
+            mode,
+            production_confirmed=production_confirmed,
+            sandbox_orders_confirmed=sandbox_orders_confirmed,
+        )
         policy.validate_startup()
         return policy
 
@@ -109,6 +124,8 @@ class LaunchModePolicy:
             return "broker"
         if self.mode is RuntimeMode.HISTORICAL_REPLAY:
             return "replay_pseudo_order"
+        if self.mode is RuntimeMode.SANDBOX:
+            return "sandbox_pseudo_order"
         return "shadow_pseudo_order"
 
     @property
@@ -117,16 +134,15 @@ class LaunchModePolicy:
             return None
         if self.mode is RuntimeMode.HISTORICAL_REPLAY:
             return "historical_replay_no_broker_orders"
+        if self.mode is RuntimeMode.SANDBOX:
+            return "sandbox_orders_not_confirmed"
         return "shadow_mode_no_broker_orders"
 
     def validate_startup(self) -> None:
         """Raise before startup if a dangerous mode is not explicitly confirmed."""
 
         if self.mode is RuntimeMode.PRODUCTION and not self.production_confirmed:
-            msg = (
-                "production mode requires "
-                f"{PRODUCTION_CONFIRM_ENV}={PRODUCTION_CONFIRM_VALUE}"
-            )
+            msg = f"production mode requires {PRODUCTION_CONFIRM_ENV}={PRODUCTION_CONFIRM_VALUE}"
             raise RuntimeError(msg)
 
     def assert_real_orders_allowed(self) -> None:
@@ -152,6 +168,8 @@ class LaunchModePolicy:
             "writes_reports": self.writes_reports,
             "requires_full_access_token": self.requires_full_access_token,
             "requires_readonly_token": self.requires_readonly_token,
+            "production_confirmed": self.production_confirmed,
+            "sandbox_orders_confirmed": self.sandbox_orders_confirmed,
             "order_submission_mode": self.order_submission_mode,
             "real_order_block_reason_code": self.real_order_block_reason_code,
         }

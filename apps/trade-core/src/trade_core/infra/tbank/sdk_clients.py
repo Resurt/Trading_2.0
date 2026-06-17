@@ -236,6 +236,14 @@ def normalize_sdk_response(
                 for order in _list_attr(response, "orders")
             ]
         }
+    if method_name == "GetPortfolio":
+        return _portfolio_payload(response, request_payload=request_payload)
+    if method_name == "GetPositions":
+        return _positions_payload(response, request_payload=request_payload)
+    if method_name == "GetAccounts":
+        return {
+            "accounts": [_account_payload(account) for account in _list_attr(response, "accounts")]
+        }
     if method_name == "PostStopOrder":
         return {
             "exchange_order_id": _str_or_none(_attr(response, "stop_order_id")),
@@ -391,6 +399,12 @@ def _call_sdk_method(sdk: Any, services: Any, method_name: str, payload: JsonPay
         return services.orders.get_orders(
             account_id=str(payload["account_id"])
         )
+    if method_name == "GetPortfolio":
+        return services.operations.get_portfolio(account_id=str(payload["account_id"]))
+    if method_name == "GetPositions":
+        return services.operations.get_positions(account_id=str(payload["account_id"]))
+    if method_name == "GetAccounts":
+        return services.users.get_accounts()
     if method_name == "PostStopOrder":
         return services.stop_orders.post_stop_order(
             quantity=int(payload["lot_qty"]),
@@ -965,6 +979,133 @@ def _order_state_stream_payload(order: Any) -> JsonPayload:
         "completion_time": _iso_or_none(_attr(order, "completion_time")),
         "fills": [_dataclass_payload(trade) for trade in trades],
     }
+
+
+def _portfolio_payload(
+    response: Any,
+    *,
+    request_payload: Mapping[str, object],
+) -> JsonPayload:
+    positions = [_portfolio_position_payload(item) for item in _list_attr(response, "positions")]
+    return {
+        "account_id": _str_or_none(request_payload.get("account_id")),
+        "positions": positions,
+        "total_amount_portfolio": str(
+            _decimal_from_quotation(_attr(response, "total_amount_portfolio"))
+        ),
+        "expected_yield": str(_decimal_from_quotation(_attr(response, "expected_yield"))),
+        "total_amount_shares": str(_decimal_from_quotation(_attr(response, "total_amount_shares"))),
+        "total_amount_bonds": str(_decimal_from_quotation(_attr(response, "total_amount_bonds"))),
+        "total_amount_etf": str(_decimal_from_quotation(_attr(response, "total_amount_etf"))),
+        "total_amount_currencies": str(
+            _decimal_from_quotation(_attr(response, "total_amount_currencies"))
+        ),
+        "total_amount_futures": str(
+            _decimal_from_quotation(_attr(response, "total_amount_futures"))
+        ),
+        "available_margin": str(_decimal_from_quotation(_attr(response, "available_margin"))),
+    }
+
+
+def _positions_payload(
+    response: Any,
+    *,
+    request_payload: Mapping[str, object],
+) -> JsonPayload:
+    positions = [
+        _security_position_payload(item)
+        for item in (
+            _list_attr(response, "securities")
+            + _list_attr(response, "futures")
+            + _list_attr(response, "options")
+        )
+    ]
+    return {
+        "account_id": _str_or_none(request_payload.get("account_id")),
+        "positions": positions,
+        "money": [_dataclass_payload(item) for item in _list_attr(response, "money")],
+        "blocked": [_dataclass_payload(item) for item in _list_attr(response, "blocked")],
+        "limits_loading_in_progress": bool(_attr(response, "limits_loading_in_progress")),
+    }
+
+
+def _portfolio_position_payload(item: Any) -> JsonPayload:
+    quantity_lots = _decimal_from_quotation(_attr(item, "quantity_lots"))
+    if quantity_lots == Decimal("0"):
+        quantity_lots = _decimal_from_quotation(_attr(item, "quantity"))
+    current_price = _decimal_from_quotation(_attr(item, "current_price"))
+    return {
+        "instrument_id": _position_instrument_id(item),
+        "figi": _str_or_none(_attr(item, "figi")),
+        "instrument_uid": _str_or_none(_attr(item, "instrument_uid")),
+        "position_uid": _str_or_none(_attr(item, "position_uid")),
+        "instrument_type": _str_or_none(_attr(item, "instrument_type")),
+        "qty_lots": str(quantity_lots),
+        "position_side": _position_side(quantity_lots),
+        "avg_price": str(_decimal_from_quotation(_attr(item, "average_position_price"))),
+        "market_price": str(current_price),
+        "unrealized_pnl": str(_decimal_from_quotation(_attr(item, "expected_yield"))),
+        "realised_pnl": None,
+        "exposure": str(abs(quantity_lots) * current_price),
+        "blocked_lots": str(_decimal_from_quotation(_attr(item, "blocked_lots"))),
+        "short_available": _bool_attr(item, "short_enabled_flag", default=True),
+    }
+
+
+def _security_position_payload(item: Any) -> JsonPayload:
+    balance = Decimal(str(_attr(item, "balance", default=0) or 0))
+    return {
+        "instrument_id": _position_instrument_id(item),
+        "figi": _str_or_none(_attr(item, "figi")),
+        "instrument_uid": _str_or_none(_attr(item, "instrument_uid")),
+        "position_uid": _str_or_none(_attr(item, "position_uid")),
+        "instrument_type": _str_or_none(_attr(item, "instrument_type")),
+        "qty_lots": str(balance),
+        "position_side": _position_side(balance),
+        "avg_price": None,
+        "market_price": None,
+        "unrealized_pnl": None,
+        "realised_pnl": None,
+        "exposure": None,
+        "blocked_lots": str(_attr(item, "blocked", default=0) or 0),
+        "exchange_blocked": bool(_attr(item, "exchange_blocked")),
+        "short_available": _bool_attr(item, "short_enabled_flag", default=True),
+    }
+
+
+def _account_payload(account: Any) -> JsonPayload:
+    return {
+        "account_id": _str_or_none(_attr(account, "id")),
+        "name": _str_or_none(_attr(account, "name")),
+        "type": _enum_name(_attr(account, "type")),
+        "status": _enum_name(_attr(account, "status")),
+        "access_level": _enum_name(_attr(account, "access_level")),
+        "opened_date": _iso_or_none(_attr(account, "opened_date")),
+        "closed_date": _iso_or_none(_attr(account, "closed_date")),
+    }
+
+
+def _position_instrument_id(item: Any) -> str | None:
+    return (
+        _str_or_none(_attr(item, "instrument_uid"))
+        or _str_or_none(_attr(item, "figi"))
+        or _str_or_none(_attr(item, "ticker"))
+    )
+
+
+def _position_side(quantity_lots: Decimal) -> str:
+    if quantity_lots < 0:
+        return "short"
+    if quantity_lots > 0:
+        return "long"
+    return "flat"
+
+
+def _bool_attr(item: Any, name: str, *, default: bool) -> bool:
+    value = _attr(item, name, default=None)
+    if value is None:
+        return default
+    return bool(value)
 
 
 def _fill_payload(stage: Any, *, order: Any, index: int) -> JsonPayload:

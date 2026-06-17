@@ -52,6 +52,8 @@ from trade_core.strategy import (
 from trading_common import (
     PRODUCTION_CONFIRM_ENV,
     PRODUCTION_CONFIRM_VALUE,
+    SANDBOX_ORDERS_CONFIRM_ENV,
+    SANDBOX_ORDERS_CONFIRM_VALUE,
     LaunchModePolicy,
     RuntimeMode,
     parse_runtime_mode,
@@ -167,6 +169,18 @@ def test_launch_mode_default_and_production_confirmation() -> None:
     assert production.allows_real_orders is True
     assert production.requires_full_access_token is True
 
+    sandbox_default = LaunchModePolicy.from_env({"TRADING_RUNTIME_MODE": "sandbox"})
+    sandbox_confirmed = LaunchModePolicy.from_env(
+        {
+            "TRADING_RUNTIME_MODE": "sandbox",
+            SANDBOX_ORDERS_CONFIRM_ENV: SANDBOX_ORDERS_CONFIRM_VALUE,
+        }
+    )
+    assert sandbox_default.allows_real_orders is False
+    assert sandbox_default.order_submission_mode == "sandbox_pseudo_order"
+    assert sandbox_default.real_order_block_reason_code == "sandbox_orders_not_confirmed"
+    assert sandbox_confirmed.allows_real_orders is True
+
 
 def test_tbank_config_and_secret_policy_follow_launch_mode(
     monkeypatch: pytest.MonkeyPatch,
@@ -257,7 +271,7 @@ def test_shadow_mode_records_pseudo_order_without_broker_post() -> None:
     engine.dispose()
 
 
-def test_sandbox_mode_allows_gateway_post() -> None:
+def test_sandbox_mode_allows_gateway_post_only_after_explicit_confirmation() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     fake_gateway = FakeBrokerGateway()
@@ -266,7 +280,10 @@ def test_sandbox_mode_allows_gateway_post() -> None:
         execution = DefaultExecutionEngine(
             broker_gateway=cast(BrokerGateway, fake_gateway),
             orders=OrderRepository(session),
-            launch_policy=LaunchModePolicy.from_mode(RuntimeMode.SANDBOX),
+            launch_policy=LaunchModePolicy.from_mode(
+                RuntimeMode.SANDBOX,
+                sandbox_orders_confirmed=True,
+            ),
         )
         intent = execution.create_order_intent(
             OrderIntentRequest(candidate=candidate(), session_snapshot=snapshot(), account_id="a1")

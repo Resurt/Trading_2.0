@@ -412,6 +412,15 @@ analytics_context:
 - `max_drawdown_reached`
 - `open_order_conflict`
 - `position_limit_reached`
+- `short_not_allowed_by_config`
+- `short_not_allowed_by_broker`
+- `insufficient_margin`
+- `max_short_exposure_reached`
+- `max_long_exposure_reached`
+- `total_costs_exceed_edge`
+- `position_side_conflict`
+- `position_state_stale`
+- `position_reconciliation_mismatch`
 - `instrument_not_tradable`
 - `broker_status_forbidden`
 - `rate_limit_pressure`
@@ -459,9 +468,38 @@ Counterfactual pipeline отвечает на вопросы:
 - исходный `candidate_id`;
 - исходный `blocker_code` или `cancel_reason_code`;
 - market snapshot;
+- `counterfactual_seed_snapshot` как отдельный `market_context_snapshot`
+  рядом с финальным blocker/cancel event;
 - fee/slippage assumptions;
 - MFE/MAE по окнам 5/10/15 минут;
 - итог `would_profit_*`.
+
+### Long/short cost assumptions
+
+Для акций default commission assumption не может быть ниже `5 bps` на сторону.
+Round trip commission не может быть ниже `10 bps`. Полные expected costs для
+risk gate:
+
+```text
+total_expected_costs_bps =
+  max(commission_bps_per_side, 5) * 2
+  + current_spread_bps
+  + max(assumed_slippage_bps, 0)
+```
+
+Если `expected_edge_bps - total_expected_costs_bps` меньше
+`min_edge_after_total_costs_bps`, пишется:
+
+- `candidate_stage_result.stage_name=total_expected_costs`;
+- `blocker_event.blocker_code=total_costs_exceed_edge`;
+- `blocker_event.measured_value=edge_after_total_costs_bps`;
+- `blocker_event.threshold_value=min_edge_after_total_costs_bps`.
+
+Short opportunities дополнительно проходят gates
+`short_allowed_by_config`, `short_allowed_by_account`,
+`short_allowed_by_instrument`, `margin_or_collateral_available` и
+`forced_cover_policy`. Это позволяет отличать запрет short из конфигурации от
+запрета брокера/аккаунта и от нехватки обеспечения.
 
 ### Counterfactual algorithm v1
 
@@ -822,6 +860,16 @@ Dashboard files:
 - `real_order_block_reason_code`.
 
 В `historical_replay` и `shadow` execution layer сохраняет pseudo-order lifecycle без реального broker call. Эти записи пригодны для funnels и counterfactual analysis, но не должны интерпретироваться как реальное execution quality.
+
+В `sandbox` real sandbox orders также выключены по умолчанию. Для отправки
+реальной sandbox-заявки нужна явная policy:
+
+```text
+TRADING_SANDBOX_ORDERS_CONFIRM=I_UNDERSTAND_SANDBOX_ORDERS
+```
+
+Без подтверждения `order_submission_mode=sandbox_pseudo_order`, а
+`real_order_block_reason_code=sandbox_orders_not_confirmed`.
 
 ## Reporting analytics v2
 

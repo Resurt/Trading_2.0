@@ -16,10 +16,12 @@ from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 from celery import Celery
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from trade_core.app import create_identity
 from trade_core.broker_gateway import (
+    AccountsRequest,
     BrokerGateway,
     BrokerUnaryResponse,
     CancelOrderRequest,
@@ -30,6 +32,8 @@ from trade_core.broker_gateway import (
     OrderPlacementRequest,
     OrdersRequest,
     OrderStateRequest,
+    PortfolioRequest,
+    PositionsRequest,
     RequestMetadata,
     StopOrderPlacementRequest,
     StreamEvent,
@@ -55,9 +59,12 @@ from trade_core.market_data import (
     MarketState,
     MarketStateCalculator,
     OrderBookSnapshot,
+    StreamGapRecoveryService,
     Timeframe,
 )
 from trade_core.market_data.persistence import SqlAlchemyMarketDataStore
+from trade_core.market_data.recovery import GapRecoveryRequest
+from trade_core.portfolio import PositionService
 from trade_core.session import (
     BrokerTradingStatus,
     HourlyMicroSessionConfig,
@@ -86,7 +93,7 @@ from trade_core.strategy import (
 )
 from trading_common import LaunchModePolicy, RuntimeMode, ServiceName, TradingMetrics
 from trading_common.db.base import Base
-from trading_common.db.models import AuditEvent, InstrumentRegistry, RobotCommand
+from trading_common.db.models import AuditEvent, InstrumentRegistry, OrderIntent, RobotCommand
 from trading_common.db.repositories import (
     BlockerEventRepository,
     CandidateStageResultRepository,
@@ -131,6 +138,7 @@ class TradeCoreRuntimeConfig:
     database_url: str | None = None
     auto_create_sqlite_schema: bool = False
     micro_session_freeze_seconds: int = 90
+    position_snapshot_freshness_seconds: int = 900
     stream_names: tuple[str, ...] = (
         "candles",
         "order_book",
@@ -159,6 +167,9 @@ class TradeCoreRuntimeConfig:
             auto_create_sqlite_schema=auto_create_sqlite_schema,
             micro_session_freeze_seconds=int(
                 env.get("TRADE_CORE_MICRO_SESSION_FREEZE_SECONDS", "90")
+            ),
+            position_snapshot_freshness_seconds=int(
+                env.get("TRADE_CORE_POSITION_SNAPSHOT_FRESHNESS_SECONDS", "900")
             ),
         )
 
@@ -198,8 +209,7 @@ class SafeNoopBrokerGateway:
             method_name="TradingSchedules",
             data={
                 "windows": [
-                    _window_payload(window)
-                    for window in default_trading_schedule(moment).windows
+                    _window_payload(window) for window in default_trading_schedule(moment).windows
                 ],
             },
             headers={},
@@ -337,6 +347,48 @@ class SafeNoopBrokerGateway:
     ) -> BrokerUnaryResponse:
         return await self.get_orders(request, metadata)
 
+    async def get_portfolio(
+        self,
+        request: PortfolioRequest,
+        metadata: RequestMetadata | None = None,
+    ) -> BrokerUnaryResponse:
+        del metadata
+        return BrokerUnaryResponse(
+            method_name="GetPortfolio",
+            data={
+                "account_id": request.account_id,
+                "positions": [],
+                "total_amount_portfolio": "0",
+                "expected_yield": "0",
+                "available_margin": "0",
+            },
+            headers={},
+        )
+
+    async def get_positions(
+        self,
+        request: PositionsRequest,
+        metadata: RequestMetadata | None = None,
+    ) -> BrokerUnaryResponse:
+        del metadata
+        return BrokerUnaryResponse(
+            method_name="GetPositions",
+            data={"account_id": request.account_id, "positions": []},
+            headers={},
+        )
+
+    async def get_accounts(
+        self,
+        request: AccountsRequest,
+        metadata: RequestMetadata | None = None,
+    ) -> BrokerUnaryResponse:
+        del request, metadata
+        return BrokerUnaryResponse(
+            method_name="GetAccounts",
+            data={"accounts": [{"account_id": DEFAULT_ACCOUNT_ID, "status": "local"}]},
+            headers={},
+        )
+
     async def stream_market_data(self, stream_name: str) -> AsyncIterator[StreamEvent]:
         del stream_name
         if False:
@@ -402,7 +454,7 @@ class TradeCoreRuntime:
         self.strategy_config = strategy_config or ConfigDrivenStrategyConfig.conservative_default()
         self.strategy_engine = ConfigDrivenStrategyEngine(self.strategy_config)
         self.risk_engine = DefaultRiskEngine()
-        self.risk_limits = risk_limits or RiskLimits()
+        self.risk_limits = risk_limits or RiskLimits.from_strategy_config(self.strategy_config)
         self.runtime_id = uuid4()
         self.stats = TradeCoreRuntimeStats()
         self.robot_control_state = "running"
@@ -412,6 +464,8 @@ class TradeCoreRuntime:
         self.hourly_micro_session_manager: HourlyMicroSessionManager | None = None
         self.market_data_store: SqlAlchemyMarketDataStore | None = None
         self.market_data_pipeline: MarketDataPipeline | None = None
+        self.stream_gap_recovery_service: StreamGapRecoveryService | None = None
+        self.position_service: PositionService | None = None
         self.execution_engine: DefaultExecutionEngine | None = None
         self.reconciliation_service: DefaultReconciliationService | None = None
         self.strategy_event_store: SqlAlchemyStrategyEventStore | None = None
@@ -506,6 +560,23 @@ class TradeCoreRuntime:
             candidate_stages=CandidateStageResultRepository(session),
             market_contexts=MarketContextSnapshotRepository(session),
         )
+        self.position_service = PositionService(
+            broker_gateway=self.broker_gateway,
+            session=session,
+            session_context_provider=self._session_context_for,
+            tracked_instruments=self.config.instruments,
+            metrics=self.metrics,
+            freshness_seconds=self.config.position_snapshot_freshness_seconds,
+        )
+        self.stream_gap_recovery_service = StreamGapRecoveryService(
+            broker_gateway=self.broker_gateway,
+            event_bus=self.market_event_bus,
+            refresh_positions_hook=self._refresh_positions_after_gap,
+            metrics=self.metrics,
+            audit_event_hook=self._write_recovery_audit_event,
+            on_failure=self._mark_stream_recovery_degraded,
+        )
+        self._install_broker_gap_recovery_hook()
         self._stream_tasks = await self.market_data_subscription_service.start(
             MarketDataSubscriptionConfig(
                 market_stream_names=self.config.stream_names,
@@ -598,9 +669,27 @@ class TradeCoreRuntime:
         )
         micro_manager = self._require_micro_session_manager()
         rollover_started = perf_counter()
+        previous_snapshot = self._current_snapshot
         result = micro_manager.on_snapshot(snapshot)
-        self._current_snapshot = result.snapshot
         for event in result.events:
+            if event.event_type == "snapshot_taken":
+                self._current_snapshot = (
+                    previous_snapshot.with_micro_session(event.micro_session_id)
+                    if previous_snapshot is not None
+                    else result.snapshot.with_micro_session(event.micro_session_id)
+                )
+                await self._snapshot_positions(
+                    reason="micro_session_snapshot_taken",
+                    now=event.observed_at,
+                )
+            if event.event_type == "session_run_opened":
+                self._current_snapshot = result.snapshot.with_micro_session(
+                    event.micro_session_id
+                )
+                await self._snapshot_positions(
+                    reason="micro_session_session_run_opened",
+                    now=event.observed_at,
+                )
             if event.event_type == "report_requested":
                 self.stats.report_requests.append(dict(event.payload))
             if event.event_type in {"session_run_closed", "report_requested"}:
@@ -614,6 +703,7 @@ class TradeCoreRuntime:
                     session_type=metric_session_type,
                     status="success",
                 )
+        self._current_snapshot = result.snapshot
         self.stats.cycles += 1
         self.flush_domain_events()
         self.dispatch_report_jobs()
@@ -820,8 +910,7 @@ class TradeCoreRuntime:
         if command_type == "stop":
             self.robot_control_state = "stopped"
             self._strategy_states = {
-                instrument_id: StrategyState.STOPPED
-                for instrument_id in self._strategy_states
+                instrument_id: StrategyState.STOPPED for instrument_id in self._strategy_states
             }
             return "runtime_safe_stopped", {"new_entries_allowed": False}
         if command_type == "emergency_stop":
@@ -830,8 +919,7 @@ class TradeCoreRuntime:
             self.stats.open_orders = 0
             self.metrics.set_open_orders(0)
             self._strategy_states = {
-                instrument_id: StrategyState.STOPPED
-                for instrument_id in self._strategy_states
+                instrument_id: StrategyState.STOPPED for instrument_id in self._strategy_states
             }
             return (
                 "runtime_emergency_stopped",
@@ -844,12 +932,135 @@ class TradeCoreRuntime:
         msg = f"unsupported robot command: {command_type}"
         raise ValueError(msg)
 
+    async def _snapshot_positions(self, *, reason: str, now: datetime) -> None:
+        position_service = self.position_service
+        if position_service is None:
+            return
+        try:
+            result = await position_service.refresh_positions(
+                self.config.account_id,
+                reason=reason,
+                now=now,
+            )
+        except Exception as exc:
+            log_event(
+                logger=LOGGER,
+                level="WARNING",
+                event_type="position_snapshot_failed",
+                component="runtime.positions",
+                error_code=type(exc).__name__,
+                error_message=str(exc),
+                snapshot_reason=reason,
+            )
+            return
+        self.stats.active_positions = _active_position_lots(result.portfolio)
+
+    async def _portfolio_for_risk(
+        self,
+        *,
+        instrument_id: str,
+        observed_at: datetime,
+    ) -> PortfolioSnapshot:
+        position_service = self.position_service
+        if position_service is None:
+            return PortfolioSnapshot(
+                open_order_count=self.stats.open_orders,
+                open_position_lots=self.stats.active_positions,
+                position_state_fresh=False,
+                position_reconciliation_matched=False,
+                position_reason_code="position_service_unavailable",
+            )
+        try:
+            validation = await position_service.validate_before_entry(
+                account_id=self.config.account_id,
+                instrument_id=instrument_id,
+                now=observed_at,
+                max_age_seconds=self.config.position_snapshot_freshness_seconds,
+            )
+        except Exception as exc:
+            log_event(
+                logger=LOGGER,
+                level="WARNING",
+                event_type="position_reconciliation_failed",
+                component="runtime.positions",
+                instrument_id=instrument_id,
+                error_code=type(exc).__name__,
+                error_message=str(exc),
+            )
+            return PortfolioSnapshot(
+                open_order_count=self.stats.open_orders,
+                open_position_lots=self.stats.active_positions,
+                position_state_fresh=False,
+                position_reconciliation_matched=False,
+                position_reason_code="position_reconciliation_failed",
+            )
+        self.risk_limits = replace(
+            self.risk_limits,
+            short_allowed_by_account=validation.refresh.short_allowed_by_account,
+            short_allowed_by_instrument=validation.refresh.short_allowed_for(instrument_id),
+        )
+        self.stats.active_positions = _active_position_lots(validation.refresh.portfolio)
+        return replace(validation.portfolio, open_order_count=self.stats.open_orders)
+
     def _build_broker_gateway(self) -> BrokerGateway:
         if self.launch_policy.mode is RuntimeMode.HISTORICAL_REPLAY:
             return cast(BrokerGateway, SafeNoopBrokerGateway())
         config = TBankBrokerConfig.from_launch_policy(self.launch_policy)
         tokens = load_tbank_tokens_for_launch(self.launch_policy)
         return cast(BrokerGateway, TBankBrokerGateway(config=config, tokens=tokens))
+
+    def _install_broker_gap_recovery_hook(self) -> None:
+        setter = getattr(self.broker_gateway, "set_stream_gap_recovery_hook", None)
+        if callable(setter):
+            setter(self._recover_stream_gap_from_gateway)
+
+    async def _recover_stream_gap_from_gateway(
+        self,
+        stream_name: str,
+        account_id: str | None,
+    ) -> None:
+        recovery_service = self.stream_gap_recovery_service
+        if recovery_service is None:
+            return
+        now = datetime.now(tz=UTC)
+        await recovery_service.recover_after_reconnect(
+            GapRecoveryRequest(
+                instruments=self.config.instruments,
+                candle_timeframes=(Timeframe.M1,),
+                from_ts_utc=self._gap_recovery_from_ts(
+                    stream_name=stream_name,
+                    fallback=now - timedelta(minutes=30),
+                ),
+                to_ts_utc=now,
+                account_id=account_id,
+                stream_name=stream_name,
+                working_order_request_ids=self._working_order_request_ids(),
+            )
+        )
+
+    def _gap_recovery_from_ts(self, *, stream_name: str, fallback: datetime) -> datetime:
+        recovery_service = self.stream_gap_recovery_service
+        if recovery_service is None:
+            return fallback
+        candidates: list[datetime] = []
+        for instrument in self.config.instruments:
+            last_good = recovery_service.last_good_event_ts(
+                stream_name=stream_name,
+                instrument_id=instrument.instrument_id,
+                timeframe=Timeframe.M1,
+            )
+            if last_good is not None:
+                candidates.append(last_good)
+        return min(candidates) if candidates else fallback
+
+    def _working_order_request_ids(self) -> tuple[UUID, ...]:
+        session = self._session
+        if session is None:
+            return ()
+        stmt = select(OrderIntent.request_order_id).where(
+            OrderIntent.status.in_(("submitted", "cancel_requested", "partially_filled"))
+        )
+        return tuple(session.execute(stmt).scalars())
 
     def _ensure_instruments_registered(self) -> None:
         repository = InstrumentRepository(self._require_session())
@@ -890,8 +1101,9 @@ class TradeCoreRuntime:
             if event.payload.is_closed:
                 lag_seconds = max(
                     0.0,
-                    (event.ts_utc.astimezone(UTC) - event.payload.close_ts_utc.astimezone(UTC))
-                    .total_seconds(),
+                    (
+                        event.ts_utc.astimezone(UTC) - event.payload.close_ts_utc.astimezone(UTC)
+                    ).total_seconds(),
                 )
                 self.metrics.observe_candle_close_delivery_lag(
                     lag_seconds,
@@ -910,6 +1122,13 @@ class TradeCoreRuntime:
             instrument=instrument,
             timeframe=timeframe,
         )
+        if self.stream_gap_recovery_service is not None:
+            self.stream_gap_recovery_service.record_good_event(
+                stream_name=_stream_name_for_event(event),
+                instrument_id=event.instrument_id,
+                timeframe=timeframe if timeframe != "all" else None,
+                ts_utc=event.ts_utc,
+            )
 
     async def _handle_market_state_updated(self, event: MarketDataEvent) -> None:
         if isinstance(event.payload, MarketState):
@@ -982,9 +1201,9 @@ class TradeCoreRuntime:
                     session_snapshot=snapshot,
                     market_state=market_state,
                     limits=self.risk_limits,
-                    portfolio=PortfolioSnapshot(
-                        open_order_count=self.stats.open_orders,
-                        open_position_lots=self.stats.active_positions,
+                    portfolio=await self._portfolio_for_risk(
+                        instrument_id=bar.instrument_id,
+                        observed_at=bar.close_ts_utc,
                     ),
                 )
             )
@@ -1147,6 +1366,89 @@ class TradeCoreRuntime:
             is_trading_allowed=False,
             deny_reason_code="session_forbidden",
             status_mismatch=False,
+        )
+
+    async def _refresh_positions_after_gap(self, account_id: str) -> JsonPayload:
+        position_service = self.position_service
+        if position_service is None:
+            return {"account_id": account_id, "status": "position_service_unavailable"}
+        result = await position_service.refresh_positions(
+            account_id,
+            reason="stream_gap_recovery",
+            now=datetime.now(tz=UTC),
+        )
+        self.stats.active_positions = _active_position_lots(result.portfolio)
+        log_event(
+            logger=LOGGER,
+            event_type=DomainEventType.POSITION_RECONCILIATION_COMPLETED.value,
+            component="runtime.positions",
+            account_id_present=True,
+            status="refreshed",
+            position_count=len(result.positions),
+            open_position_lots=result.portfolio.open_position_lots,
+            long_position_lots=result.portfolio.long_position_lots,
+            short_position_lots=result.portfolio.short_position_lots,
+        )
+        return {
+            "account_id": account_id,
+            "status": "refreshed",
+            "position_count": len(result.positions),
+            "open_position_lots": result.portfolio.open_position_lots,
+            "long_position_lots": result.portfolio.long_position_lots,
+            "short_position_lots": result.portfolio.short_position_lots,
+        }
+
+    def _mark_stream_recovery_degraded(self, exc: Exception) -> None:
+        self.robot_control_state = "degraded"
+        self._strategy_states = {
+            instrument.instrument_id: StrategyState.DEGRADED
+            for instrument in self.config.instruments
+        }
+        log_event(
+            logger=LOGGER,
+            level="ERROR",
+            event_type=DomainEventType.STREAM_GAP_RECOVERY_FAILED.value,
+            component="runtime",
+            runtime_id=str(self.runtime_id),
+            error_code=type(exc).__name__,
+            error_message=str(exc),
+        )
+
+    def _write_recovery_audit_event(
+        self,
+        event_type: str,
+        payload: Mapping[str, object],
+    ) -> None:
+        session = self._session
+        if session is None:
+            return
+        snapshot = self._current_snapshot or self._fallback_snapshot()
+        micro_session_id = snapshot.micro_session_id or "unassigned"
+        now = datetime.now(tz=UTC)
+        session.add(
+            AuditEvent(
+                calendar_date=snapshot.calendar_date,
+                trading_date=snapshot.trading_date,
+                session_type=snapshot.session_type.value,
+                session_phase=snapshot.session_phase.value,
+                micro_session_id=micro_session_id,
+                broker_trading_status=snapshot.broker_trading_status,
+                ts_utc=now,
+                exchange_ts=now,
+                received_ts=now,
+                service=ServiceName.TRADE_CORE.value,
+                actor="system",
+                action=event_type,
+                entity_type="stream_gap_recovery",
+                entity_id=micro_session_id,
+                severity=(
+                    "error"
+                    if event_type == DomainEventType.STREAM_GAP_RECOVERY_FAILED.value
+                    else "info"
+                ),
+                correlation_id=str(self.runtime_id),
+                audit_payload=dict(payload),
+            )
         )
 
     def _write_audit_event(self, *, action: str) -> None:
@@ -1385,6 +1687,26 @@ def broker_status_from_response(
         exchange_ts=exchange_ts,
         raw_payload=dict(response.data),
     )
+
+
+def _stream_name_for_event(event: MarketDataEvent) -> str:
+    if event.event_type is MarketEventType.CANDLE:
+        return "candles"
+    if event.event_type is MarketEventType.ORDER_BOOK:
+        return "order_book"
+    if event.event_type is MarketEventType.LAST_PRICE:
+        return "last_prices"
+    if event.event_type is MarketEventType.TRADING_STATUS:
+        return "trading_status"
+    if event.event_type is MarketEventType.MARKET_TRADE:
+        return "market_trades"
+    if event.event_type is MarketEventType.USER_ORDER_STATE:
+        return "OrderStateStream"
+    return event.event_type.value
+
+
+def _active_position_lots(portfolio: PortfolioSnapshot) -> int:
+    return portfolio.long_position_lots + portfolio.short_position_lots
 
 
 def _window_payload(window: ScheduleWindow) -> JsonPayload:

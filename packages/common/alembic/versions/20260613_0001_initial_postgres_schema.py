@@ -90,8 +90,7 @@ def create_default_partitions() -> None:
     for table_name in PARTITIONED_TABLES:
         op.execute(
             sa.text(
-                f"CREATE TABLE IF NOT EXISTS {table_name}_default "
-                f"PARTITION OF {table_name} DEFAULT"
+                f"CREATE TABLE IF NOT EXISTS {table_name}_default PARTITION OF {table_name} DEFAULT"
             )
         )
 
@@ -656,8 +655,26 @@ def seed_reference_data() -> None:
                 "is_active": True,
                 "valid_from": valid_from,
                 "valid_to": None,
-                "config_payload": {"enabled": False, "template": session_template},
-                "risk_limits": {"max_position_lots": 0, "max_daily_loss_rub": 0},
+                "config_payload": {
+                    "enabled": False,
+                    "template": session_template,
+                    "allow_long": True,
+                    "allow_short": False,
+                    "session_template": session_template,
+                    "instrument_timeframe_overrides": {},
+                },
+                "risk_limits": {
+                    "max_position_lots": 0,
+                    "max_long_lots": 0,
+                    "max_short_lots": 0,
+                    "max_daily_loss_rub": 0,
+                    "max_gross_exposure_rub": 0,
+                    "max_net_exposure_rub": 0,
+                    "min_expected_edge_bps": 0,
+                    "assumed_commission_bps_per_side": 5,
+                    "assumed_slippage_bps": 0,
+                    "min_edge_after_total_costs_bps": 0,
+                },
             }
             for session_template in SESSION_TYPES
         ],

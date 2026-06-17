@@ -7,6 +7,7 @@ from typing import cast
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+import pytest
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
@@ -143,19 +144,24 @@ def instrument() -> InstrumentRef:
     )
 
 
-def candidate() -> SignalCandidateDecision:
+def candidate(
+    *,
+    side: TradeSide = TradeSide.BUY,
+    expected_edge_bps: Decimal = Decimal("25"),
+    lot_qty: int = 1,
+) -> SignalCandidateDecision:
     return SignalCandidateDecision(
         strategy_id="baseline_config_stub",
         strategy_version=1,
         instrument=instrument(),
         timeframe=Timeframe.M5,
         action=SignalAction.ENTRY,
-        side=TradeSide.BUY,
+        side=side,
         order_type="limit",
-        lot_qty=1,
+        lot_qty=lot_qty,
         intended_price=Decimal("100.00"),
         time_in_force="day",
-        expected_edge_bps=Decimal("25"),
+        expected_edge_bps=expected_edge_bps,
         expected_holding_minutes=5,
         signal_fingerprint="candidate-fingerprint",
         condition_payload={"test": True},
@@ -231,6 +237,150 @@ def test_risk_engine_uses_explicit_blocker_catalog_and_final_blocker() -> None:
         BlockerCode.OPEN_ORDER_CONFLICT,
         BlockerCode.POSITION_LIMIT_REACHED,
     }
+
+
+def test_long_candidate_passes_when_long_is_allowed() -> None:
+    decision = DefaultRiskEngine().evaluate(
+        RiskAssessmentInput(
+            candidate=candidate(side=TradeSide.BUY),
+            session_snapshot=snapshot(),
+            market_state=market_state(spread_bps=Decimal("5")),
+            limits=RiskLimits(
+                allow_long=True,
+                max_long_lots=5,
+                max_gross_exposure_rub=Decimal("1000000"),
+                max_net_exposure_rub=Decimal("1000000"),
+            ),
+            portfolio=PortfolioSnapshot(),
+        )
+    )
+
+    assert decision.allowed
+    assert decision.final_blocker is None
+    assert {
+        blocker.gate_name
+        for blocker in decision.blockers
+        if blocker.code
+        in {
+            BlockerCode.TOTAL_COSTS_EXCEED_EDGE,
+            BlockerCode.MAX_LONG_EXPOSURE_REACHED,
+        }
+    } == {"total_expected_costs", "max_gross_exposure", "max_net_exposure"}
+
+
+def test_short_candidate_is_blocked_when_disabled_by_config() -> None:
+    decision = DefaultRiskEngine().evaluate(
+        RiskAssessmentInput(
+            candidate=candidate(side=TradeSide.SELL),
+            session_snapshot=snapshot(),
+            market_state=market_state(spread_bps=Decimal("5")),
+            limits=RiskLimits(allow_short=False, max_short_lots=5),
+            portfolio=PortfolioSnapshot(),
+        )
+    )
+
+    assert not decision.allowed
+    assert decision.final_blocker is not None
+    assert decision.final_blocker.code is BlockerCode.SHORT_NOT_ALLOWED_BY_CONFIG
+    assert decision.final_blocker.gate_name == "short_allowed_by_config"
+
+
+def test_short_candidate_is_blocked_when_broker_or_account_disallows_short() -> None:
+    decision = DefaultRiskEngine().evaluate(
+        RiskAssessmentInput(
+            candidate=candidate(side=TradeSide.SELL),
+            session_snapshot=snapshot(),
+            market_state=market_state(spread_bps=Decimal("5")),
+            limits=RiskLimits(
+                allow_short=True,
+                max_short_lots=5,
+                short_allowed_by_account=False,
+            ),
+            portfolio=PortfolioSnapshot(),
+        )
+    )
+
+    assert not decision.allowed
+    assert decision.final_blocker is not None
+    assert decision.final_blocker.code is BlockerCode.SHORT_NOT_ALLOWED_BY_BROKER
+    assert decision.final_blocker.gate_name == "short_allowed_by_account"
+
+
+def test_entry_is_blocked_when_position_state_is_stale() -> None:
+    decision = DefaultRiskEngine().evaluate(
+        RiskAssessmentInput(
+            candidate=candidate(side=TradeSide.BUY),
+            session_snapshot=snapshot(),
+            market_state=market_state(spread_bps=Decimal("5")),
+            limits=RiskLimits(),
+            portfolio=PortfolioSnapshot(
+                position_state_fresh=False,
+                position_reconciliation_matched=False,
+                position_state_age_ms=45_000,
+                position_reason_code="position_state_stale",
+            ),
+        )
+    )
+
+    assert not decision.allowed
+    assert decision.final_blocker is not None
+    assert decision.final_blocker.code is BlockerCode.POSITION_STATE_STALE
+    assert decision.final_blocker.gate_name == "position_state_freshness"
+    assert decision.final_blocker.reason_payload["position_reason_code"] == "position_state_stale"
+
+
+def test_short_candidate_is_blocked_when_short_exposure_limit_is_reached() -> None:
+    decision = DefaultRiskEngine().evaluate(
+        RiskAssessmentInput(
+            candidate=candidate(side=TradeSide.SELL),
+            session_snapshot=snapshot(),
+            market_state=market_state(spread_bps=Decimal("5")),
+            limits=RiskLimits(
+                allow_short=True,
+                max_short_lots=10,
+                max_position_lots=10,
+                max_gross_exposure_rub=Decimal("1000"),
+                max_net_exposure_rub=Decimal("2000"),
+            ),
+            portfolio=PortfolioSnapshot(
+                open_position_lots=-9,
+                short_position_lots=9,
+                gross_exposure_rub=Decimal("950"),
+                net_exposure_rub=Decimal("-950"),
+            ),
+        )
+    )
+
+    assert not decision.allowed
+    assert decision.final_blocker is not None
+    assert decision.final_blocker.code is BlockerCode.MAX_SHORT_EXPOSURE_REACHED
+    assert decision.final_blocker.gate_name == "max_gross_exposure"
+
+
+def test_cost_gate_blocks_when_total_costs_exceed_expected_edge() -> None:
+    decision = DefaultRiskEngine().evaluate(
+        RiskAssessmentInput(
+            candidate=candidate(expected_edge_bps=Decimal("12")),
+            session_snapshot=snapshot(),
+            market_state=market_state(spread_bps=Decimal("5")),
+            limits=RiskLimits(
+                assumed_commission_bps_per_side=Decimal("5"),
+                assumed_slippage_bps=Decimal("1"),
+                min_edge_after_total_costs_bps=Decimal("0"),
+            ),
+            portfolio=PortfolioSnapshot(),
+        )
+    )
+
+    assert not decision.allowed
+    assert decision.final_blocker is not None
+    assert decision.final_blocker.code is BlockerCode.TOTAL_COSTS_EXCEED_EDGE
+    assert decision.final_blocker.reason_payload["total_expected_costs_bps"] == "16"
+
+
+def test_production_mode_without_confirmation_raises_before_startup() -> None:
+    with pytest.raises(RuntimeError, match="production mode requires"):
+        LaunchModePolicy.from_env({"TRADING_RUNTIME_MODE": "production"})
 
 
 class FakeBrokerGateway:
@@ -340,7 +490,10 @@ def test_execution_engine_posts_and_cancels_with_explicit_reason_code() -> None:
         execution = DefaultExecutionEngine(
             broker_gateway=cast(BrokerGateway, fake_gateway),
             orders=OrderRepository(session),
-            launch_policy=LaunchModePolicy.from_mode(RuntimeMode.SANDBOX),
+            launch_policy=LaunchModePolicy.from_mode(
+                RuntimeMode.SANDBOX,
+                sandbox_orders_confirmed=True,
+            ),
         )
         intent = execution.create_order_intent(
             OrderIntentRequest(
@@ -368,14 +521,41 @@ def test_execution_engine_posts_and_cancels_with_explicit_reason_code() -> None:
         assert fake_gateway.posted[0].request_order_id == intent.request_order_id
         assert fake_gateway.cancelled[0].payload["cancel_reason_code"] == "stale_order"
         state_events = list(
-            session.execute(
-                select(OrderStateEvent).order_by(OrderStateEvent.state_seq)
-            ).scalars()
+            session.execute(select(OrderStateEvent).order_by(OrderStateEvent.state_seq)).scalars()
         )
         assert [event.new_state for event in state_events] == ["posted", "cancelled"]
         assert state_events[0].tracking_id == "tracking-post"
         assert state_events[1].cancel_reason_code == CancelReasonCode.STALE_ORDER.value
         assert state_events[0].latency_ms is not None
+
+    engine.dispose()
+
+
+def test_shadow_execution_writes_pseudo_order_and_skips_broker_post() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    fake_gateway = FakeBrokerGateway()
+
+    with Session(engine) as session:
+        execution = DefaultExecutionEngine(
+            broker_gateway=cast(BrokerGateway, fake_gateway),
+            orders=OrderRepository(session),
+            launch_policy=LaunchModePolicy.from_mode(RuntimeMode.SHADOW),
+        )
+        intent = execution.create_order_intent(
+            OrderIntentRequest(
+                candidate=candidate(),
+                session_snapshot=snapshot(),
+                account_id="account-1",
+            )
+        )
+
+        result = asyncio.run(execution.post_order(intent))
+
+        assert result.broker_status == "pseudo_posted"
+        assert intent.status == "pseudo_submitted"
+        assert intent.intent_payload["order_submission_mode"] == "shadow_pseudo_order"
+        assert fake_gateway.posted == []
 
     engine.dispose()
 
@@ -439,7 +619,10 @@ def test_execution_engine_records_rejected_order_reason() -> None:
         execution = DefaultExecutionEngine(
             broker_gateway=cast(BrokerGateway, fake_gateway),
             orders=OrderRepository(session),
-            launch_policy=LaunchModePolicy.from_mode(RuntimeMode.SANDBOX),
+            launch_policy=LaunchModePolicy.from_mode(
+                RuntimeMode.SANDBOX,
+                sandbox_orders_confirmed=True,
+            ),
         )
         intent = execution.create_order_intent(
             OrderIntentRequest(
@@ -517,9 +700,7 @@ def test_deterministic_blocked_candidate_persists_causal_events() -> None:
 
         final_blocker = next(row for row in blocker_rows if row.is_final_blocker)
         stored_blocker_count = session.scalar(select(func.count()).select_from(BlockerEvent))
-        stored_stage_count = session.scalar(
-            select(func.count()).select_from(CandidateStageResult)
-        )
+        stored_stage_count = session.scalar(select(func.count()).select_from(CandidateStageResult))
         stored_context_count = session.scalar(
             select(func.count()).select_from(MarketContextSnapshot)
         )
@@ -534,14 +715,23 @@ def test_deterministic_blocked_candidate_persists_causal_events() -> None:
         assert final_blocker.blocker_code == BlockerCode.SPREAD_TOO_WIDE.value
         assert final_blocker.measured_value == Decimal("35.00000000")
         assert stored_stage_count == len(decision.blockers)
-        assert stored_context_count == 1
-        assert len(risk_rows) == 1
+        assert stored_context_count == 2
+        assert {row.snapshot_kind for row in journey.market_context} == {
+            "signal_candidate_created",
+            "counterfactual_seed_snapshot",
+        }
+        assert {row.reason_code for row in risk_rows} >= {BlockerCode.SPREAD_TOO_WIDE.value}
         assert state_row.new_state == StrategyState.BLOCKED.value
         assert stored_blocker_count == len(blocker_rows)
         assert stored_risk_count == len(risk_rows)
         assert stored_state_count == 1
         assert journey.candidate is not None
-        assert journey.stage_results[1].blocker_code == BlockerCode.SPREAD_TOO_WIDE.value
+        spread_stage = next(
+            row
+            for row in journey.stage_results
+            if row.blocker_code == BlockerCode.SPREAD_TOO_WIDE.value
+        )
+        assert spread_stage.stage_name == "spread_limit"
         assert journey.blockers[0].is_final_blocker
 
     engine.dispose()

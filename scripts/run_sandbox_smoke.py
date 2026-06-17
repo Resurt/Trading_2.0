@@ -98,7 +98,10 @@ async def async_main() -> None:
     parser.add_argument("--quantity", type=int, default=1, help="Lots for sandbox PostOrder smoke.")
     args = parser.parse_args()
 
-    policy = LaunchModePolicy.from_mode(RuntimeMode.SANDBOX)
+    policy = LaunchModePolicy.from_mode(
+        RuntimeMode.SANDBOX,
+        sandbox_orders_confirmed=args.allow_sandbox_orders,
+    )
     config = TBankBrokerConfig.from_launch_policy(policy)
     tokens = TBankTokenBundle(full_access_token=None, readonly_token=None)
     if not args.dry_run:
@@ -123,10 +126,7 @@ async def async_main() -> None:
             if value is None
         ]
         if missing_order_args:
-            parser.error(
-                "--allow-sandbox-orders requires "
-                + ", ".join(missing_order_args)
-            )
+            parser.error("--allow-sandbox-orders requires " + ", ".join(missing_order_args))
         sandbox_order_status = await _sandbox_order_status(
             config=config,
             tokens=tokens,

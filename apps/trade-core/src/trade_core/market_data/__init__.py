@@ -27,7 +27,12 @@ from trade_core.market_data.read_models import (
     LiveOrderBookReadModel,
     MarketReadModelStore,
 )
-from trade_core.market_data.recovery import GapRecoveryCoordinator, GapRecoveryRequest
+from trade_core.market_data.recovery import (
+    GapRecoveryCoordinator,
+    GapRecoveryRequest,
+    StreamGapRecoveryResult,
+    StreamGapRecoveryService,
+)
 from trade_core.market_data.subscriptions import (
     MarketDataSubscriptionConfig,
     MarketDataSubscriptionService,
@@ -56,6 +61,8 @@ __all__ = [
     "MarketTrade",
     "OrderBookSnapshot",
     "PriceLevel",
+    "StreamGapRecoveryResult",
+    "StreamGapRecoveryService",
     "Timeframe",
     "TradingStatusTick",
     "UserOrderStateTick",
