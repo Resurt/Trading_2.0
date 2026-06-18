@@ -6,9 +6,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md alembic.ini ./
 COPY apps ./apps
 COPY packages ./packages
+COPY scripts ./scripts
 
 ARG INSTALL_TBANK_EXTRA=false
 ARG TBANK_PIP_EXTRA_INDEX_URL=https://opensource.tbank.ru/api/v4/projects/238/packages/pypi/simple

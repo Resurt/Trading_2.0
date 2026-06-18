@@ -116,6 +116,7 @@ def run_local(args: argparse.Namespace) -> list[GateResult]:
 
 
 def run_compose(args: argparse.Namespace) -> list[GateResult]:
+    host_env = compose_host_env()
     results = [
         run_cmd(
             "docker_compose_config",
@@ -156,6 +157,7 @@ def run_compose(args: argparse.Namespace) -> list[GateResult]:
                 run_cmd(
                     "report_worker_smoke",
                     [sys.executable, "scripts/run_report_worker_smoke.py"],
+                    env=host_env,
                 ),
                 run_cmd(
                     "frontend_build",
@@ -256,6 +258,7 @@ def run_cmd(
     argv: Sequence[str],
     *,
     cwd: Path = ROOT,
+    env: Mapping[str, str] | None = None,
     timeout_seconds: int = 240,
 ) -> GateResult:
     try:
@@ -265,6 +268,7 @@ def run_cmd(
             check=False,
             capture_output=True,
             text=True,
+            env=dict(env) if env is not None else None,
             timeout=timeout_seconds,
         )
     except subprocess.TimeoutExpired as exc:
@@ -359,6 +363,22 @@ def run_compose_shared_db_gate() -> GateResult:
         command="docker compose config --format json",
         details={"values": values, "no_sqlite": no_sqlite},
     )
+
+
+def compose_host_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env.update(
+        {
+            "POSTGRES_HOST": "localhost",
+            "POSTGRES_PORT": "5432",
+            "POSTGRES_DB": "trading_2_0",
+            "POSTGRES_USER": "trading_app",
+            "POSTGRES_PASSWORD_FILE": str(ROOT / "secrets" / "postgres_password"),
+            "CELERY_BROKER_URL": "redis://localhost:6379/0",
+            "CELERY_RESULT_BACKEND": "redis://localhost:6379/0",
+        }
+    )
+    return env
 
 
 def run_no_placeholder_instrument_gate() -> GateResult:
