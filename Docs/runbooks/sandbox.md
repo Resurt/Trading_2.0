@@ -19,6 +19,8 @@ Validate infrastructure, broker adapter behavior, session handling, reporting, a
 - Confirm broker adapter authenticates against sandbox.
 - Resolve `SBER`/`GAZP` through T-Bank instruments API and verify no placeholder `instrument_uid` remains.
 - Fetch schedules, accounts, trading status, candles and order book in readonly mode.
+- Optionally run historical candle backfill dry-run or sandbox readonly backfill to
+  validate chunking/idempotent DB writes before shadow mode.
 - Run market data flow if available in sandbox mode.
 - Submit a controlled sandbox order only from an explicit test command.
 - Verify order lifecycle, reconciliation, domain events, technical logs, and metrics.
@@ -31,6 +33,7 @@ $env:TRADING_RUNTIME_MODE = "sandbox"
 $env:TBANK_ENVIRONMENT = "sandbox"
 python scripts/run_tbank_sdk_import_check.py
 python scripts/run_launch_readiness.py --mode sandbox
+python scripts/run_historical_candle_backfill.py --instruments SBER,GAZP --lookback-days 7 --dry-run
 ```
 
 Do not run a sandbox `PostOrder` smoke unless the confirmation variable is set deliberately:

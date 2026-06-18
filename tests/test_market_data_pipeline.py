@@ -24,6 +24,8 @@ from trade_core.market_data import (
     Candle,
     GapRecoveryCoordinator,
     GapRecoveryRequest,
+    HistoricalBackfillConfig,
+    HistoricalCandleBackfillService,
     MarketDataEvent,
     MarketDataPipeline,
     MarketEventBus,
@@ -38,6 +40,7 @@ from trade_core.market_data import (
 from trade_core.market_data.calculators import FeedFreshnessCalculator
 from trade_core.market_data.persistence import SqlAlchemyMarketDataStore
 from trade_core.session.models import SessionEventContext
+from trading_common import LaunchModePolicy, RuntimeMode
 from trading_common.db import Base
 from trading_common.db.models import MarketCandle
 from trading_common.enums import SessionPhase, SessionType
@@ -231,6 +234,25 @@ class FakeRecoveryGateway:
                 "exchange_order_id": request.exchange_order_id,
                 "broker_status": "observed",
             },
+        )
+
+
+class FakeHistoricalBackfillGateway:
+    def __init__(self, candles: list[dict[str, object]]) -> None:
+        self.candles = candles
+        self.candle_requests: list[CandleRequest] = []
+
+    async def get_candles(
+        self,
+        request: CandleRequest,
+        metadata: object | None = None,
+    ) -> BrokerUnaryResponse:
+        del metadata
+        self.candle_requests.append(request)
+        return BrokerUnaryResponse(
+            method_name="GetCandles",
+            data={"candles": self.candles},
+            headers={},
         )
 
 
@@ -446,3 +468,79 @@ def test_pipeline_updates_live_dashboard_read_models() -> None:
     assert MarketEventType.MARKET_STATE_UPDATED in [
         event.event_type for event in event_bus.published_events
     ]
+
+
+def test_historical_backfill_writes_raw_and_derived_bars_idempotently() -> None:
+    candles = [recovered_candle_payload(minute) for minute in range(15)]
+    fake_gateway = FakeHistoricalBackfillGateway(candles)
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        service = HistoricalCandleBackfillService(
+            broker_gateway=cast(BrokerGateway, fake_gateway),
+            session=session,
+            launch_policy=LaunchModePolicy.from_mode(RuntimeMode.HISTORICAL_REPLAY),
+        )
+        config = HistoricalBackfillConfig(
+            instruments=("SBER",),
+            chunk_days=1,
+            dry_run=False,
+        )
+
+        first = asyncio.run(
+            service.run(
+                config,
+                from_ts_utc=utc(2026, 6, 12, 7),
+                to_ts_utc=utc(2026, 6, 12, 7, 15),
+            )
+        )
+        second = asyncio.run(
+            service.run(
+                config,
+                from_ts_utc=utc(2026, 6, 12, 7),
+                to_ts_utc=utc(2026, 6, 12, 7, 15),
+            )
+        )
+        session.commit()
+
+        rows = session.execute(select(MarketCandle)).scalars().all()
+
+    first_instrument = first.instruments[0]
+    second_instrument = second.instruments[0]
+    counts_by_timeframe: dict[str, int] = {}
+    for row in rows:
+        counts_by_timeframe[row.timeframe] = counts_by_timeframe.get(row.timeframe, 0) + 1
+
+    assert first_instrument.raw_candles_fetched == 15
+    assert first_instrument.raw_candles_written == 15
+    assert first_instrument.derived_bars_written == {"5m": 3, "10m": 1, "15m": 1}
+    assert second_instrument.raw_candles_existing == 15
+    assert second_instrument.derived_bars_existing == {"5m": 3, "10m": 1, "15m": 1}
+    assert counts_by_timeframe == {"1m": 15, "5m": 3, "10m": 1, "15m": 1}
+    assert len(fake_gateway.candle_requests) == 2
+
+
+def test_historical_backfill_dry_run_builds_plan_without_fetching_candles() -> None:
+    fake_gateway = FakeHistoricalBackfillGateway([])
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        service = HistoricalCandleBackfillService(
+            broker_gateway=cast(BrokerGateway, fake_gateway),
+            session=session,
+            launch_policy=LaunchModePolicy.from_mode(RuntimeMode.HISTORICAL_REPLAY),
+        )
+        result = asyncio.run(
+                service.run(
+                    HistoricalBackfillConfig(instruments=("SBER", "GAZP", "LKOH"), dry_run=True),
+                    from_ts_utc=utc(2026, 6, 1, 0),
+                    to_ts_utc=utc(2026, 6, 18, 0),
+                )
+            )
+
+    assert result.dry_run
+    assert len(result.plan.instruments) == 3
+    assert len(result.plan.chunks) == 9
+    assert fake_gateway.candle_requests == []

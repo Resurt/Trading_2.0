@@ -5,7 +5,7 @@ STRATEGY_ID ?= baseline
 REPORT_WORKER_SMOKE_MICRO_SESSION_ID ?= 2026-06-12:weekday_main:1000
 REPORT_WORKER_SMOKE_TIMEOUT ?= 30
 
-.PHONY: lint test up down logs frontend-build migrate migrate-down replay-smoke sandbox-smoke analytics-smoke report-rebuild replay-day controlled-launch-acceptance launch-readiness observability-up report-worker-smoke celery-inspect
+.PHONY: lint test up down logs frontend-build migrate migrate-down replay-smoke sandbox-smoke historical-backfill-dry-run analytics-smoke report-rebuild replay-day controlled-launch-acceptance launch-readiness observability-up report-worker-smoke celery-inspect
 
 lint:
 	$(PYTHON) -m ruff check .
@@ -37,6 +37,9 @@ replay-smoke:
 
 sandbox-smoke:
 	$(PYTHON) scripts/run_sandbox_smoke.py --dry-run
+
+historical-backfill-dry-run:
+	$(PYTHON) scripts/run_historical_candle_backfill.py --instruments SBER,GAZP --lookback-days 90 --dry-run
 
 analytics-smoke:
 	$(PYTHON) scripts/run_logging_analytics_acceptance.py --date $(TRADING_DATE) --strategy-id $(STRATEGY_ID)

@@ -1,0 +1,107 @@
+# Historical Candle Backfill
+
+Этот документ фиксирует контур загрузки исторических свечей T-Bank/T-Invest перед
+sandbox/shadow/production. Цель - накопить базу `market_candle`, прогнать replay и
+построить аналитику candidates/blockers/counterfactual без реальных ордеров.
+
+## Инварианты
+
+- Backfill вызывает только readonly `BrokerGateway.get_candles()` и
+  `resolve_instruments()` при необходимости.
+- `PostOrder` и `CancelOrder` в этом контуре не вызываются.
+- Инструменты берутся из `instrument_registry` или резолвятся через
+  `InstrumentResolverService`.
+- Для sandbox/shadow/production-like загрузки placeholder `instrument_uid` запрещён.
+- Raw interval по умолчанию: `1m`.
+- Derived intervals по умолчанию: `5m`, `10m`, `15m`.
+- Derived bars строятся через существующий `BarEngine`, не отдельной логикой.
+- Запись идёт в `market_candle` через `SqlAlchemyMarketDataStore` и
+  repository-level upsert, поэтому повторный запуск не плодит дубли.
+
+## Сервис
+
+Код находится в:
+
+- `apps/trade-core/src/trade_core/market_data/historical_backfill.py`
+
+Основные сущности:
+
+- `HistoricalCandleBackfillService`
+- `HistoricalBackfillConfig`
+- `HistoricalBackfillPlan`
+- `HistoricalBackfillChunk`
+- `HistoricalBackfillResult`
+- `HistoricalBackfillInstrumentResult`
+- `HistoricalBackfillQualitySummary`
+
+Quality summary считает:
+
+- сколько raw candles увидели и сколько closed;
+- сколько candles уже существовало;
+- сколько неполных candles отброшено;
+- сколько candles имеют некорректные OHLC цены;
+- сколько gap переходов обнаружено в пределах загруженного ряда.
+
+## CLI
+
+Dry-run без токенов и без записи:
+
+```powershell
+python scripts/run_historical_candle_backfill.py `
+  --instruments SBER,GAZP `
+  --from-date 2025-01-01 `
+  --to-date 2026-06-18 `
+  --raw-interval 1m `
+  --derive 5m,10m,15m `
+  --chunk-days 7 `
+  --strategy-id baseline `
+  --dry-run
+```
+
+Реальная readonly загрузка требует установленный T-Bank SDK extra, токен в
+ignored `secrets/` или Docker secret file env и PostgreSQL `DATABASE_URL` /
+`POSTGRES_*`:
+
+```powershell
+$env:TRADING_BACKFILL_RUNTIME_MODE = "shadow"
+$env:TBANK_ENVIRONMENT = "live"
+$env:SSL_TBANK_VERIFY = "true"
+python scripts/run_tbank_sdk_import_check.py
+python scripts/run_historical_candle_backfill.py `
+  --instruments SBER,GAZP,LKOH `
+  --from-date 2025-01-01 `
+  --to-date 2026-06-18 `
+  --raw-interval 1m `
+  --derive 5m,10m,15m `
+  --chunk-days 7 `
+  --strategy-id baseline
+```
+
+`TRADING_BACKFILL_RUNTIME_MODE=shadow` выбирает live readonly broker target и
+оставляет execution pseudo-only. Для sandbox можно указать `sandbox`, но sandbox
+history может отличаться от live market history и не является оценкой real
+execution quality.
+
+## Дальше после загрузки
+
+1. Проверить `market_candle` по `instrument_id + timeframe + trading_date`.
+2. Запустить replay из загруженных свечей, когда replay harness будет подключён к
+   DB-backed candle source.
+3. Перестроить отчёты:
+
+```powershell
+python tools/reports/build_daily_report.py --date <YYYY-MM-DD> --strategy-id baseline --force-rebuild
+python tools/reports/run_counterfactual_analysis.py --date <YYYY-MM-DD> --strategy-id baseline --force-rebuild
+```
+
+4. Смотреть daily report по `session_type`, `instrument`, `timeframe`,
+   `blocker_code`, `candidate funnel` и `missed opportunity summary`.
+
+## Ограничения
+
+- Backfill сам по себе не создаёт `signal_candidate`: это делает replay/strategy
+  контур на основе закрытых bars.
+- Для реальной загрузки нужен доступ T-Bank SDK к историческим candles выбранного
+  окружения.
+- Дневные отчёты по blocker/candidate/counterfactual будут содержательными только
+  после replay, который создаст decision journal.

@@ -32,6 +32,9 @@ $env:TRADING_AUTH_MODE = "static_bearer"
 - `TRADING_RUNTIME_MODE=production` is visible in service health/log context.
 - `trade-core` startup log/audit shows `database_backend=postgresql` and a redacted Postgres URL shared with `api` and `report-worker`.
 - `SBER`/`GAZP` are resolved through the broker instruments API; no `runtime-placeholder` instrument UID remains.
+- Historical candle backfill has been run for the configured instruments, raw `1m`
+  and derived `5m/10m/15m` `market_candle` rows are present, and replay/report
+  calibration checks were reviewed before enabling live orders.
 - Risk limits and max position limits are reviewed for the session template.
 - `allow_long`, `allow_short`, `max_long_lots`, `max_short_lots`,
   `max_gross_exposure_rub` and `max_net_exposure_rub` are reviewed per

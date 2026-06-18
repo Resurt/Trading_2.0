@@ -21,6 +21,15 @@ from trade_core.market_data.events import (
     TradingStatusTick,
     UserOrderStateTick,
 )
+from trade_core.market_data.historical_backfill import (
+    HistoricalBackfillChunk,
+    HistoricalBackfillConfig,
+    HistoricalBackfillInstrumentResult,
+    HistoricalBackfillPlan,
+    HistoricalBackfillQualitySummary,
+    HistoricalBackfillResult,
+    HistoricalCandleBackfillService,
+)
 from trade_core.market_data.pipeline import MarketDataPipeline
 from trade_core.market_data.read_models import (
     CurrentSignalContextReadModel,
@@ -47,6 +56,13 @@ __all__ = [
     "FeedFreshnessCalculator",
     "GapRecoveryCoordinator",
     "GapRecoveryRequest",
+    "HistoricalBackfillChunk",
+    "HistoricalBackfillConfig",
+    "HistoricalBackfillInstrumentResult",
+    "HistoricalBackfillPlan",
+    "HistoricalBackfillQualitySummary",
+    "HistoricalBackfillResult",
+    "HistoricalCandleBackfillService",
     "LastPriceTick",
     "LiveOrderBookReadModel",
     "MarketDataEvent",

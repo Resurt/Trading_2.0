@@ -42,6 +42,26 @@ MarketEventBus
                order_book_summary
 ```
 
+## Historical Candle Backfill
+
+Для накопления базы перед replay/calibration добавлен отдельный контур
+`HistoricalCandleBackfillService` в `trade_core.market_data.historical_backfill`.
+Он вызывает `BrokerGateway.get_candles()` для raw `1m` candles, сохраняет их в
+`market_candle` и строит derived `5m/10m/15m` bars через тот же `BarEngine`.
+
+Backfill использует `instrument_registry` или `InstrumentResolverService`, поэтому
+SBER/GAZP/LKOH должны работать через canonical `instrument_id` без placeholder UID.
+Повторный запуск идемпотентен благодаря upsert по
+`instrument_id + timeframe + open_ts_utc + trading_date`.
+
+CLI:
+
+```powershell
+python scripts/run_historical_candle_backfill.py --instruments SBER,GAZP --lookback-days 90 --dry-run
+```
+
+Полный runbook: `Docs/historical-candle-backfill.md`.
+
 ## Подписки
 
 `MarketDataSubscriptionService` нормализует broker `StreamEvent` в typed events:

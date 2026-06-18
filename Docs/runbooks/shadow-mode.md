@@ -18,6 +18,8 @@ Run on live market data without real order submission. Shadow mode must write th
 - Cost gate uses commission not lower than `5 bps` per side, plus spread and
   slippage assumptions.
 - Reports and counterfactual analysis run as in production.
+- Historical candle backfill can be run before the live shadow day to seed
+  `market_candle` with raw `1m` candles and derived `5m/10m/15m` bars.
 
 ## Validation Checklist
 
@@ -46,6 +48,7 @@ $env:TBANK_ENVIRONMENT = "live"
 $env:SSL_TBANK_VERIFY = "true"
 $env:TBANK_UNARY_TIMEOUT_FLOOR_SECONDS = "5.0"
 python scripts/run_tbank_sdk_import_check.py
+python scripts/run_historical_candle_backfill.py --instruments SBER,GAZP --lookback-days 90 --raw-interval 1m --derive 5m,10m,15m
 docker compose up -d --build trade-core api report-worker frontend
 python -m alembic upgrade head
 ```

@@ -28,6 +28,7 @@
 - `Docs/broker-gateway.md`
 - `Docs/session-manager.md`
 - `Docs/market-data-pipeline.md`
+- `Docs/historical-candle-backfill.md`
 - `Docs/strategy-risk-execution.md`
 - `Docs/observability_runbook.md`
 - `Docs/live-analytics-bff.md`
@@ -149,6 +150,16 @@ make analytics-smoke
 make report-rebuild
 make replay-day
 ```
+
+Историческая загрузка свечей перед replay/calibration:
+
+```bash
+python scripts/run_historical_candle_backfill.py --instruments SBER,GAZP --lookback-days 90 --dry-run
+```
+
+Реальная загрузка использует только readonly T-Bank methods и пишет raw `1m`
+candles плюс derived `5m/10m/15m` bars в `market_candle`. Подробности:
+`Docs/historical-candle-backfill.md`.
 
 ## Локальный Docker Compose
 

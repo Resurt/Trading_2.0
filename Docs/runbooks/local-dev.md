@@ -234,6 +234,7 @@ docker compose down -v
 python scripts/check.py
 python scripts/run_replay_harness.py
 python scripts/run_sandbox_smoke.py --dry-run
+python scripts/run_historical_candle_backfill.py --instruments SBER,GAZP --lookback-days 90 --dry-run
 ```
 
 Полный локальный controlled-launch gate без реальных broker orders:
@@ -340,3 +341,25 @@ python tools/reports/run_counterfactual_analysis.py --date 2026-06-12 --strategy
 Фильтры CLI: `--instrument`, `--timeframe`, `--session-type`,
 `--strategy-version`, `--force-rebuild`. HTML preview можно получить через
 `--output-format html` или вместе с JSON через `--output-format both`.
+
+## Historical Candle Backfill
+
+Перед shadow/prod калибровкой можно накопить raw candles и derived bars:
+
+```powershell
+$env:TRADING_BACKFILL_RUNTIME_MODE = "shadow"
+$env:TBANK_ENVIRONMENT = "live"
+$env:SSL_TBANK_VERIFY = "true"
+python scripts/run_tbank_sdk_import_check.py
+python scripts/run_historical_candle_backfill.py `
+  --instruments SBER,GAZP,LKOH `
+  --from-date 2025-01-01 `
+  --to-date 2026-06-18 `
+  --raw-interval 1m `
+  --derive 5m,10m,15m `
+  --chunk-days 7 `
+  --strategy-id baseline
+```
+
+Скрипт не вызывает `PostOrder`/`CancelOrder`; он использует только readonly
+`GetCandles` и пишет `market_candle`. Подробности: `Docs/historical-candle-backfill.md`.
