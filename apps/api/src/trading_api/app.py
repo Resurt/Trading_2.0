@@ -6,10 +6,11 @@ import asyncio
 import os
 from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime
-from typing import Annotated, cast
+from typing import Annotated, Any, cast
 from uuid import uuid4
 
 from fastapi import (
+    Body,
     Depends,
     FastAPI,
     HTTPException,
@@ -390,6 +391,183 @@ def create_fastapi_app(
             limit=limit,
         )
 
+    @app.get("/historical/data-quality", tags=["historical"])
+    def historical_data_quality(
+        request: Request,
+        from_date: Annotated[date | None, Query()] = None,
+        to_date: Annotated[date | None, Query()] = None,
+        lookback_days: Annotated[int, Query(ge=1, le=3660)] = 90,
+        instruments: Annotated[str, Query()] = "SBER,GAZP",
+        timeframes: Annotated[str, Query()] = "1m,5m,10m,15m",
+        fail_on_missing: Annotated[bool, Query()] = False,
+        fail_on_invalid_ohlc: Annotated[bool, Query()] = False,
+        max_missing_intervals: Annotated[int | None, Query()] = None,
+    ) -> dict[str, Any]:
+        from trade_core.market_data.events import parse_timeframe
+        from trade_core.market_data.quality import (
+            HistoricalDataQualityConfig,
+            HistoricalDataQualityService,
+            default_quality_window,
+        )
+
+        window_from, window_to = default_quality_window(
+            from_date=from_date,
+            to_date=to_date,
+            lookback_days=lookback_days,
+        )
+        config = HistoricalDataQualityConfig(
+            from_date=window_from,
+            to_date=window_to,
+            instruments=_split_csv(instruments),
+            timeframes=tuple(parse_timeframe(item) for item in _split_csv(timeframes)),
+            fail_on_missing=fail_on_missing,
+            fail_on_invalid_ohlc=fail_on_invalid_ohlc,
+            max_missing_intervals=max_missing_intervals,
+        )
+        database = _database_service(request)
+        with database.session_scope() as session:
+            return HistoricalDataQualityService(session).build_report(config).as_payload()
+
+    @app.post("/historical/replay/run", tags=["historical"])
+    def historical_replay_run(
+        request: Request,
+        auth: AuthDep,
+        payload: Annotated[dict[str, Any] | None, Body()] = None,
+    ) -> dict[str, Any]:
+        require_role(auth, (ApiRole.OPERATOR, ApiRole.ADMIN))
+        _ensure_historical_api_mode(runtime_mode)
+        from trade_core.market_data.events import parse_timeframe
+        from trade_core.replay import (
+            HistoricalDbReplayConfig,
+            HistoricalDbReplayService,
+            default_replay_window,
+        )
+
+        data = payload or {}
+        window_from, window_to = default_replay_window(
+            from_date=_date_from_payload(data.get("from_date")),
+            to_date=_date_from_payload(data.get("to_date")),
+            lookback_days=int(data.get("lookback_days", 90)),
+        )
+        config = HistoricalDbReplayConfig(
+            from_date=window_from,
+            to_date=window_to,
+            instruments=_split_csv(str(data.get("instruments", "SBER,GAZP"))),
+            timeframes=tuple(
+                parse_timeframe(item)
+                for item in _split_csv(str(data.get("timeframes", "5m,10m,15m")))
+            ),
+            strategy_id=str(data.get("strategy_id", "baseline")),
+            strategy_version=str(data.get("strategy_version", "latest")),
+            dry_run=bool(data.get("dry_run", False)),
+            reset_derived_events=bool(data.get("reset_derived_events", False)),
+        )
+        database = _database_service(request)
+        with database.session_scope() as session:
+            return asyncio.run(HistoricalDbReplayService(session).run(config)).as_payload()
+
+    @app.post("/historical/counterfactual/run", tags=["historical"])
+    def historical_counterfactual_run(
+        request: Request,
+        auth: AuthDep,
+        payload: Annotated[dict[str, Any] | None, Body()] = None,
+    ) -> dict[str, Any]:
+        require_role(auth, (ApiRole.OPERATOR, ApiRole.ADMIN))
+        _ensure_historical_api_mode(runtime_mode)
+        from report_worker.analytics.historical_counterfactual import (
+            HistoricalCounterfactualConfig,
+            HistoricalCounterfactualService,
+            default_counterfactual_window,
+        )
+
+        data = payload or {}
+        window_from, window_to = default_counterfactual_window(
+            from_date=_date_from_payload(data.get("from_date")),
+            to_date=_date_from_payload(data.get("to_date")),
+            lookback_days=int(data.get("lookback_days", 90)),
+        )
+        config = HistoricalCounterfactualConfig(
+            from_date=window_from,
+            to_date=window_to,
+            strategy_id=str(data.get("strategy_id", "baseline")),
+            instruments=_split_csv(str(data.get("instruments", "SBER,GAZP"))),
+            timeframes=_split_csv(str(data.get("timeframes", "5m,10m,15m"))),
+            dry_run=bool(data.get("dry_run", False)),
+            force_rebuild=bool(data.get("force_rebuild", False)),
+        )
+        database = _database_service(request)
+        with database.session_scope() as session:
+            return HistoricalCounterfactualService(session).rebuild(config).as_payload()
+
+    @app.post("/historical/reports/rebuild", tags=["historical"])
+    def historical_reports_rebuild(
+        request: Request,
+        auth: AuthDep,
+        payload: Annotated[dict[str, Any] | None, Body()] = None,
+    ) -> dict[str, Any]:
+        require_role(auth, (ApiRole.OPERATOR, ApiRole.ADMIN))
+        _ensure_historical_api_mode(runtime_mode)
+        from report_worker.analytics.historical_reports import (
+            HistoricalReportRebuildConfig,
+            HistoricalReportRebuildService,
+            default_report_window,
+        )
+
+        data = payload or {}
+        window_from, window_to = default_report_window(
+            from_date=_date_from_payload(data.get("from_date")),
+            to_date=_date_from_payload(data.get("to_date")),
+            lookback_days=int(data.get("lookback_days", 90)),
+        )
+        config = HistoricalReportRebuildConfig(
+            from_date=window_from,
+            to_date=window_to,
+            strategy_id=str(data.get("strategy_id", "baseline")),
+            instrument=cast(str | None, data.get("instrument")),
+            timeframe=cast(str | None, data.get("timeframe")),
+            session_type=cast(str | None, data.get("session_type")),
+            include_counterfactual=bool(data.get("include_counterfactual", False)),
+            force_rebuild=bool(data.get("force_rebuild", True)),
+            dry_run=bool(data.get("dry_run", False)),
+        )
+        database = _database_service(request)
+        with database.session_scope() as session:
+            return HistoricalReportRebuildService(session).rebuild(config).as_payload()
+
+    @app.get("/analytics/calibration", tags=["analytics"])
+    def analytics_calibration(
+        request: Request,
+        from_date: Annotated[date | None, Query()] = None,
+        to_date: Annotated[date | None, Query()] = None,
+        lookback_days: Annotated[int, Query(ge=1, le=3660)] = 90,
+        strategy_id: Annotated[str, Query()] = "baseline",
+        instruments: Annotated[str, Query()] = "SBER,GAZP",
+        timeframes: Annotated[str, Query()] = "5m,10m,15m",
+        group_by: Annotated[str, Query()] = "session_type,instrument_id,timeframe,blocker_code",
+    ) -> dict[str, Any]:
+        from report_worker.analytics.calibration import (
+            CalibrationReportConfig,
+            CalibrationReportService,
+            default_calibration_window,
+        )
+
+        window_from, window_to = default_calibration_window(
+            from_date=from_date,
+            to_date=to_date,
+            lookback_days=lookback_days,
+        )
+        config = CalibrationReportConfig(
+            from_date=window_from,
+            to_date=window_to,
+            strategy_id=strategy_id,
+            instruments=_split_csv(instruments),
+            timeframes=_split_csv(timeframes),
+            group_by=_split_csv(group_by),
+        )
+        database = _database_service(request)
+        with database.session_scope() as session:
+            return CalibrationReportService(session).build(config).as_payload()
+
     @app.get("/config/strategy", response_model=StrategyConfigResponse, tags=["config"])
     def get_strategy_config(
         service: ReadServiceDep,
@@ -500,6 +678,30 @@ def _cors_origins_from_env() -> list[str]:
 
 def _ws_push_interval_from_env() -> float:
     return max(0.05, float(os.getenv("TRADING_WS_PUSH_INTERVAL_SECONDS", "1.0")))
+
+
+def _ensure_historical_api_mode(runtime_mode: RuntimeMode) -> None:
+    if runtime_mode is RuntimeMode.HISTORICAL_REPLAY:
+        return
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            "Historical analytics are synchronous only in historical_replay/local mode; "
+            "use report-worker jobs in sandbox/shadow/production."
+        ),
+    )
+
+
+def _split_csv(raw: str) -> tuple[str, ...]:
+    return tuple(item.strip() for item in raw.split(",") if item.strip())
+
+
+def _date_from_payload(value: object) -> date | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value))
 
 
 def _dashboard_payload(app: FastAPI) -> dict[str, object]:

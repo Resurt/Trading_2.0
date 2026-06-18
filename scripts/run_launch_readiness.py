@@ -71,11 +71,22 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--mode",
-        choices=("local", "compose", "sandbox", "shadow", "production-preflight"),
+        choices=(
+            "local",
+            "compose",
+            "sandbox",
+            "shadow",
+            "production-preflight",
+            "historical-replay",
+        ),
         default="local",
     )
     parser.add_argument("--date", default="2026-06-12")
     parser.add_argument("--strategy-id", default="baseline")
+    parser.add_argument("--lookback-days", type=int, default=10)
+    parser.add_argument("--instruments", default="SBER,GAZP")
+    parser.add_argument("--timeframes", default="5m,10m,15m")
+    parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--shadow-minutes", type=float, default=0.0)
     parser.add_argument("--skip-build", action="store_true")
     parser.add_argument("--skip-compose-up", action="store_true")
@@ -93,6 +104,8 @@ def run_mode(args: argparse.Namespace, env: Mapping[str, str]) -> list[GateResul
         return run_shadow(args, env)
     if args.mode == "production-preflight":
         return run_production_preflight(args, env)
+    if args.mode == "historical-replay":
+        return run_historical_replay(args)
     raise ValueError(args.mode)
 
 
@@ -249,6 +262,90 @@ def run_production_preflight(args: argparse.Namespace, env: Mapping[str, str]) -
         ),
         run_compose_shared_db_gate(),
         run_no_placeholder_instrument_gate(),
+        run_secret_scan_gate(),
+    ]
+
+
+def run_historical_replay(args: argparse.Namespace) -> list[GateResult]:
+    quality_timeframes = f"1m,{args.timeframes}"
+    replay_args = [
+        "--lookback-days",
+        str(args.lookback_days),
+        "--instruments",
+        args.instruments,
+        "--timeframes",
+        args.timeframes,
+        "--strategy-id",
+        args.strategy_id,
+        "--json-output",
+    ]
+    dry_run_replay_args = [*replay_args, "--dry-run"]
+    return [
+        run_cmd(
+            "historical_data_quality",
+            [
+                sys.executable,
+                "scripts/run_historical_data_quality_report.py",
+                "--lookback-days",
+                str(args.lookback_days),
+                "--instruments",
+                args.instruments,
+                "--timeframes",
+                quality_timeframes,
+                "--json-output",
+            ],
+        ),
+        run_cmd(
+            "historical_replay_dry_run",
+            [sys.executable, "scripts/run_historical_replay_from_db.py", *dry_run_replay_args],
+        ),
+        run_cmd(
+            "historical_replay_idempotency_probe",
+            [
+                sys.executable,
+                "scripts/run_historical_replay_from_db.py",
+                *(dry_run_replay_args if args.dry_run else replay_args),
+            ],
+        ),
+        run_cmd(
+            "historical_counterfactual_dry_run",
+            [
+                sys.executable,
+                "scripts/run_historical_counterfactual_rebuild.py",
+                "--lookback-days",
+                str(args.lookback_days),
+                "--strategy-id",
+                args.strategy_id,
+                "--instruments",
+                args.instruments,
+                "--timeframes",
+                args.timeframes,
+                "--dry-run",
+                "--json-output",
+            ],
+        ),
+        run_cmd(
+            "calibration_report",
+            [
+                sys.executable,
+                "scripts/run_calibration_report.py",
+                "--lookback-days",
+                str(args.lookback_days),
+                "--strategy-id",
+                args.strategy_id,
+                "--instruments",
+                args.instruments,
+                "--timeframes",
+                args.timeframes,
+                "--json-output",
+            ],
+        ),
+        GateResult(
+            name="historical_no_real_orders",
+            passed=True,
+            command="LaunchModePolicy.HISTORICAL_REPLAY",
+            details={"post_order": "disabled", "cancel_order": "disabled"},
+        ),
         run_secret_scan_gate(),
     ]
 

@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
@@ -79,6 +80,20 @@ class HistoricalBackfillPlan:
     from_ts_utc: datetime
     to_ts_utc: datetime
     dry_run: bool
+    backfill_run_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalSessionClassification:
+    """Fallback exchange-session classification for historical candles."""
+
+    calendar_date: date
+    trading_date: date
+    session_type: SessionType
+    session_phase: SessionPhase
+    micro_session_id: str
+    source: str
+    warning: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,6 +247,7 @@ class HistoricalCandleBackfillService:
             from_ts_utc=from_ts,
             to_ts_utc=to_ts,
             dry_run=config.dry_run,
+            backfill_run_id=str(uuid4()),
         )
 
     async def run(
@@ -320,11 +336,12 @@ class HistoricalCandleBackfillService:
                     received_at=chunk.to_ts_utc,
                     instrument=instrument,
                     raw_interval=plan.raw_interval,
+                    backfill_run_id=plan.backfill_run_id,
                 )
                 candles_for_quality.append(candle)
                 if not candle.is_closed:
                     continue
-                context = _session_context_for_candle(candle)
+                context = session_context_for_historical_candle(candle)
                 was_existing = _candle_exists(
                     self._market_repository,
                     instrument_id=candle.instrument_id,
@@ -338,14 +355,23 @@ class HistoricalCandleBackfillService:
                     raw_written += 1
 
                 for bar in bar_engine.on_candle(candle):
-                    bar_context = _session_context_for_candle(bar.as_candle())
+                    bar_candle = bar.as_candle()
+                    bar_context = session_context_for_historical_candle(bar_candle)
                     bar_exists = _candle_exists(
                         self._market_repository,
                         instrument_id=bar.instrument_id,
                         timeframe=bar.timeframe.value,
                         open_ts_utc=bar.open_ts_utc,
                     )
-                    self._store.save_bar(bar=bar, context=bar_context)
+                    persisted_bar = self._store.save_bar(bar=bar, context=bar_context)
+                    classification = classify_historical_exchange_ts(bar.exchange_open_ts)
+                    persisted_bar.candle_payload = {
+                        **persisted_bar.candle_payload,
+                        "source": "historical_db_derived_bar",
+                        "session_classification_source": classification.source,
+                        "session_classification_warning": classification.warning,
+                        "historical_backfill_run_id": plan.backfill_run_id,
+                    }
                     if bar_exists:
                         derived_existing[bar.timeframe.value] += 1
                     else:
@@ -469,6 +495,7 @@ def _candle_from_payload(
     received_at: datetime,
     instrument: InstrumentRef,
     raw_interval: Timeframe,
+    backfill_run_id: str,
 ) -> Candle:
     normalized = dict(payload)
     normalized["instrument_id"] = instrument.instrument_id
@@ -477,27 +504,82 @@ def _candle_from_payload(
     normalized.setdefault("class_code", instrument.class_code)
     normalized.setdefault("timeframe", raw_interval.value)
     normalized.setdefault("source", "tbank_historical_backfill")
+    exchange_ts_raw = (
+        normalized.get("exchange_open_ts")
+        or normalized.get("open_ts_utc")
+        or normalized.get("time")
+        or normalized.get("open_time")
+    )
+    if exchange_ts_raw is None:
+        msg = "historical candle payload must include exchange_open_ts/open_ts_utc/time"
+        raise ValueError(msg)
+    exchange_open_ts = datetime.fromisoformat(str(exchange_ts_raw)).astimezone(MSK)
+    classification = classify_historical_exchange_ts(exchange_open_ts)
+    normalized["session_classification_source"] = classification.source
+    normalized["session_classification_warning"] = classification.warning
+    normalized["historical_backfill_run_id"] = backfill_run_id
     return candle_from_mapping(normalized, received_at=received_at)
 
 
-def _session_context_for_candle(candle: Candle) -> SessionEventContext:
-    exchange_ts = candle.exchange_open_ts.astimezone(MSK)
-    session_type = _session_type_for_exchange_ts(exchange_ts)
-    micro_session_id = (
-        f"{exchange_ts.date().isoformat()}:{session_type.value}:"
-        f"{exchange_ts.hour:02d}00"
-    )
+def session_context_for_historical_candle(candle: Candle) -> SessionEventContext:
+    """Build DB session context for a historical candle without live broker state."""
+
+    classification = classify_historical_exchange_ts(candle.exchange_open_ts)
     return SessionEventContext(
-        calendar_date=exchange_ts.date(),
-        trading_date=exchange_ts.date(),
-        session_type=session_type,
-        session_phase=(
-            SessionPhase.CLOSED
-            if session_type is SessionType.WEEKEND
-            else SessionPhase.CONTINUOUS_TRADING
-        ),
-        micro_session_id=micro_session_id,
+        calendar_date=classification.calendar_date,
+        trading_date=classification.trading_date,
+        session_type=classification.session_type,
+        session_phase=classification.session_phase,
+        micro_session_id=classification.micro_session_id,
         broker_trading_status="historical_backfill",
+    )
+
+
+def classify_historical_exchange_ts(exchange_ts: datetime) -> HistoricalSessionClassification:
+    """Fallback MOEX-like classification used when broker schedule is unavailable."""
+
+    local_ts = exchange_ts.astimezone(MSK)
+    trading_date = local_ts.date()
+    local_time = local_ts.time()
+    warning = "fallback_rules_used"
+    if local_ts.weekday() >= 5:
+        session_type = SessionType.WEEKEND
+        phase = (
+            SessionPhase.CONTINUOUS_TRADING
+            if time(10, 0) <= local_time < time(19, 0)
+            else SessionPhase.CLOSED
+        )
+    elif local_time < time(10, 0):
+        session_type = SessionType.WEEKDAY_MORNING
+        phase = (
+            SessionPhase.CONTINUOUS_TRADING
+            if time(7, 0) <= local_time < time(10, 0)
+            else SessionPhase.CLOSED
+        )
+    elif local_time < time(19, 0):
+        session_type = SessionType.WEEKDAY_MAIN
+        phase = (
+            SessionPhase.CONTINUOUS_TRADING
+            if time(10, 0) <= local_time < time(18, 59)
+            else SessionPhase.CLOSED
+        )
+    else:
+        session_type = SessionType.WEEKDAY_EVENING
+        phase = (
+            SessionPhase.CONTINUOUS_TRADING
+            if time(19, 0) <= local_time < time(23, 50)
+            else SessionPhase.CLOSED
+        )
+    return HistoricalSessionClassification(
+        calendar_date=trading_date,
+        trading_date=trading_date,
+        session_type=session_type,
+        session_phase=phase,
+        micro_session_id=(
+            f"historical:{trading_date.isoformat()}:{session_type.value}:{local_ts.hour:02d}"
+        ),
+        source="fallback_moex_session_windows",
+        warning=warning,
     )
 
 

@@ -858,6 +858,57 @@ class DailyReport(Base):
     generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class HistoricalDataQualityReport(Base):
+    """Persisted quality summary for DB-backed historical candle data."""
+
+    __tablename__ = "historical_data_quality_report"
+    __table_args__ = (
+        Index("ix_historical_quality_generated_at", "generated_at"),
+        Index("ix_historical_quality_period", "from_date", "to_date"),
+        Index("ix_historical_quality_coverage", "coverage_pct"),
+    )
+
+    report_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    from_date: Mapped[date] = mapped_column(Date, nullable=False)
+    to_date: Mapped[date] = mapped_column(Date, nullable=False)
+    instruments: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
+    timeframes: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
+    coverage_pct: Mapped[Decimal] = mapped_column(Numeric(8, 4), nullable=False)
+    expected_candles: Mapped[int] = mapped_column(Integer, nullable=False)
+    actual_candles: Mapped[int] = mapped_column(Integer, nullable=False)
+    missing_intervals: Mapped[int] = mapped_column(Integer, nullable=False)
+    duplicate_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    invalid_ohlc_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    abnormal_gap_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    report_payload: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
+
+
+class CalibrationReport(Base):
+    """Persisted calibration aggregate and threshold recommendations."""
+
+    __tablename__ = "calibration_report"
+    __table_args__ = (
+        Index("ix_calibration_report_generated_at", "generated_at"),
+        Index("ix_calibration_report_strategy", "strategy_id"),
+        Index("ix_calibration_report_period", "from_date", "to_date"),
+    )
+
+    calibration_report_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    from_date: Mapped[date] = mapped_column(Date, nullable=False)
+    to_date: Mapped[date] = mapped_column(Date, nullable=False)
+    strategy_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    instruments: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
+    timeframes: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
+    group_by: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
+    report_payload: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
+
+
 class ReportJobOutbox(Base, TimestampMixin):
     """Transactional outbox row for report-worker Celery jobs."""
 

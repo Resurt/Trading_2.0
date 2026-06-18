@@ -5,7 +5,9 @@ import {
   Activity,
   BarChart3,
   CirclePlay,
+  Database,
   FileTerminal,
+  LineChart,
   LayoutDashboard,
   Settings,
   Square,
@@ -26,6 +28,8 @@ const reports = useReportsStore();
 const navItems = [
   { to: "/", label: "Live Dashboard", icon: LayoutDashboard },
   { to: "/reports", label: "Reports", icon: BarChart3 },
+  { to: "/historical", label: "Historical Data", icon: Database },
+  { to: "/calibration", label: "Calibration", icon: LineChart },
   { to: "/settings", label: "Settings", icon: Settings },
   { to: "/diagnostics", label: "Logs/Diagnostics", icon: FileTerminal },
 ];

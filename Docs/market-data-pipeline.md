@@ -192,3 +192,21 @@ best bid/ask, depth, spread, imbalance, quality score и payload для расш
 - Deprecated user trade stream не используется как источник истины по собственным
   исполнениям; для этого остается broker order/fill reconciliation.
 - Market quality score не является сигналом на сделку сам по себе.
+
+## Historical replay from stored candles
+
+`market_candle` теперь является входом не только для backfill, но и для
+DB-backed historical replay. Контур `HistoricalDbReplayService` читает
+закрытые `5m/10m/15m` bars, созданные через `BarEngine`, и передаёт их в тот
+же strategy/risk/execution/persistence путь, что live runtime. Для `1m` raw
+candles применяется только quality control и построение derived bars.
+
+Historical session context строится детерминированно: synthetic
+`micro_session_id` имеет формат
+`historical:{trading_date}:{session_type}:{HH}`. `weekday_morning`,
+`weekday_main`, `weekday_evening` и `weekend` не смешиваются; свечи вне
+fallback trading windows получают `session_phase=closed`.
+
+Replay-generated rows обязаны иметь `payload.source=historical_db_replay`.
+Этот признак используется для идемпотентности и для безопасного
+`--reset-derived-events`, который не удаляет live/shadow/sandbox факты.

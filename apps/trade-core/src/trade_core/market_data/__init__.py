@@ -31,6 +31,14 @@ from trade_core.market_data.historical_backfill import (
     HistoricalCandleBackfillService,
 )
 from trade_core.market_data.pipeline import MarketDataPipeline
+from trade_core.market_data.quality import (
+    HistoricalDataQualityConfig,
+    HistoricalDataQualityReport,
+    HistoricalDataQualityService,
+    InstrumentTimeframeQuality,
+    InvalidCandleReason,
+    MissingInterval,
+)
 from trade_core.market_data.read_models import (
     CurrentSignalContextReadModel,
     LiveOrderBookReadModel,
@@ -63,6 +71,11 @@ __all__ = [
     "HistoricalBackfillQualitySummary",
     "HistoricalBackfillResult",
     "HistoricalCandleBackfillService",
+    "HistoricalDataQualityConfig",
+    "HistoricalDataQualityReport",
+    "HistoricalDataQualityService",
+    "InstrumentTimeframeQuality",
+    "InvalidCandleReason",
     "LastPriceTick",
     "LiveOrderBookReadModel",
     "MarketDataEvent",
@@ -75,6 +88,7 @@ __all__ = [
     "MarketState",
     "MarketStateCalculator",
     "MarketTrade",
+    "MissingInterval",
     "OrderBookSnapshot",
     "PriceLevel",
     "StreamGapRecoveryResult",

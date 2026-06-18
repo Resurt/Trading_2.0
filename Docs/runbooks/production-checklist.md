@@ -66,3 +66,27 @@ docker compose ps
 - Report backlog growing.
 - Unknown blocker/reject/cancel reason.
 - Any uncertainty about token/account environment.
+
+## Historical calibration gate
+
+Перед controlled minimal live нужно зафиксировать результаты исторического
+прогона:
+
+- backfill минимум `90d` по активным инструментам завершён без placeholder
+  `instrument_uid`;
+- `historical_data_quality_report.coverage_pct` и invalid OHLC reviewed;
+- `historical_db_replay` повторно проходит идемпотентно без дублей;
+- `counterfactual_result` построен для blocked/cancelled/rejected
+  opportunities по горизонтам `+5m/+10m/+15m`;
+- `historical_report_rebuild` построил hourly/daily reports по
+  `session_type`, `instrument_id`, `timeframe`;
+- `calibration_report` содержит blocker ranking, missed opportunity summary,
+  gross/net PnL proxy, cost sensitivity и recommendations;
+- ни один historical/shadow replay шаг не вызвал real `PostOrder` или
+  `CancelOrder`.
+
+Проверка:
+
+```powershell
+python scripts/run_launch_readiness.py --mode historical-replay
+```

@@ -71,3 +71,22 @@ Do not kill `trade-core` for hourly rollovers. Micro-sessions are logical and mu
 - Daily reports and counterfactual rows are buildable after market data is available.
 - `stream_gap_recovery_requested/completed` events appear after reconnect tests.
 - `position_snapshot` rows are written on micro-session boundaries and before risk-sensitive decisions.
+
+## Historical readiness before shadow
+
+Перед live shadow-днём рекомендуется прогнать historical контур:
+
+```powershell
+python scripts/run_historical_data_quality_report.py --lookback-days 90 --json-output
+python scripts/run_historical_replay_from_db.py --lookback-days 90 --strategy-id baseline --json-output
+python scripts/run_historical_counterfactual_rebuild.py --lookback-days 90 --strategy-id baseline --json-output
+python scripts/run_historical_report_rebuild.py --lookback-days 90 --strategy-id baseline --include-counterfactual --json-output
+python scripts/run_calibration_report.py --lookback-days 90 --strategy-id baseline --json-output
+python scripts/run_launch_readiness.py --mode historical-replay
+```
+
+Цель проверки: убедиться, что historical candles покрывают выбранные
+инструменты/таймфреймы, replay создаёт полный decision journal, а
+counterfactual/calibration уже показывают blocker ranking и candidate funnel.
+Shadow mode после этого использует live market data, но продолжает запрещать
+real `PostOrder`/`CancelOrder`.

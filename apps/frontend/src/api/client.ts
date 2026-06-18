@@ -1,11 +1,14 @@
 import type {
   AuthStatusResponse,
   BlockerAnalyticsResponse,
+  CalibrationResponse,
   CandidateFunnelResponse,
   CanceledOrderDiagnosticsResponse,
   CounterfactualResponse,
   DailyReportResponse,
   DailyReportRunRequest,
+  HistoricalQualityResponse,
+  HistoricalRunResponse,
   HourlyReportResponse,
   MarketOverviewResponse,
   OrderResponse,
@@ -129,6 +132,28 @@ export const apiClient = {
     requestJson<CandidateFunnelResponse>(withQuery("/analytics/candidate-funnel", query)),
   canceledOrderDiagnostics: (query: Record<string, QueryValue>) =>
     requestJson<CanceledOrderDiagnosticsResponse>(withQuery("/analytics/canceled-orders", query)),
+  historicalDataQuality: (query: Record<string, QueryValue>) =>
+    requestJson<HistoricalQualityResponse>(withQuery("/historical/data-quality", query)),
+  runHistoricalReplay: (payload: Record<string, unknown>) =>
+    requestJson<HistoricalRunResponse>(
+      "/historical/replay/run",
+      { method: "POST", body: JSON.stringify(payload) },
+      "operator",
+    ),
+  runHistoricalCounterfactual: (payload: Record<string, unknown>) =>
+    requestJson<HistoricalRunResponse>(
+      "/historical/counterfactual/run",
+      { method: "POST", body: JSON.stringify(payload) },
+      "operator",
+    ),
+  runHistoricalReportRebuild: (payload: Record<string, unknown>) =>
+    requestJson<HistoricalRunResponse>(
+      "/historical/reports/rebuild",
+      { method: "POST", body: JSON.stringify(payload) },
+      "operator",
+    ),
+  calibrationReport: (query: Record<string, QueryValue>) =>
+    requestJson<CalibrationResponse>(withQuery("/analytics/calibration", query)),
   reportJobStatus: (jobId: string) =>
     requestJson<ReportJobStatusResponse>(`/reports/jobs/${encodeURIComponent(jobId)}`),
   strategyConfig: (strategyId: string, sessionTemplate: string) =>

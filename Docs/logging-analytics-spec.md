@@ -976,3 +976,35 @@ Frontend outputs:
   `daily_report.report_payload`, `counterfactual_result.result_payload`;
 - HTML preview хранится в `html_output` внутри payload и возвращается read models
   как поле `html`.
+
+## Historical replay analytics extensions
+
+Для подготовки калибровки добавлен отдельный historical contour поверх
+PostgreSQL domain tables:
+
+- `historical_data_quality_report` хранит агрегированный отчёт качества
+  `market_candle`: coverage, expected/actual candle count, missing intervals,
+  duplicate count, invalid OHLC count, abnormal gaps, source/session/timeframe
+  distributions.
+- `calibration_report` хранит итоговую витрину по candidates, blockers,
+  pseudo-orders, counterfactual PnL proxy, cost sensitivity и recommended
+  threshold changes. Этот отчёт не меняет `strategy_config` автоматически.
+- `counterfactual_result.result_payload.source=historical_counterfactual_rebuild`
+  отделяет historical пересчёт от live/shadow/sandbox аналитики.
+- Replay факты имеют `source=historical_db_replay` в payload, а
+  `signal_candidate.signal_fingerprint` строится детерминированно из
+  `strategy_id|strategy_version|instrument_id|timeframe|bar_close_ts|side|action|historical_db_replay`.
+
+Quality/replay/calibration CLI должны печатать JSON summary и не писать raw
+technical logs как аналитический источник. Источник истины для отчётов и
+калибровки остаётся PostgreSQL.
+
+Historical replay execution policy:
+
+- runtime mode только `historical_replay`;
+- `PostOrder` и `CancelOrder` запрещены на уровне fake gateway и launch policy;
+- успешный risk path создаёт `order_intent`, pseudo `broker_order` и
+  `order_state_event`;
+- blocked/rejected/cancelled paths получают `counterfactual_result` по
+  горизонтам `+5m`, `+10m`, `+15m` с assumptions `commission>=5 bps per side`
+  и round-trip fee минимум `10 bps`.

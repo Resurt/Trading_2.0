@@ -274,6 +274,62 @@ export interface WebSocketTicketResponse {
   auth_mode: string;
 }
 
+export interface HistoricalQualityResponse {
+  report_id: string | null;
+  coverage_pct: string;
+  expected_candles: number;
+  actual_candles: number;
+  missing_intervals: number;
+  duplicate_count: number;
+  invalid_ohlc_count: number;
+  abnormal_gap_count: number;
+  source_distribution: Record<string, number>;
+  session_type_distribution: Record<string, number>;
+  timeframe_distribution: Record<string, number>;
+  instrument_timeframes: JsonPayload[];
+}
+
+export interface HistoricalRunResponse {
+  source: string;
+  dry_run?: boolean;
+  trading_days_processed?: number;
+  bars_processed?: number;
+  candidates_created?: number;
+  blockers_created?: number;
+  order_intents_created?: number;
+  pseudo_orders_created?: number;
+  counterfactual_results_built?: number;
+  hourly_reports_built?: number;
+  daily_reports_built?: number;
+  deterministic_fingerprint?: string;
+  real_orders_disabled?: boolean;
+}
+
+export interface CalibrationResponse {
+  calibration_report_id: string | null;
+  source: string;
+  candidate_count: number;
+  approved_count: number;
+  blocked_count: number;
+  pseudo_order_count: number;
+  blocker_ranking: JsonPayload[];
+  final_blocker_ranking: JsonPayload[];
+  missed_opportunity_summary: JsonPayload;
+  avoided_loss_summary: JsonPayload;
+  gross_simulated_pnl: string;
+  net_simulated_pnl: string;
+  total_assumed_fees: string;
+  total_assumed_slippage: string;
+  best_session_type: string | null;
+  worst_session_type: string | null;
+  best_timeframe: string | null;
+  worst_timeframe: string | null;
+  best_instrument: string | null;
+  worst_instrument: string | null;
+  cost_sensitivity: JsonPayload;
+  recommended_threshold_changes: JsonPayload;
+}
+
 export interface WebSocketEnvelope<TPayload = unknown> {
   message_id: string;
   ts_utc: string;

@@ -284,3 +284,24 @@ Idempotency:
 - `broker_order` по `request_order_id`;
 - `order_state_event` по `order_intent_id + state_seq + event_type`;
 - `fill_event` по `exchange_order_id + broker_fill_id + trading_date`.
+
+## Historical DB replay for calibration
+
+Historical replay не добавляет новую торговую стратегию и не меняет
+`strategy_config`. Он использует существующий `ConfigDrivenStrategyEngine`,
+`DefaultRiskEngine`, `DefaultExecutionEngine` и `SqlAlchemyStrategyEventStore`
+для воспроизводимого прогона закрытых bars из `market_candle`.
+
+Правила:
+
+- входом являются только закрытые `5m/10m/15m` bars;
+- `historical_replay` и calibration всегда работают с pseudo-orders;
+- risk gates пишут те же `candidate_stage_result`, `blocker_event` и
+  `risk_event`, что live runtime;
+- approved candidates пишут `order_intent`, pseudo `broker_order` и
+  `order_state_event`;
+- deterministic fingerprint защищает от дублей при повторном запуске;
+- calibration report может рекомендовать изменения порогов
+  `max_spread_bps`, `min_market_quality_score`,
+  `min_edge_after_total_costs_bps`, `max_data_age_ms` и `allow_short`, но не
+  применяет их автоматически.

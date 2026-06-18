@@ -105,3 +105,25 @@ python tools/reports/run_counterfactual_analysis.py --date <YYYY-MM-DD> --strate
   окружения.
 - Дневные отчёты по blocker/candidate/counterfactual будут содержательными только
   после replay, который создаст decision journal.
+
+## Historical replay and calibration continuation
+
+После backfill обязательный порядок теперь такой:
+
+1. `python scripts/run_historical_data_quality_report.py --lookback-days 10 --json-output`
+2. `python scripts/run_historical_replay_from_db.py --lookback-days 10 --strategy-id baseline --json-output`
+3. `python scripts/run_historical_counterfactual_rebuild.py --lookback-days 10 --strategy-id baseline --json-output`
+4. `python scripts/run_historical_report_rebuild.py --lookback-days 10 --strategy-id baseline --include-counterfactual --json-output`
+5. `python scripts/run_calibration_report.py --lookback-days 10 --strategy-id baseline --json-output`
+
+Historical replay читает `market_candle`, использует тот же
+`ConfigDrivenStrategyEngine`, `DefaultRiskEngine`, `DefaultExecutionEngine` и
+`SqlAlchemyStrategyEventStore`, но работает только в
+`RuntimeMode.HISTORICAL_REPLAY`. Реальные `PostOrder` и `CancelOrder` в этом
+контуре запрещены: execution пишет pseudo `broker_order` и `order_state_event`.
+
+Все generated факты помечаются `payload.source=historical_db_replay`, а
+counterfactual/calibration результаты имеют отдельные `source` payload-поля.
+Повторный replay идемпотентен по deterministic fingerprint; флаг
+`--reset-derived-events` удаляет только historical replay facts за выбранный
+период и не трогает live/shadow/sandbox события.

@@ -363,3 +363,23 @@ python scripts/run_historical_candle_backfill.py `
 
 Скрипт не вызывает `PostOrder`/`CancelOrder`; он использует только readonly
 `GetCandles` и пишет `market_candle`. Подробности: `Docs/historical-candle-backfill.md`.
+
+## Historical replay local workflow
+
+После backfill можно прогнать полный local historical контур без реальных
+broker orders:
+
+```powershell
+make historical-quality LOOKBACK_DAYS=10
+make historical-replay LOOKBACK_DAYS=10
+make historical-counterfactual LOOKBACK_DAYS=10
+make historical-report-rebuild LOOKBACK_DAYS=10
+make calibration-report LOOKBACK_DAYS=10
+python scripts/run_launch_readiness.py --mode historical-replay --dry-run
+```
+
+Для реальной проверки на уже загруженных candles уберите `--dry-run` у
+конкретных CLI-команд. Все результаты пишутся в PostgreSQL domain tables:
+`historical_data_quality_report`, replay-generated candidate/order facts,
+`counterfactual_result`, `hourly_report`, `daily_report` и
+`calibration_report`.

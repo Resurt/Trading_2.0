@@ -29,6 +29,8 @@
 - `Docs/session-manager.md`
 - `Docs/market-data-pipeline.md`
 - `Docs/historical-candle-backfill.md`
+- `Docs/runbooks/historical-replay.md`
+- `Docs/runbooks/calibration.md`
 - `Docs/strategy-risk-execution.md`
 - `Docs/observability_runbook.md`
 - `Docs/live-analytics-bff.md`
@@ -160,6 +162,22 @@ python scripts/run_historical_candle_backfill.py --instruments SBER,GAZP --lookb
 Реальная загрузка использует только readonly T-Bank methods и пишет raw `1m`
 candles плюс derived `5m/10m/15m` bars в `market_candle`. Подробности:
 `Docs/historical-candle-backfill.md`.
+
+После загрузки свечей исторический контур проверяет качество `market_candle`,
+запускает DB-backed replay, строит counterfactual `+5m/+10m/+15m`,
+пересобирает historical hourly/daily reports и формирует calibration report без
+реальных `PostOrder`/`CancelOrder`:
+
+```bash
+make historical-quality LOOKBACK_DAYS=90
+make historical-replay LOOKBACK_DAYS=90
+make historical-counterfactual LOOKBACK_DAYS=90
+make historical-report-rebuild LOOKBACK_DAYS=90
+make calibration-report LOOKBACK_DAYS=90
+```
+
+Операционный порядок: `Docs/runbooks/historical-replay.md` и
+`Docs/runbooks/calibration.md`.
 
 ## Локальный Docker Compose
 
