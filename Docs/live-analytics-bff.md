@@ -39,9 +39,11 @@ FastAPI читает read models и доменные факты из PostgreSQL,
 `POST /reports/rebuild/run` принимает `scope=daily` или `scope=hourly`.
 Для `scope=hourly` обязателен `micro_session_id`.
 
-## WebSocket snapshots
+## Live WebSocket channels
 
-`/ws/dashboard` отдает live snapshot:
+`/ws/dashboard` держит соединение открытым, сразу отправляет первый snapshot,
+затем публикует повторные `dashboard.snapshot` updates по configurable interval
+и периодические `heartbeat` сообщения:
 
 - `robot_status`
 - `market`
@@ -51,7 +53,8 @@ FastAPI читает read models и доменные факты из PostgreSQL,
 - `blockers`
 - `candidate_funnel`
 
-`/ws/reports` отдает report/analytics snapshot:
+`/ws/reports` держит соединение открытым и отправляет report/analytics snapshot
+updates:
 
 - `hourly`
 - `daily`
@@ -60,10 +63,12 @@ FastAPI читает read models и доменные факты из PostgreSQL,
 - `counterfactual`
 - `canceled_orders`
 
-WebSocket endpoints держат соединение открытым. При подключении BFF отправляет
-первый snapshot, затем повторные snapshot/update сообщения по configurable interval
-и heartbeat. Если клиент не успевает принимать сообщения, BFF закрывает соединение
-как backpressure protection; frontend должен перейти в degraded/reconnect состояние.
+Для браузерного production-like доступа frontend сначала получает короткоживущий
+ticket через `POST /auth/ws-ticket`, а затем подключается к WebSocket с query
+parameter `?ticket=...`. В local-dev без production режима допустим `X-API-Role`,
+но production API отвергает X-API-Role-only requests. Если клиент не успевает
+принимать сообщения, BFF закрывает соединение как backpressure protection;
+frontend должен перейти в degraded/reconnect состояние.
 
 Control plane команды идут через `robot_command`: API пишет durable command и audit,
 а `trade-core` применяет ее в runtime loop без физического рестарта процесса.

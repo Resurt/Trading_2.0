@@ -21,7 +21,7 @@
 | Компонент | Путь | Назначение |
 | --- | --- | --- |
 | `trade-core` | `apps/trade-core` | Долгоживущий Python service: broker adapter, session manager, hourly micro-sessions, market data pipeline, strategy/risk/execution, replay/shadow hooks. |
-| `api` | `apps/api` | FastAPI BFF: REST endpoints, WebSocket snapshot channels, read models, постановка report tasks в Celery. |
+| `api` | `apps/api` | FastAPI BFF: REST endpoints, live WebSocket channels with ticket auth, read models, постановка report tasks в Celery. |
 | `report-worker` | `apps/report-worker` | Celery worker и health service для hourly/daily reports, rebuild jobs, counterfactual analytics. |
 | `frontend` | `apps/frontend` | Vue 3 + Vite + Pinia dark-theme UI для live dashboard, reports, settings, diagnostics. |
 | `common` | `packages/common` | Общие enums, SQLAlchemy models/repositories, DB settings, observability primitives, launch modes. |

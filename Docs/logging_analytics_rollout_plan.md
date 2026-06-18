@@ -38,7 +38,7 @@
   - `scripts/run_hourly_report.py`;
   - `scripts/run_daily_report.py`;
   - `scripts/run_counterfactual.py`;
-- FastAPI BFF endpoints и WebSocket snapshot channels;
+- FastAPI BFF endpoints и live WebSocket channels с production-like ticket auth;
 - Vue 3 dark-theme dashboard and reports UI;
 - replay harness, sandbox smoke, shadow mode runbooks, CI.
 

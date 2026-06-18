@@ -47,18 +47,20 @@ dashboards provisioning для production-like observability. `report-worker`
 содержит Celery task pipeline, hourly/daily reports, counterfactual analytics и
 ручные CLI-скрипты для запуска отчетов вне FastAPI. `api` содержит FastAPI BFF
 с REST endpoints для управления, live read models, отчетов, strategy config и
-WebSocket snapshot channels для dashboard/orders/market/reports. `frontend`
+live WebSocket channels для dashboard/orders/market/reports. В production-like
+режимах WebSocket в браузере авторизуется через короткоживущий ticket из
+`POST /auth/ws-ticket`, а REST использует bearer auth. `frontend`
 содержит Vue 3 dark-theme UI для live dashboard, reports, settings и diagnostics
-с Pinia stores, REST snapshots и WebSocket snapshot channels.
+с Pinia stores, REST snapshots и live WebSocket updates.
 
 ## Каркас репозитория
 
 - `apps/trade-core` - долгоживущий Python runtime для session/market/strategy/risk/execution orchestration.
-- `apps/api` - FastAPI BFF для управления, read models, отчетов и WebSocket snapshots.
+- `apps/api` - FastAPI BFF для управления, read models, отчетов и live WebSocket feeds.
 - `apps/report-worker` - Celery/report worker для hourly/daily/counterfactual analytics.
 - `apps/frontend` - Vue 3 + Vite dark-theme операторский UI.
 - `packages/common` - общие enums и dataclasses.
-- `tests` - smoke tests для импортов Python-пакетов.
+- `tests` - backend unit/smoke/acceptance tests для runtime, API, SDK wrapper, analytics и launch gates.
 - `scripts` - вспомогательные скрипты совместимости.
 - `tools/reports` - CLI для hourly/daily/counterfactual отчетов вне FastAPI.
 
