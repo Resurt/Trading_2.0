@@ -224,7 +224,6 @@ def test_runtime_requires_tbank_sdk_for_production_like_modes(
             config=runtime_config(tmp_path),
             launch_policy=LaunchModePolicy.from_mode(RuntimeMode.SHADOW),
             database=DatabaseService(runtime_config(tmp_path).database_url or ""),
-            broker_gateway=cast(BrokerGateway, SafeNoopBrokerGateway()),
         )
 
 

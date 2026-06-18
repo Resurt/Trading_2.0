@@ -495,7 +495,9 @@ class TradeCoreRuntime:
         self.config = config or TradeCoreRuntimeConfig.from_env()
         self.launch_policy = launch_policy or LaunchModePolicy.from_env()
         self.launch_policy.validate_startup()
-        self._assert_broker_sdk_available_when_required()
+        self._assert_broker_sdk_available_when_required(
+            broker_gateway_injected=broker_gateway is not None,
+        )
         self.identity = create_identity(self.launch_policy.mode)
         self.database = database or DatabaseService(_required_database_url(self.config))
         self.metrics = metrics or TradingMetrics(self.identity)
@@ -1266,8 +1268,14 @@ class TradeCoreRuntime:
         tokens = load_tbank_tokens_for_launch(self.launch_policy)
         return cast(BrokerGateway, TBankBrokerGateway(config=config, tokens=tokens))
 
-    def _assert_broker_sdk_available_when_required(self) -> None:
+    def _assert_broker_sdk_available_when_required(
+        self,
+        *,
+        broker_gateway_injected: bool,
+    ) -> None:
         if self.launch_policy.mode is RuntimeMode.HISTORICAL_REPLAY:
+            return
+        if broker_gateway_injected:
             return
         try:
             load_tbank_sdk()
