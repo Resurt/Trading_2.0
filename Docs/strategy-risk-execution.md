@@ -184,6 +184,26 @@ Position reconciliation gates:
 - `position_state_freshness`;
 - `position_reconciliation`.
 
+Special-day gates:
+
+- `dividend_gap_risk` - entry blocked on dividend gap day when
+  `block_entries_on_dividend_gap_day=true`;
+- `corporate_action_window` - entry blocked on corporate-action day when
+  `block_entries_on_corporate_action_day=true`;
+- `special_day_shadow_only` - short / entry policy blocks live action when
+  `special_day_trade_policy=shadow_only`.
+
+`RiskLimits` also contains:
+
+- `block_entries_on_dividend_gap_day`;
+- `block_entries_on_corporate_action_day`;
+- `block_short_on_special_day`;
+- `special_day_trade_policy`.
+
+Historical replay reads these flags from `market_special_day`. Live/shadow runtime looks
+up special-day context by `trading_date + instrument_id`; if the calendar is unavailable,
+runtime writes warning/audit `corporate_action_calendar_unavailable`.
+
 ## PositionService
 
 `PositionService` refreshes account positions through `BrokerGateway.get_positions`

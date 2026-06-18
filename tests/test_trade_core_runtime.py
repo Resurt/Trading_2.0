@@ -456,8 +456,11 @@ def test_closed_bar_candidate_risk_order_path_is_deterministic(tmp_path: Path) -
                 )
             ).scalars()
         )
-        assert len(stage_names) == 18
+        assert len(stage_names) == 21
         assert {
+            "dividend_gap_day_policy",
+            "corporate_action_day_policy",
+            "short_on_special_day_policy",
             "position_state_freshness",
             "position_reconciliation",
             "long_allowed_by_config",

@@ -44,6 +44,11 @@ def main() -> None:
         timeframes=split_csv(args.timeframes),
         group_by=split_csv(args.group_by),
         force_rebuild=args.force_rebuild,
+        calibration_scope=args.calibration_scope,
+        include_dividend_gap_days=args.include_dividend_gap_days,
+        include_corporate_action_days=args.include_corporate_action_days,
+        include_abnormal_gap_days=args.include_abnormal_gap_days,
+        require_special_day_classification=args.require_special_day_classification,
     )
     database = DatabaseService(args.database_url or build_database_url_from_env())
     try:
@@ -71,6 +76,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--database-url")
     parser.add_argument("--force-rebuild", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--calibration-scope",
+        choices=("primary_normal_days", "special_days_only", "all_days"),
+        default="primary_normal_days",
+    )
+    parser.add_argument("--include-dividend-gap-days", action="store_true")
+    parser.add_argument("--include-corporate-action-days", action="store_true")
+    parser.add_argument("--include-abnormal-gap-days", action="store_true")
+    parser.add_argument("--require-special-day-classification", action="store_true")
     parser.add_argument("--json-output", action="store_true")
     return parser.parse_args()
 

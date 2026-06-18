@@ -31,6 +31,8 @@
 - `Docs/historical-candle-backfill.md`
 - `Docs/runbooks/historical-replay.md`
 - `Docs/runbooks/calibration.md`
+- `Docs/runbooks/corporate-actions.md`
+- `Docs/runbooks/final-historical-calibration.md`
 - `Docs/strategy-risk-execution.md`
 - `Docs/observability_runbook.md`
 - `Docs/live-analytics-bff.md`
@@ -174,10 +176,15 @@ make historical-replay LOOKBACK_DAYS=90
 make historical-counterfactual LOOKBACK_DAYS=90
 make historical-report-rebuild LOOKBACK_DAYS=90
 make calibration-report LOOKBACK_DAYS=90
+make corporate-actions-import LOOKBACK_DAYS=90
+make market-special-days LOOKBACK_DAYS=90
+make calibration-primary LOOKBACK_DAYS=90
 ```
 
 Операционный порядок: `Docs/runbooks/historical-replay.md` и
-`Docs/runbooks/calibration.md`.
+`Docs/runbooks/calibration.md`. Перед final calibration обязательно выполните
+`Docs/runbooks/corporate-actions.md` и `Docs/runbooks/final-historical-calibration.md`:
+dividend/corporate-action дни исключаются из primary calibration по умолчанию.
 
 ## Локальный Docker Compose
 

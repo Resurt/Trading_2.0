@@ -306,6 +306,54 @@ def test_short_candidate_is_blocked_when_broker_or_account_disallows_short() -> 
     assert decision.final_blocker.gate_name == "short_allowed_by_account"
 
 
+def test_special_day_risk_blockers_are_machine_readable() -> None:
+    dividend = DefaultRiskEngine().evaluate(
+        RiskAssessmentInput(
+            candidate=candidate(side=TradeSide.BUY),
+            session_snapshot=snapshot(),
+            market_state=market_state(spread_bps=Decimal("5")),
+            limits=RiskLimits(),
+            corporate_action_flag=True,
+            dividend_gap_day=True,
+            special_day_type="dividend_gap_day",
+            special_day_trade_policy="shadow_only",
+        )
+    )
+    corporate = DefaultRiskEngine().evaluate(
+        RiskAssessmentInput(
+            candidate=candidate(side=TradeSide.BUY),
+            session_snapshot=snapshot(),
+            market_state=market_state(spread_bps=Decimal("5")),
+            limits=RiskLimits(),
+            corporate_action_flag=True,
+            special_day_type="corporate_action_day",
+            special_day_trade_policy="shadow_only",
+        )
+    )
+    short_shadow_only = DefaultRiskEngine().evaluate(
+        RiskAssessmentInput(
+            candidate=candidate(side=TradeSide.SELL),
+            session_snapshot=snapshot(),
+            market_state=market_state(spread_bps=Decimal("5")),
+            limits=RiskLimits(allow_short=True, max_short_lots=5, max_position_lots=5),
+            special_day_type="abnormal_gap_day",
+            special_day_trade_policy="shadow_only",
+        )
+    )
+
+    assert dividend.final_blocker is not None
+    assert dividend.final_blocker.code is BlockerCode.DIVIDEND_GAP_RISK
+    assert dividend.final_blocker.reason_payload["special_day_type"] == "dividend_gap_day"
+    assert corporate.final_blocker is not None
+    assert corporate.final_blocker.code is BlockerCode.CORPORATE_ACTION_WINDOW
+    assert corporate.final_blocker.reason_payload["special_day_type"] == "corporate_action_day"
+    assert short_shadow_only.final_blocker is not None
+    assert short_shadow_only.final_blocker.code is BlockerCode.SPECIAL_DAY_SHADOW_ONLY
+    assert short_shadow_only.final_blocker.reason_payload["special_day_trade_policy"] == (
+        "shadow_only"
+    )
+
+
 def test_entry_is_blocked_when_position_state_is_stale() -> None:
     decision = DefaultRiskEngine().evaluate(
         RiskAssessmentInput(

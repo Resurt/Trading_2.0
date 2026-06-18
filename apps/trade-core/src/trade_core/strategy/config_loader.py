@@ -207,6 +207,24 @@ class StrategyConfigLoader:
                 "freeze_new_entries",
                 default=base.freeze_new_entries,
             ),
+            block_entries_on_dividend_gap_day=_bool_value(
+                payload,
+                "block_entries_on_dividend_gap_day",
+                default=base.block_entries_on_dividend_gap_day,
+            ),
+            block_entries_on_corporate_action_day=_bool_value(
+                payload,
+                "block_entries_on_corporate_action_day",
+                default=base.block_entries_on_corporate_action_day,
+            ),
+            block_short_on_special_day=_bool_value(
+                payload,
+                "block_short_on_special_day",
+                default=base.block_short_on_special_day,
+            ),
+            special_day_trade_policy=str(
+                payload.get("special_day_trade_policy", base.special_day_trade_policy)
+            ),
         )
 
 

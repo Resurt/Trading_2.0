@@ -402,6 +402,7 @@ def create_fastapi_app(
         fail_on_missing: Annotated[bool, Query()] = False,
         fail_on_invalid_ohlc: Annotated[bool, Query()] = False,
         max_missing_intervals: Annotated[int | None, Query()] = None,
+        require_special_day_classification: Annotated[bool, Query()] = False,
     ) -> dict[str, Any]:
         from trade_core.market_data.events import parse_timeframe
         from trade_core.market_data.quality import (
@@ -423,10 +424,175 @@ def create_fastapi_app(
             fail_on_missing=fail_on_missing,
             fail_on_invalid_ohlc=fail_on_invalid_ohlc,
             max_missing_intervals=max_missing_intervals,
+            require_special_day_classification=require_special_day_classification,
         )
         database = _database_service(request)
         with database.session_scope() as session:
             return HistoricalDataQualityService(session).build_report(config).as_payload()
+
+    @app.post("/corporate-actions/import", tags=["corporate-actions"])
+    def corporate_actions_import(
+        request: Request,
+        auth: AuthDep,
+        payload: Annotated[dict[str, Any] | None, Body()] = None,
+    ) -> dict[str, Any]:
+        from decimal import Decimal
+        from pathlib import Path
+
+        from trade_core.corporate_actions import (
+            CorporateActionEvent,
+            CorporateActionImportConfig,
+            CorporateActionService,
+        )
+
+        require_role(auth, (ApiRole.OPERATOR, ApiRole.ADMIN))
+        data = payload or {}
+        source = str(data.get("source", "manual"))
+        confidence = str(data.get("confidence", "manual_unverified"))
+        database = _database_service(request)
+        with database.session_scope() as session:
+            service = CorporateActionService(session)
+            file_value = data.get("file")
+            if file_value:
+                file_path = Path(str(file_value))
+                config = CorporateActionImportConfig(source=source, confidence=confidence)
+                rows = (
+                    service.import_json(file_path, config=config)
+                    if file_path.suffix.lower() == ".json"
+                    else service.import_csv(file_path, config=config)
+                )
+            else:
+                ticker = str(data.get("ticker", "SBER")).upper()
+                row = service.upsert_event(
+                    CorporateActionEvent(
+                        instrument_id=str(data.get("instrument_id", f"MOEX:{ticker}")),
+                        ticker=ticker,
+                        action_type=str(data.get("action_type", "dividend")),
+                        ex_date=_date_from_payload(data.get("ex_date")),
+                        registry_close_date=_date_from_payload(data.get("registry_close_date")),
+                        payment_date=_date_from_payload(data.get("payment_date")),
+                        amount_per_share=(
+                            Decimal(str(data["amount_per_share"]))
+                            if data.get("amount_per_share") is not None
+                            else None
+                        ),
+                        currency=cast(str | None, data.get("currency", "RUB")),
+                        source=source,
+                        confidence=confidence,
+                        action_payload={"source": source, "confidence": confidence},
+                    )
+                )
+                rows = (row,)
+            return {
+                "source": "corporate_actions_import",
+                "rows_imported": len(rows),
+                "corporate_action_ids": [str(row.corporate_action_id) for row in rows],
+            }
+
+    @app.get("/corporate-actions", tags=["corporate-actions"])
+    def corporate_actions(
+        request: Request,
+        auth: AuthDep,
+        from_date: Annotated[date | None, Query()] = None,
+        to_date: Annotated[date | None, Query()] = None,
+        instruments: Annotated[str, Query()] = "",
+    ) -> list[dict[str, Any]]:
+        from trade_core.corporate_actions import CorporateActionService
+
+        require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
+        database = _database_service(request)
+        with database.session_scope() as session:
+            return [
+                {
+                    "corporate_action_id": str(row.corporate_action_id),
+                    "instrument_id": row.instrument_id,
+                    "ticker": row.ticker,
+                    "action_type": row.action_type,
+                    "ex_date": row.ex_date.isoformat() if row.ex_date else None,
+                    "amount_per_share": str(row.amount_per_share)
+                    if row.amount_per_share is not None
+                    else None,
+                    "currency": row.currency,
+                    "source": row.source,
+                    "confidence": row.confidence,
+                    "payload": row.action_payload,
+                }
+                for row in CorporateActionService(session).list_events(
+                    from_date=from_date,
+                    to_date=to_date,
+                    instruments=_split_csv(instruments),
+                )
+            ]
+
+    @app.post("/market-special-days/classify", tags=["corporate-actions"])
+    def market_special_days_classify(
+        request: Request,
+        auth: AuthDep,
+        payload: Annotated[dict[str, Any] | None, Body()] = None,
+    ) -> dict[str, Any]:
+        from decimal import Decimal
+
+        from trade_core.corporate_actions import MarketSpecialDayClassifier
+
+        require_role(auth, (ApiRole.OPERATOR, ApiRole.ADMIN))
+        _ensure_historical_api_mode(runtime_mode)
+        data = payload or {}
+        window_from, window_to = _historical_window(
+            from_date=_date_from_payload(data.get("from_date")),
+            to_date=_date_from_payload(data.get("to_date")),
+            lookback_days=int(data.get("lookback_days", 90)),
+        )
+        database = _database_service(request)
+        with database.session_scope() as session:
+            return MarketSpecialDayClassifier(session).classify(
+                from_date=window_from,
+                to_date=window_to,
+                instruments=_split_csv(str(data.get("instruments", "SBER,GAZP"))),
+                gap_threshold_bps=Decimal(str(data.get("gap_threshold_bps", "150"))),
+                dividend_gap_threshold_bps=Decimal(
+                    str(data.get("dividend_gap_threshold_bps", "50"))
+                ),
+                force_rebuild=bool(data.get("force_rebuild", False)),
+            ).as_payload()
+
+    @app.get("/market-special-days", tags=["corporate-actions"])
+    def market_special_days(
+        request: Request,
+        auth: AuthDep,
+        from_date: Annotated[date | None, Query()] = None,
+        to_date: Annotated[date | None, Query()] = None,
+        instruments: Annotated[str, Query()] = "",
+    ) -> list[dict[str, Any]]:
+        from trade_core.corporate_actions import CorporateActionService
+
+        require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
+        database = _database_service(request)
+        with database.session_scope() as session:
+            return [
+                {
+                    "special_day_id": str(row.special_day_id),
+                    "trading_date": row.trading_date.isoformat(),
+                    "instrument_id": row.instrument_id,
+                    "ticker": row.ticker,
+                    "special_day_type": row.special_day_type,
+                    "reason_code": row.reason_code,
+                    "source": row.source,
+                    "open_gap_bps": str(row.open_gap_bps)
+                    if row.open_gap_bps is not None
+                    else None,
+                    "severity": row.severity,
+                    "exclude_from_primary_calibration": (
+                        row.exclude_from_primary_calibration
+                    ),
+                    "trade_policy": row.trade_policy,
+                    "payload": row.special_day_payload,
+                }
+                for row in CorporateActionService(session).list_special_days(
+                    from_date=from_date,
+                    to_date=to_date,
+                    instruments=_split_csv(instruments),
+                )
+            ]
 
     @app.post("/historical/replay/run", tags=["historical"])
     def historical_replay_run(
@@ -461,6 +627,21 @@ def create_fastapi_app(
             strategy_version=str(data.get("strategy_version", "latest")),
             dry_run=bool(data.get("dry_run", False)),
             reset_derived_events=bool(data.get("reset_derived_events", False)),
+            include_special_days=bool(data.get("include_special_days", False)),
+            exclude_dividend_gap_days=bool(data.get("exclude_dividend_gap_days", True)),
+            exclude_corporate_action_days=bool(
+                data.get("exclude_corporate_action_days", True)
+            ),
+            exclude_abnormal_gap_days=bool(data.get("exclude_abnormal_gap_days", False)),
+            special_day_policy=str(data.get("special_day_policy", "exclude")),
+            require_special_day_classification=bool(
+                data.get("require_special_day_classification", False)
+            ),
+            allow_default_strategy_config=bool(
+                data.get("allow_default_strategy_config", False)
+            ),
+            session_template=str(data.get("session_template", "weekday_main")),
+            config_version=str(data.get("config_version", "latest")),
         )
         database = _database_service(request)
         with database.session_scope() as session:
@@ -544,6 +725,11 @@ def create_fastapi_app(
         instruments: Annotated[str, Query()] = "SBER,GAZP",
         timeframes: Annotated[str, Query()] = "5m,10m,15m",
         group_by: Annotated[str, Query()] = "session_type,instrument_id,timeframe,blocker_code",
+        calibration_scope: Annotated[str, Query()] = "primary_normal_days",
+        include_dividend_gap_days: Annotated[bool, Query()] = False,
+        include_corporate_action_days: Annotated[bool, Query()] = False,
+        include_abnormal_gap_days: Annotated[bool, Query()] = False,
+        require_special_day_classification: Annotated[bool, Query()] = False,
     ) -> dict[str, Any]:
         from report_worker.analytics.calibration import (
             CalibrationReportConfig,
@@ -563,6 +749,11 @@ def create_fastapi_app(
             instruments=_split_csv(instruments),
             timeframes=_split_csv(timeframes),
             group_by=_split_csv(group_by),
+            calibration_scope=calibration_scope,
+            include_dividend_gap_days=include_dividend_gap_days,
+            include_corporate_action_days=include_corporate_action_days,
+            include_abnormal_gap_days=include_abnormal_gap_days,
+            require_special_day_classification=require_special_day_classification,
         )
         database = _database_service(request)
         with database.session_scope() as session:
@@ -702,6 +893,19 @@ def _date_from_payload(value: object) -> date | None:
     if isinstance(value, date):
         return value
     return date.fromisoformat(str(value))
+
+
+def _historical_window(
+    *,
+    from_date: date | None,
+    to_date: date | None,
+    lookback_days: int,
+) -> tuple[date, date]:
+    end = to_date or datetime.now(tz=UTC).date()
+    start = from_date or date.fromordinal(end.toordinal() - lookback_days + 1)
+    if start > end:
+        raise HTTPException(status_code=400, detail="from_date must be <= to_date")
+    return start, end
 
 
 def _dashboard_payload(app: FastAPI) -> dict[str, object]:

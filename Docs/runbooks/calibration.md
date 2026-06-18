@@ -25,6 +25,8 @@ python scripts/run_calibration_report.py `
   --strategy-id baseline `
   --instruments SBER,GAZP `
   --timeframes 5m,10m,15m `
+  --calibration-scope primary_normal_days `
+  --require-special-day-classification `
   --group-by session_type,instrument_id,timeframe,blocker_code `
   --json-output
 ```
@@ -107,3 +109,35 @@ python scripts/run_launch_readiness.py --mode historical-replay --dry-run
 Ограничение: если в БД ещё нет `market_candle`, replay/calibration вернут
 пустые summaries. Это корректно для dry-run, но не является готовностью к
 shadow/live.
+
+## Candle-only vs Shadow Confirmation
+
+Recommendations разделены на два контура:
+
+- `safe_from_historical_candles`: preliminary session/timeframe/instrument/holding-horizon
+  выводы, которые можно обсуждать после candle-only replay;
+- `requires_shadow_confirmation`: spread, market quality, slippage, execution thresholds
+  и live order policy, которые нельзя считать финальными без shadow live.
+
+`calibration_data_mode=historical_candles_only` всегда сопровождается caveats по
+`real_spread`, `order_book_depth`, `book_imbalance`, `market_quality_score`,
+`real_slippage`, `broker_rejects`, `partial_fills`, `latency`.
+
+## Corporate Actions Scope
+
+Primary calibration по умолчанию использует `calibration_scope=primary_normal_days` и
+исключает:
+
+- `dividend_gap_day`;
+- `corporate_action_day`;
+- `exclude_from_primary_calibration=true`.
+
+Special days анализируются отдельно:
+
+```powershell
+python scripts/run_calibration_report.py --lookback-days 90 --strategy-id baseline --calibration-scope special_days_only --json-output
+```
+
+Если special-day classification отсутствует, report возвращает
+`calibration_clean=false`, warning `corporate_action_classification_missing` и
+recommendation `run_market_special_day_classification_before_final_calibration`.

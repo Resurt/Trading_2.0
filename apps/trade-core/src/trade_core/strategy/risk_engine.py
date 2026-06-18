@@ -59,6 +59,70 @@ class DefaultRiskEngine:
 
         self._append_gate(
             gates,
+            code=BlockerCode.DIVIDEND_GAP_RISK,
+            gate_name="dividend_gap_day_policy",
+            passed=not (
+                is_entry
+                and request.dividend_gap_day
+                and request.limits.block_entries_on_dividend_gap_day
+            ),
+            reason_payload={
+                "dividend_gap_day": request.dividend_gap_day,
+                "block_entries_on_dividend_gap_day": (
+                    request.limits.block_entries_on_dividend_gap_day
+                ),
+                "special_day_type": request.special_day_type,
+                "special_day_trade_policy": request.special_day_trade_policy,
+            },
+            limit_value=Decimal("0"),
+            observed_value=Decimal("1") if request.dividend_gap_day else Decimal("0"),
+        )
+        self._append_gate(
+            gates,
+            code=BlockerCode.CORPORATE_ACTION_WINDOW,
+            gate_name="corporate_action_day_policy",
+            passed=not (
+                is_entry
+                and request.corporate_action_flag
+                and request.limits.block_entries_on_corporate_action_day
+            ),
+            reason_payload={
+                "corporate_action_flag": request.corporate_action_flag,
+                "block_entries_on_corporate_action_day": (
+                    request.limits.block_entries_on_corporate_action_day
+                ),
+                "special_day_type": request.special_day_type,
+                "special_day_trade_policy": request.special_day_trade_policy,
+            },
+            limit_value=Decimal("0"),
+            observed_value=Decimal("1") if request.corporate_action_flag else Decimal("0"),
+        )
+        self._append_gate(
+            gates,
+            code=BlockerCode.SPECIAL_DAY_SHADOW_ONLY,
+            gate_name="short_on_special_day_policy",
+            passed=not (
+                is_short_entry
+                and request.special_day_type is not None
+                and request.limits.block_short_on_special_day
+            ),
+            reason_payload={
+                "special_day_type": request.special_day_type,
+                "block_short_on_special_day": request.limits.block_short_on_special_day,
+                "candidate_side": request.candidate.side.value,
+                "special_day_trade_policy": (
+                    request.special_day_trade_policy
+                    or request.limits.special_day_trade_policy
+                ),
+            },
+            limit_value=Decimal("0"),
+            observed_value=(
+                Decimal("1") if request.special_day_type is not None else Decimal("0")
+            ),
+        )
+
+        self._append_gate(
+            gates,
             code=BlockerCode.SESSION_FORBIDDEN,
             gate_name="no_new_entries_during_freeze",
             passed=not (is_entry and request.limits.freeze_new_entries),

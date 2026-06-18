@@ -909,6 +909,112 @@ class CalibrationReport(Base):
     report_payload: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
 
 
+class CorporateActionEvent(Base):
+    """Manual/API imported corporate action fact used by calibration filters."""
+
+    __tablename__ = "corporate_action_event"
+    __table_args__ = (
+        UniqueConstraint(
+            "instrument_id",
+            "action_type",
+            "ex_date",
+            "amount_per_share",
+            "source",
+            name="uq_corporate_action_identity",
+        ),
+        Index("ix_corporate_action_instrument_ex_date", "instrument_id", "ex_date"),
+        Index("ix_corporate_action_ticker_ex_date", "ticker", "ex_date"),
+        Index("ix_corporate_action_type_ex_date", "action_type", "ex_date"),
+        Index("ix_corporate_action_source", "source"),
+    )
+
+    corporate_action_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    instrument_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    ticker: Mapped[str | None] = mapped_column(String(16))
+    action_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    declared_date: Mapped[date | None] = mapped_column(Date)
+    ex_date: Mapped[date | None] = mapped_column(Date)
+    registry_close_date: Mapped[date | None] = mapped_column(Date)
+    payment_date: Mapped[date | None] = mapped_column(Date)
+    amount_per_share: Mapped[Decimal | None] = mapped_column(MONEY_TYPE)
+    currency: Mapped[str | None] = mapped_column(String(8))
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    confidence: Mapped[str] = mapped_column(String(32), nullable=False)
+    action_payload: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        onupdate=func.now(),
+    )
+
+
+class MarketSpecialDay(Base):
+    """Instrument/date flag for dividend gaps, corporate actions, and excluded days."""
+
+    __tablename__ = "market_special_day"
+    __table_args__ = (
+        UniqueConstraint(
+            "trading_date",
+            "instrument_id",
+            "special_day_type",
+            "reason_code",
+            name="uq_market_special_day_identity",
+        ),
+        Index("ix_market_special_day_trading_instrument", "trading_date", "instrument_id"),
+        Index("ix_market_special_day_type_date", "special_day_type", "trading_date"),
+        Index("ix_market_special_day_excluded", "exclude_from_primary_calibration"),
+        Index("ix_market_special_day_corporate_action", "linked_corporate_action_id"),
+    )
+
+    special_day_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    trading_date: Mapped[date] = mapped_column(Date, nullable=False)
+    calendar_date: Mapped[date] = mapped_column(Date, nullable=False)
+    instrument_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    ticker: Mapped[str | None] = mapped_column(String(16))
+    special_day_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    session_type: Mapped[str | None] = mapped_column(String(32))
+    reason_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    linked_corporate_action_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("corporate_action_event.corporate_action_id"),
+    )
+    open_gap_bps: Mapped[Decimal | None] = mapped_column(BPS_TYPE)
+    previous_close: Mapped[Decimal | None] = mapped_column(PRICE_TYPE)
+    session_open_price: Mapped[Decimal | None] = mapped_column(PRICE_TYPE)
+    expected_dividend_bps: Mapped[Decimal | None] = mapped_column(BPS_TYPE)
+    detected_gap_bps: Mapped[Decimal | None] = mapped_column(BPS_TYPE)
+    severity: Mapped[str] = mapped_column(String(32), nullable=False)
+    exclude_from_primary_calibration: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+    )
+    trade_policy: Mapped[str] = mapped_column(String(32), nullable=False, default="shadow_only")
+    special_day_payload: Mapped[JsonPayload] = mapped_column(
+        JSONB_TYPE,
+        nullable=False,
+        default=dict,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
 class ReportJobOutbox(Base, TimestampMixin):
     """Transactional outbox row for report-worker Celery jobs."""
 

@@ -3,7 +3,12 @@ import { computed, ref } from "vue";
 import { Play, RefreshCw } from "@lucide/vue";
 
 import { apiClient } from "../api/client";
-import type { HistoricalQualityResponse, HistoricalRunResponse } from "../api/types";
+import type {
+  HistoricalQualityResponse,
+  HistoricalRunResponse,
+  MarketSpecialDayClassificationResponse,
+  MarketSpecialDayResponse,
+} from "../api/types";
 import DataPanel from "../components/ui/DataPanel.vue";
 import EmptyState from "../components/ui/EmptyState.vue";
 import MetricTile from "../components/ui/MetricTile.vue";
@@ -17,6 +22,8 @@ const loading = ref(false);
 const error = ref("");
 const quality = ref<HistoricalQualityResponse | null>(null);
 const lastRun = ref<HistoricalRunResponse | null>(null);
+const specialDays = ref<MarketSpecialDayResponse[]>([]);
+const classification = ref<MarketSpecialDayClassificationResponse | null>(null);
 
 const sourceBars = computed(() =>
   Object.entries(quality.value?.source_distribution ?? {}).map(([label, value]) => ({
@@ -34,8 +41,38 @@ const sessionBars = computed(() =>
   })),
 );
 
+const specialBars = computed(() =>
+  Object.entries(quality.value?.special_day_distribution ?? {}).map(([label, value]) => ({
+    label,
+    value,
+    code: label,
+  })),
+);
+
 async function runQuality() {
   await withLoading(async () => {
+    quality.value = await apiClient.historicalDataQuality({
+      lookback_days: lookbackDays.value,
+      instruments: instruments.value,
+      timeframes: timeframes.value,
+    });
+    specialDays.value = await apiClient.marketSpecialDays({
+      lookback_days: lookbackDays.value,
+      instruments: instruments.value,
+    });
+  });
+}
+
+async function classifySpecialDays() {
+  await withLoading(async () => {
+    classification.value = await apiClient.classifyMarketSpecialDays({
+      lookback_days: lookbackDays.value,
+      instruments: instruments.value,
+      force_rebuild: true,
+    });
+    specialDays.value = await apiClient.marketSpecialDays({
+      instruments: instruments.value,
+    });
     quality.value = await apiClient.historicalDataQuality({
       lookback_days: lookbackDays.value,
       instruments: instruments.value,
@@ -123,6 +160,10 @@ async function withLoading(action: () => Promise<void>) {
             <RefreshCw :size="16" aria-hidden="true" />
             <span>Quality</span>
           </button>
+          <button class="icon-button" type="button" :disabled="loading" @click="classifySpecialDays">
+            <RefreshCw :size="16" aria-hidden="true" />
+            <span>Classify special days</span>
+          </button>
           <button class="icon-button" type="button" :disabled="loading" @click="runReplay(true)">
             <Play :size="16" aria-hidden="true" />
             <span>Replay dry-run</span>
@@ -152,14 +193,64 @@ async function withLoading(action: () => Promise<void>) {
       <MetricTile label="missing" :value="quality?.missing_intervals ?? 0" />
       <MetricTile label="duplicates" :value="quality?.duplicate_count ?? 0" />
       <MetricTile label="invalid OHLC" :value="quality?.invalid_ohlc_count ?? 0" />
+      <MetricTile label="special days" :value="quality?.corporate_action_days_count ?? 0" />
+      <MetricTile label="dividend gaps" :value="quality?.dividend_gap_days_count ?? 0" />
     </div>
 
     <div class="reports-grid">
+      <DataPanel>
+        <template #eyebrow>corporate actions</template>
+        <template #title>Special-day classification</template>
+        <dl v-if="quality" class="definition-grid">
+          <dt>status</dt>
+          <dd>{{ quality.corporate_action_classification_status }}</dd>
+          <dt>excluded days</dt>
+          <dd>{{ quality.excluded_days_count }}</dd>
+          <dt>included days</dt>
+          <dd>{{ quality.included_days_count }}</dd>
+          <dt>last classify</dt>
+          <dd>{{ classification?.classification_status ?? "-" }}</dd>
+        </dl>
+        <MiniBars v-if="specialBars.length" :rows="specialBars" />
+        <EmptyState
+          v-if="quality?.corporate_action_classification_status === 'missing'"
+          title="Special-day classification missing"
+          detail="Run classification before final calibration."
+          tone="warn"
+        />
+      </DataPanel>
+
       <DataPanel>
         <template #eyebrow>quality</template>
         <template #title>Source distribution</template>
         <MiniBars v-if="sourceBars.length" :rows="sourceBars" />
         <EmptyState v-else title="Run quality report first" />
+      </DataPanel>
+
+      <DataPanel>
+        <template #eyebrow>corporate actions</template>
+        <template #title>Special days</template>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>date</th>
+                <th>instrument</th>
+                <th>type</th>
+                <th>policy</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="item in specialDays" :key="item.special_day_id">
+                <td>{{ item.trading_date }}</td>
+                <td>{{ item.instrument_id }}</td>
+                <td>{{ item.special_day_type }}</td>
+                <td>{{ item.trade_policy }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <EmptyState v-if="specialDays.length === 0" title="No special days loaded" />
+        </div>
       </DataPanel>
 
       <DataPanel>

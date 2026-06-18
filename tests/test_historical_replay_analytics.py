@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
@@ -16,6 +18,12 @@ from report_worker.analytics.historical_counterfactual import (
 from report_worker.analytics.historical_reports import (
     HistoricalReportRebuildConfig,
     HistoricalReportRebuildService,
+)
+from trade_core.corporate_actions import (
+    CorporateActionEvent,
+    CorporateActionImportConfig,
+    CorporateActionService,
+    MarketSpecialDayClassifier,
 )
 from trade_core.market_data.events import Timeframe
 from trade_core.market_data.historical_backfill import classify_historical_exchange_ts
@@ -31,10 +39,15 @@ from trading_common.db.models import (
     HistoricalDataQualityReport,
     InstrumentRegistry,
     MarketCandle,
+    MarketSpecialDay,
     OrderIntent,
     OrderStateEvent,
     RiskEvent,
     SignalCandidate,
+    StrategyConfig,
+)
+from trading_common.db.models import (
+    CorporateActionEvent as CorporateActionEventRow,
 )
 
 MSK = ZoneInfo("Europe/Moscow")
@@ -89,6 +102,77 @@ def test_historical_quality_catches_missing_duplicate_invalid_and_session_split(
         assert report.session_type_distribution["weekday_main"] >= 3
         assert report.session_type_distribution["weekend"] == 1
         assert session.execute(select(HistoricalDataQualityReport)).scalars().first() is not None
+    engine.dispose()
+
+
+def test_corporate_action_import_is_idempotent_and_classifies_dividend_gap(
+    tmp_path: Path,
+) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        _seed_instrument(session)
+        csv_path = tmp_path / "dividends.csv"
+        csv_path.write_text(
+            "ticker,action_type,ex_date,amount_per_share,currency\n"
+            "SBER,dividend,2026-06-18,34.84,RUB\n",
+            encoding="utf-8",
+        )
+        service = CorporateActionService(session)
+        first = service.import_csv(
+            csv_path,
+            config=CorporateActionImportConfig(source="manual"),
+        )
+        second = service.import_csv(
+            csv_path,
+            config=CorporateActionImportConfig(source="manual"),
+        )
+        result = MarketSpecialDayClassifier(session).classify(
+            from_date=date(2026, 6, 18),
+            to_date=date(2026, 6, 18),
+            instruments=("SBER",),
+        )
+
+        assert len(first) == 1
+        assert len(second) == 1
+        assert session.execute(select(CorporateActionEventRow)).scalars().all() == list(first)
+        special_day = session.execute(select(MarketSpecialDay)).scalars().one()
+        assert special_day.special_day_type == "dividend_gap_day"
+        assert special_day.exclude_from_primary_calibration is True
+        assert special_day.trade_policy == "shadow_only"
+        assert result.dividend_gap_days == 1
+    engine.dispose()
+
+
+def test_quality_report_requires_special_day_classification_when_final() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        _seed_instrument(session)
+        _add_candle(
+            session,
+            exchange_open=datetime(2026, 6, 18, 10, 0, tzinfo=MSK),
+            timeframe="1m",
+        )
+        config = HistoricalDataQualityConfig(
+            from_date=date(2026, 6, 18),
+            to_date=date(2026, 6, 18),
+            instruments=("SBER",),
+            timeframes=(Timeframe.M1,),
+            require_special_day_classification=True,
+        )
+        with pytest.raises(SystemExit) as raised:
+            HistoricalDataQualityService(session).assert_passes(config)
+        assert raised.value.code == 5
+
+        MarketSpecialDayClassifier(session).classify(
+            from_date=date(2026, 6, 18),
+            to_date=date(2026, 6, 18),
+            instruments=("SBER",),
+        )
+        report = HistoricalDataQualityService(session).assert_passes(config)
+        assert report.corporate_action_classification_status == "completed"
+        assert report.quality_warnings == ()
     engine.dispose()
 
 
@@ -152,6 +236,229 @@ def test_historical_replay_creates_full_path_and_is_idempotent() -> None:
         assert broker_order is not None
         assert broker_order.broker_status == "pseudo_posted"
         assert session.execute(select(OrderStateEvent)).scalars().first() is not None
+    engine.dispose()
+
+
+def test_replay_excludes_and_flags_special_days() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        _seed_replay_candles(session)
+        _seed_dividend_event(session)
+        MarketSpecialDayClassifier(session).classify(
+            from_date=date(2026, 6, 18),
+            to_date=date(2026, 6, 18),
+            instruments=("SBER",),
+        )
+
+        excluded = asyncio.run(
+            HistoricalDbReplayService(session).run(
+                HistoricalDbReplayConfig(
+                    from_date=date(2026, 6, 18),
+                    to_date=date(2026, 6, 18),
+                    instruments=("SBER",),
+                    timeframes=(Timeframe.M5,),
+                    strategy_id="baseline",
+                    require_special_day_classification=True,
+                )
+            )
+        )
+        flagged = asyncio.run(
+            HistoricalDbReplayService(session).run(
+                HistoricalDbReplayConfig(
+                    from_date=date(2026, 6, 18),
+                    to_date=date(2026, 6, 18),
+                    instruments=("SBER",),
+                    timeframes=(Timeframe.M5,),
+                    strategy_id="baseline",
+                    include_special_days=True,
+                    special_day_policy="include_with_flags",
+                    require_special_day_classification=True,
+                    reset_derived_events=True,
+                )
+            )
+        )
+
+        assert excluded.candidates_created == 0
+        assert excluded.bars_skipped_special_day >= 1
+        assert excluded.skipped_dividend_gap_days >= 1
+        assert flagged.candidates_created >= 1
+        flagged_candidate = session.execute(select(SignalCandidate)).scalars().first()
+        assert flagged_candidate is not None
+        flagged_payload = _candidate_condition_payload(flagged_candidate)
+        assert flagged_payload["dividend_gap_day"] is True
+        assert flagged_payload["special_day_policy"] == "include_with_flags"
+        shadow_only = asyncio.run(
+            HistoricalDbReplayService(session).run(
+                HistoricalDbReplayConfig(
+                    from_date=date(2026, 6, 18),
+                    to_date=date(2026, 6, 18),
+                    instruments=("SBER",),
+                    timeframes=(Timeframe.M5,),
+                    strategy_id="baseline",
+                    include_special_days=True,
+                    special_day_policy="shadow_only",
+                    require_special_day_classification=True,
+                    reset_derived_events=True,
+                )
+            )
+        )
+        assert shadow_only.candidates_created >= 1
+        shadow_candidate = session.execute(select(SignalCandidate)).scalars().first()
+        assert shadow_candidate is not None
+        shadow_payload = _candidate_condition_payload(shadow_candidate)
+        assert shadow_payload["eligible_for_live_calibration"] is False
+    engine.dispose()
+
+
+def test_replay_requires_db_strategy_config_unless_fallback_is_explicit() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        _seed_instrument(session)
+        _add_candle(
+            session,
+            exchange_open=datetime(2026, 6, 18, 10, 0, tzinfo=MSK),
+            timeframe="5m",
+            open_price=Decimal("100"),
+            close_price=Decimal("100.30"),
+        )
+        config = HistoricalDbReplayConfig(
+            from_date=date(2026, 6, 18),
+            to_date=date(2026, 6, 18),
+            instruments=("SBER",),
+            timeframes=(Timeframe.M5,),
+            strategy_id="baseline",
+        )
+
+        with pytest.raises(RuntimeError, match="requires active strategy_config"):
+            asyncio.run(HistoricalDbReplayService(session).run(config))
+
+        fallback = asyncio.run(
+            HistoricalDbReplayService(session).run(
+                HistoricalDbReplayConfig(
+                    from_date=config.from_date,
+                    to_date=config.to_date,
+                    instruments=config.instruments,
+                    timeframes=config.timeframes,
+                    strategy_id=config.strategy_id,
+                    allow_default_strategy_config=True,
+                    dry_run=True,
+                )
+            )
+        )
+        assert fallback.strategy_config_source == "fallback_conservative_default"
+        assert fallback.allow_default_strategy_config is True
+    engine.dispose()
+
+
+def test_calibration_primary_scope_excludes_special_days_and_warns_when_missing() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        _seed_replay_candles(session)
+        _seed_dividend_event(session)
+        MarketSpecialDayClassifier(session).classify(
+            from_date=date(2026, 6, 18),
+            to_date=date(2026, 6, 18),
+            instruments=("SBER",),
+        )
+        asyncio.run(
+            HistoricalDbReplayService(session).run(
+                HistoricalDbReplayConfig(
+                    from_date=date(2026, 6, 18),
+                    to_date=date(2026, 6, 18),
+                    instruments=("SBER",),
+                    timeframes=(Timeframe.M5,),
+                    strategy_id="baseline",
+                    include_special_days=True,
+                    special_day_policy="include_with_flags",
+                )
+            )
+        )
+        primary = CalibrationReportService(session).build(
+            CalibrationReportConfig(
+                from_date=date(2026, 6, 18),
+                to_date=date(2026, 6, 18),
+                strategy_id="baseline",
+                instruments=("SBER",),
+                timeframes=("5m",),
+                group_by=("session_type", "instrument_id", "timeframe", "blocker_code"),
+                require_special_day_classification=True,
+            )
+        )
+        special_only = CalibrationReportService(session).build(
+            CalibrationReportConfig(
+                from_date=date(2026, 6, 18),
+                to_date=date(2026, 6, 18),
+                strategy_id="baseline",
+                instruments=("SBER",),
+                timeframes=("5m",),
+                group_by=("session_type", "instrument_id", "timeframe", "blocker_code"),
+                calibration_scope="special_days_only",
+            )
+        )
+
+        assert primary.report_payload["calibration_clean"] is True
+        assert primary.report_payload["candidate_count"] == 0
+        assert primary.report_payload["special_days_count"] >= 1
+        assert primary.report_payload["calibration_data_mode"] == "historical_candles_only"
+        assert primary.report_payload["requires_shadow_live_calibration"] is True
+        recommendations = primary.report_payload["recommendations"]
+        assert isinstance(recommendations, dict)
+        assert "safe_from_historical_candles" in recommendations
+        assert "requires_shadow_confirmation" in recommendations
+        assert special_only.report_payload["calibration_clean"] is False
+        assert special_only.report_payload["candidate_count"] >= 1
+        assert "non_primary_calibration_scope" in special_only.report_payload[
+            "calibration_warnings"
+        ]
+    engine.dispose()
+
+
+def test_calibration_is_not_clean_when_special_classification_is_missing() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        _seed_replay_candles(session)
+        asyncio.run(
+            HistoricalDbReplayService(session).run(
+                HistoricalDbReplayConfig(
+                    from_date=date(2026, 6, 18),
+                    to_date=date(2026, 6, 18),
+                    instruments=("SBER",),
+                    timeframes=(Timeframe.M5,),
+                    strategy_id="baseline",
+                )
+            )
+        )
+        calibration = CalibrationReportService(session).build(
+            CalibrationReportConfig(
+                from_date=date(2026, 6, 18),
+                to_date=date(2026, 6, 18),
+                strategy_id="baseline",
+                instruments=("SBER",),
+                timeframes=("5m",),
+                group_by=("session_type", "instrument_id", "timeframe", "blocker_code"),
+            )
+        )
+
+        assert calibration.report_payload["calibration_clean"] is False
+        assert "corporate_action_classification_missing" in calibration.report_payload[
+            "calibration_warnings"
+        ]
+        with pytest.raises(RuntimeError, match="special day classification"):
+            CalibrationReportService(session).build(
+                CalibrationReportConfig(
+                    from_date=date(2026, 6, 18),
+                    to_date=date(2026, 6, 18),
+                    strategy_id="baseline",
+                    instruments=("SBER",),
+                    timeframes=("5m",),
+                    group_by=("session_type",),
+                    require_special_day_classification=True,
+                )
+            )
     engine.dispose()
 
 
@@ -250,8 +557,15 @@ def _seed_instrument(session: Session) -> None:
     session.flush()
 
 
+def _candidate_condition_payload(candidate: SignalCandidate) -> dict[str, object]:
+    payload = candidate.signal_payload.get("condition_payload", {})
+    assert isinstance(payload, dict)
+    return payload
+
+
 def _seed_replay_candles(session: Session) -> None:
     _seed_instrument(session)
+    _seed_strategy_config(session)
     bars = (
         (datetime(2026, 6, 18, 10, 0, tzinfo=MSK), Decimal("100"), Decimal("100.30")),
         (datetime(2026, 6, 18, 10, 5, tzinfo=MSK), Decimal("100.30"), Decimal("99.90")),
@@ -269,6 +583,48 @@ def _seed_replay_candles(session: Session) -> None:
             high_price=max(open_price, close_price),
             low_price=min(open_price, close_price),
         )
+
+
+def _seed_strategy_config(session: Session) -> None:
+    session.add(
+        StrategyConfig(
+            strategy_id="baseline",
+            version=1,
+            session_template="weekday_main",
+            is_active=True,
+            valid_from=datetime(2026, 1, 1, tzinfo=UTC),
+            config_payload={
+                "enabled": True,
+                "allow_long": True,
+                "allow_short": False,
+                "assumed_commission_bps_per_side": "5",
+                "assumed_slippage_bps": "0",
+            },
+            risk_limits={
+                "max_spread_bps": "20",
+                "min_market_quality_score": "0.70",
+                "max_data_age_ms": 5000,
+            },
+        )
+    )
+    session.flush()
+
+
+def _seed_dividend_event(session: Session) -> None:
+    CorporateActionService(session).upsert_event(
+        CorporateActionEvent(
+            instrument_id="MOEX:SBER",
+            ticker="SBER",
+            action_type="dividend",
+            ex_date=date(2026, 6, 18),
+            amount_per_share=Decimal("34.84"),
+            currency="RUB",
+            source="synthetic_test",
+            confidence="confirmed",
+            action_payload={"source": "test"},
+        )
+    )
+    session.flush()
 
 
 def _add_candle(

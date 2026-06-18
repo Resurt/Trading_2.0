@@ -74,6 +74,9 @@ class BlockerCode(StrEnum):
     POSITION_SIDE_CONFLICT = "position_side_conflict"
     POSITION_STATE_STALE = "position_state_stale"
     POSITION_RECONCILIATION_MISMATCH = "position_reconciliation_mismatch"
+    CORPORATE_ACTION_WINDOW = "corporate_action_window"
+    DIVIDEND_GAP_RISK = "dividend_gap_risk"
+    SPECIAL_DAY_SHADOW_ONLY = "special_day_shadow_only"
 
 
 class CancelReasonCode(StrEnum):
@@ -269,6 +272,10 @@ class RiskLimits:
     margin_or_collateral_available: bool = True
     forced_cover_policy: bool = False
     freeze_new_entries: bool = False
+    block_entries_on_dividend_gap_day: bool = True
+    block_entries_on_corporate_action_day: bool = True
+    block_short_on_special_day: bool = True
+    special_day_trade_policy: str = "shadow_only"
 
     @classmethod
     def from_strategy_config(cls, config: ConfigDrivenStrategyConfig) -> RiskLimits:
@@ -312,6 +319,11 @@ class RiskAssessmentInput:
     market_state: MarketState | None
     limits: RiskLimits
     portfolio: PortfolioSnapshot = PortfolioSnapshot()
+    corporate_action_flag: bool = False
+    dividend_gap_day: bool = False
+    abnormal_gap_day: bool = False
+    special_day_type: str | None = None
+    special_day_trade_policy: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

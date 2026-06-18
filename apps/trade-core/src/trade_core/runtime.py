@@ -40,6 +40,8 @@ from trade_core.broker_gateway import (
     TradingSchedulesRequest,
     TradingStatusRequest,
 )
+from trade_core.corporate_actions import CorporateActionService, SpecialDayFlags
+from trade_core.corporate_actions.service import special_day_classification_exists
 from trade_core.infra.tbank import (
     TBankBrokerConfig,
     TBankBrokerGateway,
@@ -549,6 +551,7 @@ class TradeCoreRuntime:
         self._latest_closed_bars: dict[str, dict[Timeframe, Bar]] = {}
         self._strategy_states: dict[str, StrategyState] = {}
         self._loaded_strategy_config_identity: tuple[str, int, str | None] | None = None
+        self._corporate_action_calendar_warnings: set[tuple[date, str]] = set()
 
     @classmethod
     def from_env(
@@ -1444,6 +1447,19 @@ class TradeCoreRuntime:
         self._strategy_states[bar.instrument_id] = decision.next_state
 
         for candidate_decision in decision.candidates:
+            special_flags = self._special_day_flags_for_runtime(
+                trading_date=snapshot.trading_date,
+                instrument_id=bar.instrument_id,
+            )
+            special_payload = special_flags.as_payload()
+            candidate_decision = replace(
+                candidate_decision,
+                condition_payload={
+                    **candidate_decision.condition_payload,
+                    **special_payload,
+                    "corporate_action_calendar_source": special_flags.source,
+                },
+            )
             candidate = event_store.record_candidate(
                 decision=candidate_decision,
                 snapshot=snapshot,
@@ -1463,6 +1479,11 @@ class TradeCoreRuntime:
                         instrument_id=bar.instrument_id,
                         observed_at=bar.close_ts_utc,
                     ),
+                    corporate_action_flag=special_flags.corporate_action_flag,
+                    dividend_gap_day=special_flags.dividend_gap_day,
+                    abnormal_gap_day=special_flags.abnormal_gap_day,
+                    special_day_type=special_flags.special_day_type,
+                    special_day_trade_policy=special_flags.trade_policy,
                 )
             )
             blockers = event_store.record_blockers(
@@ -1813,6 +1834,42 @@ class TradeCoreRuntime:
             msg = "SqlAlchemyStrategyEventStore is not initialized"
             raise RuntimeError(msg)
         return self.strategy_event_store
+
+    def _special_day_flags_for_runtime(
+        self,
+        *,
+        trading_date: date,
+        instrument_id: str,
+    ) -> SpecialDayFlags:
+        session = self._session
+        if session is None:
+            return SpecialDayFlags()
+        flags = CorporateActionService(session).read_special_day_flags(
+            trading_date=trading_date,
+            instrument_id=instrument_id,
+        )
+        if flags.special_day_type is not None:
+            return flags
+        warning_key = (trading_date, instrument_id)
+        if warning_key not in self._corporate_action_calendar_warnings and not (
+            special_day_classification_exists(
+                session,
+                from_date=trading_date,
+                to_date=trading_date,
+                instruments=(instrument_id,),
+            )
+        ):
+            self._corporate_action_calendar_warnings.add(warning_key)
+            self._write_audit_event(
+                action="corporate_action_calendar_unavailable",
+                severity="warning",
+                payload={
+                    "instrument_id": instrument_id,
+                    "trading_date": trading_date.isoformat(),
+                    "reason_code": "corporate_action_calendar_unavailable",
+                },
+            )
+        return flags
 
     def _require_execution_engine(self) -> DefaultExecutionEngine:
         if self.execution_engine is None:

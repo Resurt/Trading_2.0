@@ -4,6 +4,7 @@ import type {
   CalibrationResponse,
   CandidateFunnelResponse,
   CanceledOrderDiagnosticsResponse,
+  CorporateActionResponse,
   CounterfactualResponse,
   DailyReportResponse,
   DailyReportRunRequest,
@@ -11,6 +12,8 @@ import type {
   HistoricalRunResponse,
   HourlyReportResponse,
   MarketOverviewResponse,
+  MarketSpecialDayClassificationResponse,
+  MarketSpecialDayResponse,
   OrderResponse,
   PositionResponse,
   ReportJobResponse,
@@ -134,6 +137,22 @@ export const apiClient = {
     requestJson<CanceledOrderDiagnosticsResponse>(withQuery("/analytics/canceled-orders", query)),
   historicalDataQuality: (query: Record<string, QueryValue>) =>
     requestJson<HistoricalQualityResponse>(withQuery("/historical/data-quality", query)),
+  corporateActions: (query: Record<string, QueryValue>) =>
+    requestJson<CorporateActionResponse[]>(withQuery("/corporate-actions", query)),
+  importCorporateActions: (payload: Record<string, unknown>) =>
+    requestJson<{ rows_imported: number; corporate_action_ids: string[] }>(
+      "/corporate-actions/import",
+      { method: "POST", body: JSON.stringify(payload) },
+      "operator",
+    ),
+  marketSpecialDays: (query: Record<string, QueryValue>) =>
+    requestJson<MarketSpecialDayResponse[]>(withQuery("/market-special-days", query)),
+  classifyMarketSpecialDays: (payload: Record<string, unknown>) =>
+    requestJson<MarketSpecialDayClassificationResponse>(
+      "/market-special-days/classify",
+      { method: "POST", body: JSON.stringify(payload) },
+      "operator",
+    ),
   runHistoricalReplay: (payload: Record<string, unknown>) =>
     requestJson<HistoricalRunResponse>(
       "/historical/replay/run",

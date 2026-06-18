@@ -287,6 +287,14 @@ export interface HistoricalQualityResponse {
   session_type_distribution: Record<string, number>;
   timeframe_distribution: Record<string, number>;
   instrument_timeframes: JsonPayload[];
+  corporate_action_days_count: number;
+  dividend_gap_days_count: number;
+  abnormal_gap_days_count: number;
+  excluded_days_count: number;
+  included_days_count: number;
+  special_day_distribution: Record<string, number>;
+  corporate_action_classification_status: string;
+  quality_warnings: string[];
 }
 
 export interface HistoricalRunResponse {
@@ -303,11 +311,36 @@ export interface HistoricalRunResponse {
   daily_reports_built?: number;
   deterministic_fingerprint?: string;
   real_orders_disabled?: boolean;
+  bars_skipped_special_day?: number;
+  skipped_dividend_gap_days?: number;
+  skipped_corporate_action_days?: number;
+  skipped_abnormal_gap_days?: number;
+  strategy_config_source?: string;
+  strategy_config_version?: number;
+  special_day_classification_status?: string;
 }
 
 export interface CalibrationResponse {
   calibration_report_id: string | null;
   source: string;
+  calibration_scope: string;
+  calibration_clean: boolean;
+  calibration_warnings: string[];
+  calibration_data_mode: string;
+  not_calibrated_from_history: string[];
+  requires_shadow_live_calibration: boolean;
+  normal_days_count: number;
+  special_days_count: number;
+  dividend_gap_days_count: number;
+  corporate_action_days_count: number;
+  abnormal_gap_days_count: number;
+  excluded_days_count: number;
+  included_days_count: number;
+  excluded_from_primary_calibration_count: number;
+  normal_days_stats: JsonPayload;
+  dividend_gap_days_stats: JsonPayload;
+  abnormal_gap_days_stats: JsonPayload;
+  corporate_action_days_stats: JsonPayload;
   candidate_count: number;
   approved_count: number;
   blocked_count: number;
@@ -328,6 +361,47 @@ export interface CalibrationResponse {
   worst_instrument: string | null;
   cost_sensitivity: JsonPayload;
   recommended_threshold_changes: JsonPayload;
+  recommendations: JsonPayload;
+}
+
+export interface CorporateActionResponse {
+  corporate_action_id: string;
+  instrument_id: string;
+  ticker: string | null;
+  action_type: string;
+  ex_date: string | null;
+  amount_per_share: string | null;
+  currency: string | null;
+  source: string;
+  confidence: string;
+  payload: JsonPayload;
+}
+
+export interface MarketSpecialDayResponse {
+  special_day_id: string;
+  trading_date: string;
+  instrument_id: string;
+  ticker: string | null;
+  special_day_type: string;
+  reason_code: string;
+  source: string;
+  open_gap_bps: string | null;
+  severity: string;
+  exclude_from_primary_calibration: boolean;
+  trade_policy: string;
+  payload: JsonPayload;
+}
+
+export interface MarketSpecialDayClassificationResponse {
+  source: string;
+  classification_status: string;
+  special_days_created: number;
+  dividend_gap_days: number;
+  abnormal_gap_days: number;
+  excluded_from_primary_calibration: number;
+  instruments: string[];
+  from_date: string;
+  to_date: string;
 }
 
 export interface WebSocketEnvelope<TPayload = unknown> {

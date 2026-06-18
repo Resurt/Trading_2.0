@@ -50,6 +50,15 @@ def main() -> None:
         dry_run=args.dry_run,
         reset_derived_events=args.reset_derived_events,
         max_days=args.max_days,
+        include_special_days=args.include_special_days,
+        exclude_dividend_gap_days=args.exclude_dividend_gap_days,
+        exclude_corporate_action_days=args.exclude_corporate_action_days,
+        exclude_abnormal_gap_days=args.exclude_abnormal_gap_days,
+        special_day_policy=args.special_day_policy,
+        require_special_day_classification=args.require_special_day_classification,
+        allow_default_strategy_config=args.allow_default_strategy_config,
+        session_template=args.session_template,
+        config_version=args.config_version,
     )
     database = DatabaseService(args.database_url or build_database_url_from_env())
     try:
@@ -78,6 +87,39 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--reset-derived-events", action="store_true")
     parser.add_argument("--max-days", type=int)
+    parser.add_argument("--include-special-days", action="store_true")
+    parser.add_argument(
+        "--exclude-dividend-gap-days",
+        dest="exclude_dividend_gap_days",
+        action="store_true",
+        default=True,
+    )
+    parser.add_argument(
+        "--include-dividend-gap-days",
+        dest="exclude_dividend_gap_days",
+        action="store_false",
+    )
+    parser.add_argument(
+        "--exclude-corporate-action-days",
+        dest="exclude_corporate_action_days",
+        action="store_true",
+        default=True,
+    )
+    parser.add_argument(
+        "--include-corporate-action-days",
+        dest="exclude_corporate_action_days",
+        action="store_false",
+    )
+    parser.add_argument("--exclude-abnormal-gap-days", action="store_true")
+    parser.add_argument(
+        "--special-day-policy",
+        choices=("exclude", "include_with_flags", "shadow_only"),
+        default="exclude",
+    )
+    parser.add_argument("--require-special-day-classification", action="store_true")
+    parser.add_argument("--allow-default-strategy-config", action="store_true")
+    parser.add_argument("--session-template", default="weekday_main")
+    parser.add_argument("--config-version", default="latest")
     parser.add_argument("--json-output", action="store_true")
     return parser.parse_args()
 

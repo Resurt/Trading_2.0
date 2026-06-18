@@ -81,8 +81,10 @@ python scripts/run_historical_data_quality_report.py --lookback-days 90 --json-o
 python scripts/run_historical_replay_from_db.py --lookback-days 90 --strategy-id baseline --json-output
 python scripts/run_historical_counterfactual_rebuild.py --lookback-days 90 --strategy-id baseline --json-output
 python scripts/run_historical_report_rebuild.py --lookback-days 90 --strategy-id baseline --include-counterfactual --json-output
-python scripts/run_calibration_report.py --lookback-days 90 --strategy-id baseline --json-output
+python scripts/run_market_special_day_classification.py --lookback-days 90 --instruments SBER,GAZP --json-output
+python scripts/run_calibration_report.py --lookback-days 90 --strategy-id baseline --calibration-scope primary_normal_days --require-special-day-classification --json-output
 python scripts/run_launch_readiness.py --mode historical-replay
+python scripts/run_launch_readiness.py --mode historical-final-calibration
 ```
 
 Цель проверки: убедиться, что historical candles покрывают выбранные
@@ -90,3 +92,8 @@ python scripts/run_launch_readiness.py --mode historical-replay
 counterfactual/calibration уже показывают blocker ranking и candidate funnel.
 Shadow mode после этого использует live market data, но продолжает запрещать
 real `PostOrder`/`CancelOrder`.
+## Shadow Calibration Caveat
+
+Перед shadow live special days должны быть классифицированы. Historical candles не
+калибруют real spread/depth/slippage/latency, поэтому execution thresholds требуют
+подтверждения на shadow live data.

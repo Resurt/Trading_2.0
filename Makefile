@@ -7,8 +7,9 @@ REPORT_WORKER_SMOKE_TIMEOUT ?= 30
 LOOKBACK_DAYS ?= 90
 INSTRUMENTS ?= SBER,GAZP
 TIMEFRAMES ?= 5m,10m,15m
+CORPORATE_ACTIONS_FILE ?= data/corporate_actions/sample_dividends.csv
 
-.PHONY: lint test up down logs frontend-build migrate migrate-down replay-smoke sandbox-smoke historical-backfill-dry-run historical-quality historical-replay historical-counterfactual historical-report-rebuild calibration-report analytics-smoke report-rebuild replay-day controlled-launch-acceptance launch-readiness observability-up report-worker-smoke celery-inspect
+.PHONY: lint test up down logs frontend-build migrate migrate-down replay-smoke sandbox-smoke historical-backfill-dry-run historical-quality historical-replay historical-counterfactual historical-report-rebuild calibration-report corporate-actions-import market-special-days calibration-primary calibration-special-days historical-replay-clean analytics-smoke report-rebuild replay-day controlled-launch-acceptance launch-readiness observability-up report-worker-smoke celery-inspect
 
 lint:
 	$(PYTHON) -m ruff check .
@@ -58,6 +59,21 @@ historical-report-rebuild:
 
 calibration-report:
 	$(PYTHON) scripts/run_calibration_report.py --lookback-days $(LOOKBACK_DAYS) --strategy-id $(STRATEGY_ID) --instruments $(INSTRUMENTS) --timeframes $(TIMEFRAMES) --json-output
+
+corporate-actions-import:
+	$(PYTHON) scripts/run_corporate_actions_import.py --file $(CORPORATE_ACTIONS_FILE) --source manual --json-output
+
+market-special-days:
+	$(PYTHON) scripts/run_market_special_day_classification.py --lookback-days $(LOOKBACK_DAYS) --instruments $(INSTRUMENTS) --json-output
+
+calibration-primary:
+	$(PYTHON) scripts/run_calibration_report.py --lookback-days $(LOOKBACK_DAYS) --strategy-id $(STRATEGY_ID) --instruments $(INSTRUMENTS) --timeframes $(TIMEFRAMES) --calibration-scope primary_normal_days --require-special-day-classification --json-output
+
+calibration-special-days:
+	$(PYTHON) scripts/run_calibration_report.py --lookback-days $(LOOKBACK_DAYS) --strategy-id $(STRATEGY_ID) --instruments $(INSTRUMENTS) --timeframes $(TIMEFRAMES) --calibration-scope special_days_only --json-output
+
+historical-replay-clean:
+	$(PYTHON) scripts/run_historical_replay_from_db.py --lookback-days $(LOOKBACK_DAYS) --instruments $(INSTRUMENTS) --timeframes $(TIMEFRAMES) --strategy-id $(STRATEGY_ID) --require-special-day-classification --json-output
 
 analytics-smoke:
 	$(PYTHON) scripts/run_logging_analytics_acceptance.py --date $(TRADING_DATE) --strategy-id $(STRATEGY_ID)

@@ -78,6 +78,7 @@ def parse_args() -> argparse.Namespace:
             "shadow",
             "production-preflight",
             "historical-replay",
+            "historical-final-calibration",
         ),
         default="local",
     )
@@ -106,6 +107,8 @@ def run_mode(args: argparse.Namespace, env: Mapping[str, str]) -> list[GateResul
         return run_production_preflight(args, env)
     if args.mode == "historical-replay":
         return run_historical_replay(args)
+    if args.mode == "historical-final-calibration":
+        return run_historical_final_calibration(args)
     raise ValueError(args.mode)
 
 
@@ -280,7 +283,20 @@ def run_historical_replay(args: argparse.Namespace) -> list[GateResult]:
         "--json-output",
     ]
     dry_run_replay_args = [*replay_args, "--dry-run"]
+    config_fallback_args = ["--allow-default-strategy-config"] if args.dry_run else []
     return [
+        run_cmd(
+            "market_special_day_classification",
+            [
+                sys.executable,
+                "scripts/run_market_special_day_classification.py",
+                "--lookback-days",
+                str(args.lookback_days),
+                "--instruments",
+                args.instruments,
+                "--json-output",
+            ],
+        ),
         run_cmd(
             "historical_data_quality",
             [
@@ -292,12 +308,19 @@ def run_historical_replay(args: argparse.Namespace) -> list[GateResult]:
                 args.instruments,
                 "--timeframes",
                 quality_timeframes,
+                "--require-special-day-classification",
                 "--json-output",
             ],
         ),
         run_cmd(
             "historical_replay_dry_run",
-            [sys.executable, "scripts/run_historical_replay_from_db.py", *dry_run_replay_args],
+            [
+                sys.executable,
+                "scripts/run_historical_replay_from_db.py",
+                *dry_run_replay_args,
+                "--require-special-day-classification",
+                *config_fallback_args,
+            ],
         ),
         run_cmd(
             "historical_replay_idempotency_probe",
@@ -305,6 +328,8 @@ def run_historical_replay(args: argparse.Namespace) -> list[GateResult]:
                 sys.executable,
                 "scripts/run_historical_replay_from_db.py",
                 *(dry_run_replay_args if args.dry_run else replay_args),
+                "--require-special-day-classification",
+                *config_fallback_args,
             ],
         ),
         run_cmd(
@@ -337,11 +362,93 @@ def run_historical_replay(args: argparse.Namespace) -> list[GateResult]:
                 args.instruments,
                 "--timeframes",
                 args.timeframes,
+                "--calibration-scope",
+                "primary_normal_days",
+                "--require-special-day-classification",
                 "--json-output",
             ],
         ),
         GateResult(
             name="historical_no_real_orders",
+            passed=True,
+            command="LaunchModePolicy.HISTORICAL_REPLAY",
+            details={"post_order": "disabled", "cancel_order": "disabled"},
+        ),
+        run_secret_scan_gate(),
+    ]
+
+
+def run_historical_final_calibration(args: argparse.Namespace) -> list[GateResult]:
+    quality_timeframes = f"1m,{args.timeframes}"
+    common_replay_args = [
+        "--lookback-days",
+        str(args.lookback_days),
+        "--instruments",
+        args.instruments,
+        "--timeframes",
+        args.timeframes,
+        "--strategy-id",
+        args.strategy_id,
+        "--require-special-day-classification",
+        "--json-output",
+    ]
+    return [
+        run_cmd(
+            "historical_quality_requires_special_days",
+            [
+                sys.executable,
+                "scripts/run_historical_data_quality_report.py",
+                "--lookback-days",
+                str(args.lookback_days),
+                "--instruments",
+                args.instruments,
+                "--timeframes",
+                quality_timeframes,
+                "--require-special-day-classification",
+                "--json-output",
+            ],
+        ),
+        run_cmd(
+            "historical_replay_uses_db_strategy_config",
+            [sys.executable, "scripts/run_historical_replay_from_db.py", *common_replay_args],
+        ),
+        run_cmd(
+            "historical_counterfactual_present",
+            [
+                sys.executable,
+                "scripts/run_historical_counterfactual_rebuild.py",
+                "--lookback-days",
+                str(args.lookback_days),
+                "--strategy-id",
+                args.strategy_id,
+                "--instruments",
+                args.instruments,
+                "--timeframes",
+                args.timeframes,
+                "--json-output",
+            ],
+        ),
+        run_cmd(
+            "primary_calibration_clean",
+            [
+                sys.executable,
+                "scripts/run_calibration_report.py",
+                "--lookback-days",
+                str(args.lookback_days),
+                "--strategy-id",
+                args.strategy_id,
+                "--instruments",
+                args.instruments,
+                "--timeframes",
+                args.timeframes,
+                "--calibration-scope",
+                "primary_normal_days",
+                "--require-special-day-classification",
+                "--json-output",
+            ],
+        ),
+        GateResult(
+            name="historical_final_no_real_orders",
             passed=True,
             command="LaunchModePolicy.HISTORICAL_REPLAY",
             details={"post_order": "disabled", "cancel_order": "disabled"},

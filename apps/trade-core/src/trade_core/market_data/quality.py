@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from trade_core.corporate_actions.service import special_day_classification_exists
 from trade_core.market_data.events import Timeframe, ensure_utc, parse_timeframe
 from trade_core.market_data.historical_backfill import classify_historical_exchange_ts
 from trading_common import ServiceName
@@ -20,6 +21,7 @@ from trading_common.db.models import (
     AuditEvent,
     InstrumentRegistry,
     MarketCandle,
+    MarketSpecialDay,
 )
 from trading_common.db.models import (
     HistoricalDataQualityReport as HistoricalDataQualityReportRow,
@@ -117,6 +119,14 @@ class HistoricalDataQualityReport:
     weekend_candles: int
     weekday_candles: int
     instrument_timeframes: tuple[InstrumentTimeframeQuality, ...]
+    corporate_action_days_count: int = 0
+    dividend_gap_days_count: int = 0
+    abnormal_gap_days_count: int = 0
+    excluded_days_count: int = 0
+    included_days_count: int = 0
+    special_day_distribution: dict[str, int] = field(default_factory=dict)
+    corporate_action_classification_status: str = "missing"
+    quality_warnings: tuple[str, ...] = ()
     report_id: str | None = None
 
     @property
@@ -147,6 +157,17 @@ class HistoricalDataQualityReport:
             "timeframe_distribution": dict(sorted(self.timeframe_distribution.items())),
             "weekend_candles": self.weekend_candles,
             "weekday_candles": self.weekday_candles,
+            "corporate_action_days_count": self.corporate_action_days_count,
+            "dividend_gap_days_count": self.dividend_gap_days_count,
+            "abnormal_gap_days_count": self.abnormal_gap_days_count,
+            "excluded_days_count": self.excluded_days_count,
+            "included_days_count": self.included_days_count,
+            "special_day_distribution": dict(sorted(self.special_day_distribution.items())),
+            "corporate_action_classification_status": (
+                self.corporate_action_classification_status
+            ),
+            "quality_warnings": list(self.quality_warnings),
+            "quality_warning": self.quality_warnings[0] if self.quality_warnings else None,
             "instrument_timeframes": [item.as_payload() for item in self.instrument_timeframes],
             "passed": self.passed,
             "source": "historical_data_quality_report",
@@ -163,6 +184,7 @@ class HistoricalDataQualityConfig:
     fail_on_invalid_ohlc: bool = False
     max_missing_intervals: int | None = None
     write_report: bool = True
+    require_special_day_classification: bool = False
 
 
 class HistoricalDataQualityService:
@@ -277,6 +299,16 @@ class HistoricalDataQualityService:
         actual_count = len(rows)
         first = min((ensure_utc(row.open_ts_utc) for row in rows), default=None)
         last = max((ensure_utc(row.open_ts_utc) for row in rows), default=None)
+        special_summary = self._special_day_summary(
+            from_date=config.from_date,
+            to_date=config.to_date,
+            instrument_ids=instrument_ids,
+        )
+        quality_warnings: tuple[str, ...] = ()
+        if special_summary["corporate_action_classification_status"] == "missing":
+            quality_warnings = (
+                "Run market special day classification before using calibration as final.",
+            )
         report = HistoricalDataQualityReport(
             generated_at=datetime.now(tz=UTC),
             from_date=config.from_date,
@@ -304,6 +336,16 @@ class HistoricalDataQualityService:
                 if session_type != "weekend"
             ),
             instrument_timeframes=tuple(item_reports),
+            corporate_action_days_count=int(special_summary["corporate_action_days_count"]),
+            dividend_gap_days_count=int(special_summary["dividend_gap_days_count"]),
+            abnormal_gap_days_count=int(special_summary["abnormal_gap_days_count"]),
+            excluded_days_count=int(special_summary["excluded_days_count"]),
+            included_days_count=int(special_summary["included_days_count"]),
+            special_day_distribution=dict(special_summary["special_day_distribution"]),
+            corporate_action_classification_status=str(
+                special_summary["corporate_action_classification_status"]
+            ),
+            quality_warnings=quality_warnings,
         )
         if config.write_report:
             report = self._persist_report(report)
@@ -318,6 +360,11 @@ class HistoricalDataQualityService:
             raise SystemExit(3)
         if max_missing is not None and report.missing_intervals > max_missing:
             raise SystemExit(4)
+        if (
+            config.require_special_day_classification
+            and report.corporate_action_classification_status == "missing"
+        ):
+            raise SystemExit(5)
         return report
 
     def _persist_report(
@@ -416,6 +463,54 @@ class HistoricalDataQualityService:
         if instrument_ids:
             stmt = stmt.where(MarketCandle.instrument_id.in_(instrument_ids))
         return sum(int(count) - 1 for *_unused, count in self._session.execute(stmt).all())
+
+    def _special_day_summary(
+        self,
+        *,
+        from_date: date,
+        to_date: date,
+        instrument_ids: tuple[str, ...],
+    ) -> JsonPayload:
+        stmt = select(MarketSpecialDay).where(
+            MarketSpecialDay.trading_date >= from_date,
+            MarketSpecialDay.trading_date <= to_date,
+        )
+        if instrument_ids:
+            stmt = stmt.where(MarketSpecialDay.instrument_id.in_(instrument_ids))
+        rows = list(self._session.execute(stmt).scalars())
+        distribution = Counter(row.special_day_type for row in rows)
+        excluded_keys = {
+            (row.trading_date, row.instrument_id)
+            for row in rows
+            if row.exclude_from_primary_calibration
+        }
+        included_keys = {
+            (row.trading_date, row.instrument_id)
+            for row in rows
+            if not row.exclude_from_primary_calibration
+        }
+        status = (
+            "completed"
+            if special_day_classification_exists(
+                self._session,
+                from_date=from_date,
+                to_date=to_date,
+                instruments=instrument_ids,
+            )
+            else "missing"
+        )
+        return {
+            "corporate_action_days_count": (
+                distribution.get("corporate_action_day", 0)
+                + distribution.get("dividend_gap_day", 0)
+            ),
+            "dividend_gap_days_count": distribution.get("dividend_gap_day", 0),
+            "abnormal_gap_days_count": distribution.get("abnormal_gap_day", 0),
+            "excluded_days_count": len(excluded_keys),
+            "included_days_count": len(included_keys),
+            "special_day_distribution": dict(distribution),
+            "corporate_action_classification_status": status,
+        }
 
 
 def invalid_reasons(row: MarketCandle) -> tuple[InvalidCandleReason, ...]:

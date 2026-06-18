@@ -35,31 +35,48 @@ python scripts/run_historical_candle_backfill.py --instruments SBER,GAZP --lookb
 python scripts/run_historical_data_quality_report.py --lookback-days 10 --instruments SBER,GAZP --timeframes 1m,5m,10m,15m --json-output
 ```
 
-4. Replay from DB:
+4. Corporate actions import and special-day classification:
+
+```powershell
+python scripts/run_corporate_actions_import.py --file data/corporate_actions/sample_dividends.csv --source manual --json-output
+python scripts/run_market_special_day_classification.py --lookback-days 10 --instruments SBER,GAZP --json-output
+```
+
+5. Final quality report with classification required:
+
+```powershell
+python scripts/run_historical_data_quality_report.py --lookback-days 10 --instruments SBER,GAZP --timeframes 1m,5m,10m,15m --require-special-day-classification --json-output
+```
+
+6. Replay from DB:
 
 ```powershell
 python scripts/run_historical_replay_from_db.py --lookback-days 10 --instruments SBER,GAZP --timeframes 5m,10m,15m --strategy-id baseline --json-output
 ```
 
-5. Counterfactual rebuild:
+Replay now loads active `strategy_config` / `risk_limits` from PostgreSQL. If config is
+missing, replay fails by default. `--allow-default-strategy-config` is allowed only for
+explicit local dry-runs.
+
+7. Counterfactual rebuild:
 
 ```powershell
 python scripts/run_historical_counterfactual_rebuild.py --lookback-days 10 --strategy-id baseline --instruments SBER,GAZP --timeframes 5m,10m,15m --json-output
 ```
 
-6. Historical reports:
+8. Historical reports:
 
 ```powershell
 python scripts/run_historical_report_rebuild.py --lookback-days 10 --strategy-id baseline --include-counterfactual --json-output
 ```
 
-7. Calibration report:
+9. Calibration report:
 
 ```powershell
-python scripts/run_calibration_report.py --lookback-days 10 --strategy-id baseline --instruments SBER,GAZP --timeframes 5m,10m,15m --json-output
+python scripts/run_calibration_report.py --lookback-days 10 --strategy-id baseline --instruments SBER,GAZP --timeframes 5m,10m,15m --calibration-scope primary_normal_days --require-special-day-classification --json-output
 ```
 
-8. Acceptance gate:
+10. Acceptance gate:
 
 ```powershell
 python scripts/run_launch_readiness.py --mode historical-replay --dry-run
@@ -117,3 +134,17 @@ strategy_id|strategy_version|instrument_id|timeframe|bar_close_ts|side|action|hi
 - Calibration recommendations сохраняются только в payload.
 - Technical JSON logs не являются источником аналитики; источник аналитики -
   PostgreSQL domain tables.
+
+## Corporate Actions / Special Days
+
+Historical replay исключает `dividend_gap_day` и `corporate_action_day` из primary replay
+по умолчанию. Поведение можно изменить только явно:
+
+- `--include-special-days`;
+- `--include-dividend-gap-days`;
+- `--include-corporate-action-days`;
+- `--special-day-policy include_with_flags|shadow_only`.
+
+В payload каждого replay-generated event попадают `special_day_type`,
+`dividend_gap_day`, `corporate_action_flag`, `abnormal_gap_day`,
+`excluded_from_primary_calibration` и `eligible_for_live_calibration`.

@@ -14,6 +14,7 @@ const lookbackDays = ref(10);
 const instruments = ref("SBER,GAZP");
 const timeframes = ref("5m,10m,15m");
 const strategyId = ref("baseline");
+const calibrationScope = ref("primary_normal_days");
 const loading = ref(false);
 const error = ref("");
 const report = ref<CalibrationResponse | null>(null);
@@ -34,6 +35,16 @@ const thresholdRows = computed(() =>
   })),
 );
 
+const safeRecommendations = computed(() => {
+  const value = report.value?.recommendations.safe_from_historical_candles;
+  return value && typeof value === "object" ? Object.entries(value) : [];
+});
+
+const shadowRecommendations = computed(() => {
+  const value = report.value?.recommendations.requires_shadow_confirmation;
+  return value && typeof value === "object" ? Object.entries(value) : [];
+});
+
 async function refresh() {
   loading.value = true;
   error.value = "";
@@ -43,6 +54,8 @@ async function refresh() {
       instruments: instruments.value,
       timeframes: timeframes.value,
       strategy_id: strategyId.value,
+      calibration_scope: calibrationScope.value,
+      require_special_day_classification: calibrationScope.value === "primary_normal_days",
     });
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
@@ -81,6 +94,14 @@ async function refresh() {
           <span>strategy_id</span>
           <input v-model="strategyId" />
         </label>
+        <label>
+          <span>calibration_scope</span>
+          <select v-model="calibrationScope">
+            <option value="primary_normal_days">primary_normal_days</option>
+            <option value="special_days_only">special_days_only</option>
+            <option value="all_days">all_days</option>
+          </select>
+        </label>
         <div class="filter-actions">
           <button class="icon-button" type="submit" :disabled="loading">
             <RefreshCw :size="16" aria-hidden="true" />
@@ -99,9 +120,49 @@ async function refresh() {
       <MetricTile label="pseudo orders" :value="report?.pseudo_order_count ?? 0" />
       <MetricTile label="gross pnl proxy" :value="report?.gross_simulated_pnl ?? '-'" />
       <MetricTile label="net pnl proxy" :value="report?.net_simulated_pnl ?? '-'" />
+      <MetricTile label="clean" :value="report?.calibration_clean ? 'true' : 'false'" />
+      <MetricTile label="special days" :value="report?.special_days_count ?? 0" />
     </div>
 
     <div class="reports-grid">
+      <DataPanel>
+        <template #eyebrow>scope</template>
+        <template #title>Calibration cleanliness</template>
+        <dl v-if="report" class="definition-grid">
+          <dt>scope</dt>
+          <dd>{{ report.calibration_scope }}</dd>
+          <dt>data mode</dt>
+          <dd>{{ report.calibration_data_mode }}</dd>
+          <dt>clean</dt>
+          <dd>{{ report.calibration_clean }}</dd>
+          <dt>requires shadow</dt>
+          <dd>{{ report.requires_shadow_live_calibration }}</dd>
+          <dt>warnings</dt>
+          <dd>{{ report.calibration_warnings.join(", ") || "-" }}</dd>
+        </dl>
+        <EmptyState v-else title="Run calibration report first" />
+      </DataPanel>
+
+      <DataPanel>
+        <template #eyebrow>special days</template>
+        <template #title>Normal vs special stats</template>
+        <dl v-if="report" class="definition-grid">
+          <dt>normal days</dt>
+          <dd>{{ report.normal_days_count }}</dd>
+          <dt>special days</dt>
+          <dd>{{ report.special_days_count }}</dd>
+          <dt>dividend gaps</dt>
+          <dd>{{ report.dividend_gap_days_count }}</dd>
+          <dt>corporate actions</dt>
+          <dd>{{ report.corporate_action_days_count }}</dd>
+          <dt>abnormal gaps</dt>
+          <dd>{{ report.abnormal_gap_days_count }}</dd>
+          <dt>excluded</dt>
+          <dd>{{ report.excluded_from_primary_calibration_count }}</dd>
+        </dl>
+        <EmptyState v-else title="No special-day stats yet" />
+      </DataPanel>
+
       <DataPanel>
         <template #eyebrow>blockers</template>
         <template #title>Blocker ranking</template>
@@ -166,6 +227,38 @@ async function refresh() {
             </tbody>
           </table>
           <EmptyState v-if="thresholdRows.length === 0" title="No threshold recommendations" />
+        </div>
+      </DataPanel>
+
+      <DataPanel>
+        <template #eyebrow>recommendations</template>
+        <template #title>Safe from candles</template>
+        <div class="table-wrap">
+          <table>
+            <tbody>
+              <tr v-for="[key, value] in safeRecommendations" :key="String(key)">
+                <td>{{ key }}</td>
+                <td>{{ value }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <EmptyState v-if="safeRecommendations.length === 0" title="No candle-only recommendations" />
+        </div>
+      </DataPanel>
+
+      <DataPanel>
+        <template #eyebrow>recommendations</template>
+        <template #title>Needs shadow confirmation</template>
+        <div class="table-wrap">
+          <table>
+            <tbody>
+              <tr v-for="[key, value] in shadowRecommendations" :key="String(key)">
+                <td>{{ key }}</td>
+                <td>{{ value }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <EmptyState v-if="shadowRecommendations.length === 0" title="No shadow-only recommendations" />
         </div>
       </DataPanel>
     </div>

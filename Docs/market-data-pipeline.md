@@ -210,3 +210,12 @@ fallback trading windows получают `session_phase=closed`.
 Replay-generated rows обязаны иметь `payload.source=historical_db_replay`.
 Этот признак используется для идемпотентности и для безопасного
 `--reset-derived-events`, который не удаляет live/shadow/sandbox факты.
+## Historical Special-Day Awareness
+
+Historical `market_candle` data is used by replay and calibration only after
+corporate-action / special-day classification. Derived bars keep their session fields,
+and replay payloads include `special_day_type`, `dividend_gap_day`,
+`corporate_action_flag`, `abnormal_gap_day` and `eligible_for_live_calibration`.
+
+Primary calibration excludes dividend/corporate-action days by default; special days are
+reviewed in a separate calibration scope.

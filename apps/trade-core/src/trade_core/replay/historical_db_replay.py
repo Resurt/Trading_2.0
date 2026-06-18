@@ -12,6 +12,11 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from trade_core.broker_gateway import BrokerGateway, InstrumentRef
+from trade_core.corporate_actions import CorporateActionService, SpecialDayFlags
+from trade_core.corporate_actions.service import (
+    flags_from_rows,
+    special_day_classification_exists,
+)
 from trade_core.market_data import Bar, FeedFreshness, MarketState, PriceLevel, Timeframe
 from trade_core.market_data.events import parse_timeframe
 from trade_core.session import SessionSnapshot
@@ -23,11 +28,11 @@ from trade_core.strategy import (
     OrderIntentRequest,
     PortfolioSnapshot,
     RiskAssessmentInput,
-    RiskLimits,
     SqlAlchemyStrategyEventStore,
     StrategyEvaluationContext,
     StrategyState,
 )
+from trade_core.strategy.config_loader import LoadedStrategyConfig, StrategyConfigLoader
 from trading_common import LaunchModePolicy, RuntimeMode
 from trading_common.db.models import (
     BlockerEvent,
@@ -37,6 +42,7 @@ from trading_common.db.models import (
     InstrumentRegistry,
     MarketCandle,
     MarketContextSnapshot,
+    MarketSpecialDay,
     OrderIntent,
     OrderStateEvent,
     RiskEvent,
@@ -71,6 +77,15 @@ class HistoricalDbReplayConfig:
     dry_run: bool = False
     reset_derived_events: bool = False
     max_days: int | None = None
+    include_special_days: bool = False
+    exclude_dividend_gap_days: bool = True
+    exclude_corporate_action_days: bool = True
+    exclude_abnormal_gap_days: bool = False
+    special_day_policy: str = "exclude"
+    require_special_day_classification: bool = False
+    allow_default_strategy_config: bool = False
+    session_template: str = "weekday_main"
+    config_version: str | int = "latest"
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +100,10 @@ class ReplayInstrumentResult:
     risk_events_created: int = 0
     market_context_snapshots_created: int = 0
     skipped_existing_events: int = 0
+    bars_skipped_special_day: int = 0
+    skipped_dividend_gap_days: int = 0
+    skipped_corporate_action_days: int = 0
+    skipped_abnormal_gap_days: int = 0
 
     def as_payload(self) -> JsonPayload:
         return {
@@ -98,6 +117,10 @@ class ReplayInstrumentResult:
             "risk_events_created": self.risk_events_created,
             "market_context_snapshots_created": self.market_context_snapshots_created,
             "skipped_existing_events": self.skipped_existing_events,
+            "bars_skipped_special_day": self.bars_skipped_special_day,
+            "skipped_dividend_gap_days": self.skipped_dividend_gap_days,
+            "skipped_corporate_action_days": self.skipped_corporate_action_days,
+            "skipped_abnormal_gap_days": self.skipped_abnormal_gap_days,
         }
 
 
@@ -112,6 +135,10 @@ class ReplayDayResult:
     risk_events_created: int = 0
     market_context_snapshots_created: int = 0
     skipped_existing_events: int = 0
+    bars_skipped_special_day: int = 0
+    skipped_dividend_gap_days: int = 0
+    skipped_corporate_action_days: int = 0
+    skipped_abnormal_gap_days: int = 0
 
     def as_payload(self) -> JsonPayload:
         return {
@@ -124,6 +151,10 @@ class ReplayDayResult:
             "risk_events_created": self.risk_events_created,
             "market_context_snapshots_created": self.market_context_snapshots_created,
             "skipped_existing_events": self.skipped_existing_events,
+            "bars_skipped_special_day": self.bars_skipped_special_day,
+            "skipped_dividend_gap_days": self.skipped_dividend_gap_days,
+            "skipped_corporate_action_days": self.skipped_corporate_action_days,
+            "skipped_abnormal_gap_days": self.skipped_abnormal_gap_days,
         }
 
 
@@ -140,6 +171,15 @@ class HistoricalDbReplayResult:
     market_context_snapshots_created: int
     skipped_existing_events: int
     deterministic_fingerprint: str
+    bars_skipped_special_day: int = 0
+    skipped_dividend_gap_days: int = 0
+    skipped_corporate_action_days: int = 0
+    skipped_abnormal_gap_days: int = 0
+    strategy_config_source: str = "unknown"
+    strategy_config_version: int = 1
+    risk_limits_source: str = "unknown"
+    allow_default_strategy_config: bool = False
+    special_day_classification_status: str = "missing"
     real_orders_disabled: bool = True
     dry_run: bool = False
     days: tuple[ReplayDayResult, ...] = ()
@@ -158,6 +198,15 @@ class HistoricalDbReplayResult:
             "market_context_snapshots_created": self.market_context_snapshots_created,
             "skipped_existing_events": self.skipped_existing_events,
             "deterministic_fingerprint": self.deterministic_fingerprint,
+            "bars_skipped_special_day": self.bars_skipped_special_day,
+            "skipped_dividend_gap_days": self.skipped_dividend_gap_days,
+            "skipped_corporate_action_days": self.skipped_corporate_action_days,
+            "skipped_abnormal_gap_days": self.skipped_abnormal_gap_days,
+            "strategy_config_source": self.strategy_config_source,
+            "strategy_config_version": self.strategy_config_version,
+            "risk_limits_source": self.risk_limits_source,
+            "allow_default_strategy_config": self.allow_default_strategy_config,
+            "special_day_classification_status": self.special_day_classification_status,
             "real_orders_disabled": self.real_orders_disabled,
             "dry_run": self.dry_run,
             "days": [item.as_payload() for item in self.days],
@@ -177,10 +226,15 @@ class HistoricalDbReplayService:
     async def run(self, config: HistoricalDbReplayConfig) -> HistoricalDbReplayResult:
         if config.reset_derived_events and not config.dry_run:
             self.reset_generated_events(config)
-        strategy_version = self._strategy_version(config)
-        strategy_config = _config_for_replay(config=config, strategy_version=strategy_version)
+        special_day_status = self._special_day_classification_status(config)
+        if config.require_special_day_classification and special_day_status == "missing":
+            msg = "market special day classification is required before final historical replay"
+            raise RuntimeError(msg)
+        loaded_config = self._load_strategy_config(config)
+        strategy_config = loaded_config.config
+        strategy_version = strategy_config.strategy_version
         strategy_engine = ConfigDrivenStrategyEngine(strategy_config)
-        risk_limits = RiskLimits.from_strategy_config(strategy_config)
+        risk_limits = loaded_config.risk_limits
         risk_engine = DefaultRiskEngine()
         order_repository = OrderRepository(self._session)
         execution_engine = DefaultExecutionEngine(
@@ -197,6 +251,7 @@ class HistoricalDbReplayService:
             market_contexts=MarketContextSnapshotRepository(self._session),
         )
         bars = self._load_bars(config)
+        special_flags = self._load_special_day_flags(config)
         counters: dict[str, int] = defaultdict_ints()
         by_day: dict[date, dict[str, int]] = {}
         by_instrument: dict[tuple[str, str], dict[str, int]] = {}
@@ -209,6 +264,24 @@ class HistoricalDbReplayService:
             day_counts = by_day.setdefault(row.trading_date, defaultdict_ints())
             instrument_counts = by_instrument.setdefault(key, defaultdict_ints())
             _bump(counters, day_counts, instrument_counts, "bars_processed")
+            flags = special_flags.get(
+                (row.trading_date, row.instrument_id),
+                SpecialDayFlags(),
+            )
+            skip_reasons = _special_day_skip_reasons(config=config, flags=flags)
+            if skip_reasons:
+                _bump(counters, day_counts, instrument_counts, "bars_skipped_special_day")
+                if flags.dividend_gap_day:
+                    _bump(counters, day_counts, instrument_counts, "skipped_dividend_gap_days")
+                if flags.corporate_action_flag:
+                    _bump(counters, day_counts, instrument_counts, "skipped_corporate_action_days")
+                if flags.abnormal_gap_day:
+                    _bump(counters, day_counts, instrument_counts, "skipped_abnormal_gap_days")
+                fingerprint_parts.append(
+                    f"skipped:{row.instrument_id}:{row.timeframe}:{row.close_ts_utc}"
+                )
+                continue
+            special_payload = _special_day_payload(config=config, flags=flags)
             bar = _bar_from_row(row)
             latest_bars = latest_bars_by_instrument.setdefault(row.instrument_id, {})
             latest_bars[bar.timeframe] = bar
@@ -241,7 +314,7 @@ class HistoricalDbReplayService:
                 event_type=DomainEventType.STRATEGY_STATE_CHANGED.value,
                 reason_code=decision.reason_code,
                 instrument_id=row.instrument_id,
-                payload={**decision.decision_payload, "source": SOURCE},
+                payload={**decision.decision_payload, "source": SOURCE, **special_payload},
                 ts_utc=row.close_ts_utc,
             )
             for candidate in decision.candidates:
@@ -268,6 +341,7 @@ class HistoricalDbReplayService:
                         "replay_period_from": config.from_date.isoformat(),
                         "replay_period_to": config.to_date.isoformat(),
                         "market_candle_id": str(row.market_candle_id),
+                        **special_payload,
                     },
                 )
                 persisted = event_store.record_candidate(
@@ -286,6 +360,18 @@ class HistoricalDbReplayService:
                         market_state=market_state,
                         limits=risk_limits,
                         portfolio=PortfolioSnapshot(),
+                        corporate_action_flag=_risk_special_flag(
+                            config,
+                            flags.corporate_action_flag,
+                        ),
+                        dividend_gap_day=_risk_special_flag(config, flags.dividend_gap_day),
+                        abnormal_gap_day=flags.abnormal_gap_day,
+                        special_day_type=(
+                            None
+                            if config.special_day_policy == "shadow_only"
+                            else flags.special_day_type
+                        ),
+                        special_day_trade_policy=flags.trade_policy,
                     )
                 )
                 blockers = event_store.record_blockers(
@@ -322,6 +408,7 @@ class HistoricalDbReplayService:
                     "source": SOURCE,
                     "replay_run_fingerprint": replay_fingerprint,
                     "real_orders_disabled": True,
+                    **special_payload,
                 }
                 _bump(counters, day_counts, instrument_counts, "order_intents_created")
                 lifecycle = await execution_engine.post_order(intent)
@@ -355,6 +442,15 @@ class HistoricalDbReplayService:
             market_context_snapshots_created=counters["market_context_snapshots_created"],
             skipped_existing_events=counters["skipped_existing_events"],
             deterministic_fingerprint=deterministic,
+            bars_skipped_special_day=counters["bars_skipped_special_day"],
+            skipped_dividend_gap_days=counters["skipped_dividend_gap_days"],
+            skipped_corporate_action_days=counters["skipped_corporate_action_days"],
+            skipped_abnormal_gap_days=counters["skipped_abnormal_gap_days"],
+            strategy_config_source=loaded_config.source,
+            strategy_config_version=strategy_version,
+            risk_limits_source=loaded_config.source,
+            allow_default_strategy_config=config.allow_default_strategy_config,
+            special_day_classification_status=special_day_status,
             dry_run=config.dry_run,
             days=day_results,
             instruments=instrument_results,
@@ -469,17 +565,83 @@ class HistoricalDbReplayService:
             class_code=row.class_code,
         )
 
+    def _load_strategy_config(
+        self,
+        config: HistoricalDbReplayConfig,
+    ) -> LoadedStrategyConfig:
+        fallback_version = self._strategy_version(config)
+        fallback = _config_for_replay(config=config, strategy_version=fallback_version)
+        loaded = StrategyConfigLoader(self._session).load_active(
+            strategy_id=config.strategy_id,
+            session_template=config.session_template,
+            fallback=fallback,
+        )
+        if (
+            loaded.source == "fallback_conservative_default"
+            and not config.allow_default_strategy_config
+        ):
+            msg = (
+                "historical replay requires active strategy_config in Postgres; "
+                "use --allow-default-strategy-config only for explicit local dry-runs"
+            )
+            raise RuntimeError(msg)
+        selected = _filter_config_timeframes(loaded.config, config.timeframes)
+        if str(config.config_version) != "latest" and selected.strategy_version != int(
+            str(config.config_version)
+        ):
+            msg = (
+                "loaded strategy_config version does not match requested --config-version "
+                f"{config.config_version}"
+            )
+            raise RuntimeError(msg)
+        return replace(loaded, config=selected)
+
     def _strategy_version(self, config: HistoricalDbReplayConfig) -> int:
-        if isinstance(config.strategy_version, int):
-            return config.strategy_version
-        if str(config.strategy_version) != "latest":
-            return int(str(config.strategy_version))
+        target = (
+            config.config_version
+            if str(config.config_version) != "latest"
+            else config.strategy_version
+        )
+        if isinstance(target, int):
+            return target
+        if str(target) != "latest":
+            return int(str(target))
         row = self._session.execute(
             select(StrategyConfig)
             .where(StrategyConfig.strategy_id == config.strategy_id)
             .order_by(StrategyConfig.version.desc())
         ).scalars().first()
         return int(row.version) if row is not None else 1
+
+    def _special_day_classification_status(self, config: HistoricalDbReplayConfig) -> str:
+        return (
+            "completed"
+            if special_day_classification_exists(
+                self._session,
+                from_date=config.from_date,
+                to_date=config.to_date,
+                instruments=config.instruments,
+            )
+            else "missing"
+        )
+
+    def _load_special_day_flags(
+        self,
+        config: HistoricalDbReplayConfig,
+    ) -> dict[tuple[date, str], SpecialDayFlags]:
+        service = CorporateActionService(self._session)
+        rows = service.list_special_days(
+            from_date=config.from_date,
+            to_date=config.to_date,
+            instruments=config.instruments,
+        )
+        grouped: dict[tuple[date, str], list[MarketSpecialDay]] = {}
+        for row in rows:
+            grouped.setdefault((row.trading_date, row.instrument_id), []).append(row)
+        return {
+            key: flags_from_rows(values)
+            for key, values in grouped.items()
+        }
 
 
 class _NoRealOrdersBrokerGateway:
@@ -540,6 +702,65 @@ def _config_for_replay(
         strategy_version=strategy_version,
         session_templates=templates,
     )
+
+
+def _filter_config_timeframes(
+    config: ConfigDrivenStrategyConfig,
+    timeframes: tuple[Timeframe, ...],
+) -> ConfigDrivenStrategyConfig:
+    selected = set(timeframes)
+    templates = {
+        session_type: replace(
+            template,
+            rules_by_timeframe={
+                timeframe: rule
+                for timeframe, rule in template.rules_by_timeframe.items()
+                if timeframe in selected
+            },
+        )
+        for session_type, template in config.session_templates.items()
+    }
+    return replace(config, session_templates=templates)
+
+
+def _special_day_skip_reasons(
+    *,
+    config: HistoricalDbReplayConfig,
+    flags: SpecialDayFlags,
+) -> tuple[str, ...]:
+    if flags.special_day_type is None:
+        return ()
+    if config.include_special_days or config.special_day_policy != "exclude":
+        return ()
+    reasons: list[str] = []
+    if flags.dividend_gap_day and config.exclude_dividend_gap_days:
+        reasons.append("dividend_gap_day")
+    if flags.corporate_action_flag and config.exclude_corporate_action_days:
+        reasons.append("corporate_action_day")
+    if flags.abnormal_gap_day and config.exclude_abnormal_gap_days:
+        reasons.append("abnormal_gap_day")
+    return tuple(reasons)
+
+
+def _special_day_payload(
+    *,
+    config: HistoricalDbReplayConfig,
+    flags: SpecialDayFlags,
+) -> JsonPayload:
+    eligible = not flags.excluded_from_primary_calibration
+    if config.special_day_policy == "shadow_only":
+        eligible = False
+    return {
+        **flags.as_payload(),
+        "special_day_policy": config.special_day_policy,
+        "eligible_for_live_calibration": eligible,
+    }
+
+
+def _risk_special_flag(config: HistoricalDbReplayConfig, value: bool) -> bool:
+    if config.special_day_policy == "shadow_only":
+        return False
+    return value
 
 
 def default_replay_window(
@@ -650,6 +871,10 @@ def defaultdict_ints() -> dict[str, int]:
         "risk_events_created": 0,
         "market_context_snapshots_created": 0,
         "skipped_existing_events": 0,
+        "bars_skipped_special_day": 0,
+        "skipped_dividend_gap_days": 0,
+        "skipped_corporate_action_days": 0,
+        "skipped_abnormal_gap_days": 0,
     }
 
 

@@ -127,3 +127,17 @@ counterfactual/calibration результаты имеют отдельные `s
 Повторный replay идемпотентен по deterministic fingerprint; флаг
 `--reset-derived-events` удаляет только historical replay facts за выбранный
 период и не трогает live/shadow/sandbox события.
+## После Backfill
+
+Historical candle backfill сам по себе не делает калибровку финальной. После загрузки
+`market_candle` нужно выполнить:
+
+1. `run_corporate_actions_import.py`;
+2. `run_market_special_day_classification.py`;
+3. `run_historical_data_quality_report.py --require-special-day-classification`;
+4. `run_historical_replay_from_db.py` без real broker calls;
+5. `run_historical_counterfactual_rebuild.py`;
+6. `run_calibration_report.py --calibration-scope primary_normal_days`;
+7. `run_launch_readiness.py --mode historical-final-calibration`.
+
+Dividend/corporate-action days excluded from primary calibration by default.

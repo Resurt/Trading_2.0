@@ -35,6 +35,12 @@ $env:TRADING_AUTH_MODE = "static_bearer"
 - Historical candle backfill has been run for the configured instruments, raw `1m`
   and derived `5m/10m/15m` `market_candle` rows are present, and replay/report
   calibration checks were reviewed before enabling live orders.
+- Corporate action import/classification has been run for the historical calibration period.
+- Primary calibration uses `calibration_scope=primary_normal_days` and has
+  `calibration_clean=true`.
+- Dividend/corporate-action days are excluded from primary calibration by default or
+  reviewed separately with `calibration_scope=special_days_only`.
+- Execution thresholds are confirmed by shadow live data, not only historical candles.
 - Risk limits and max position limits are reviewed for the session template.
 - `allow_long`, `allow_short`, `max_long_lots`, `max_short_lots`,
   `max_gross_exposure_rub` and `max_net_exposure_rub` are reviewed per
@@ -89,4 +95,5 @@ docker compose ps
 
 ```powershell
 python scripts/run_launch_readiness.py --mode historical-replay
+python scripts/run_launch_readiness.py --mode historical-final-calibration
 ```

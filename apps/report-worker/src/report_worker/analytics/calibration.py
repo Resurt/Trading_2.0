@@ -12,11 +12,13 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from trading_common.db.models import (
+    AuditEvent,
     BlockerEvent,
     BrokerOrder,
     CalibrationReport,
     CounterfactualResult,
     InstrumentRegistry,
+    MarketSpecialDay,
     OrderIntent,
     SignalCandidate,
 )
@@ -35,6 +37,11 @@ class CalibrationReportConfig:
     timeframes: tuple[str, ...]
     group_by: tuple[str, ...]
     force_rebuild: bool = True
+    calibration_scope: str = "primary_normal_days"
+    include_dividend_gap_days: bool = False
+    include_corporate_action_days: bool = False
+    include_abnormal_gap_days: bool = False
+    require_special_day_classification: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +69,28 @@ class CalibrationReportService:
         intents = self._load_order_intents(config, instrument_ids)
         broker_orders = self._load_broker_orders(config, instrument_ids)
         counterfactuals = self._load_counterfactuals(config, instrument_ids)
+        all_candidates = list(candidates)
+        all_counterfactuals = list(counterfactuals)
+        special_context = self._special_day_context(config, instrument_ids)
+        if (
+            config.require_special_day_classification
+            and special_context["classification_status"] == "missing"
+        ):
+            msg = "market special day classification is required before final calibration"
+            raise RuntimeError(msg)
+        candidates = _filter_scope(candidates, config=config, special_context=special_context)
+        blockers = _filter_scope(blockers, config=config, special_context=special_context)
+        intents = _filter_scope(intents, config=config, special_context=special_context)
+        broker_orders = _filter_scope(
+            broker_orders,
+            config=config,
+            special_context=special_context,
+        )
+        counterfactuals = _filter_scope(
+            counterfactuals,
+            config=config,
+            special_context=special_context,
+        )
         payload = self._build_payload(
             config=config,
             candidates=candidates,
@@ -69,6 +98,9 @@ class CalibrationReportService:
             intents=intents,
             broker_orders=broker_orders,
             counterfactuals=counterfactuals,
+            special_context=special_context,
+            all_candidates=all_candidates,
+            all_counterfactuals=all_counterfactuals,
         )
         if config.force_rebuild:
             self._session.execute(
@@ -120,6 +152,9 @@ class CalibrationReportService:
         intents: list[OrderIntent],
         broker_orders: list[BrokerOrder],
         counterfactuals: list[CounterfactualResult],
+        special_context: JsonPayload,
+        all_candidates: list[SignalCandidate],
+        all_counterfactuals: list[CounterfactualResult],
     ) -> JsonPayload:
         blocked_ids = {
             blocker.candidate_id
@@ -137,12 +172,82 @@ class CalibrationReportService:
         slippage = _sum_decimal(
             result.slippage_bps_assumed or ZERO for result in counterfactuals
         )
+        classification_missing = special_context["classification_status"] == "missing"
+        calibration_clean = (
+            not classification_missing
+            and config.calibration_scope == "primary_normal_days"
+            and not config.include_dividend_gap_days
+            and not config.include_corporate_action_days
+        )
+        threshold_changes = _recommended_threshold_changes(
+            blockers=blockers,
+            counterfactuals=counterfactuals,
+        )
+        warnings = []
+        if classification_missing:
+            warnings.append("corporate_action_classification_missing")
+        if config.calibration_scope != "primary_normal_days":
+            warnings.append("non_primary_calibration_scope")
+        all_candidate_keys = _candidate_keys(all_candidates)
+        special_candidate_keys = all_candidate_keys & _context_key_set(
+            special_context,
+            "special_keys",
+        )
         return {
             "source": SOURCE,
             "from_date": config.from_date.isoformat(),
             "to_date": config.to_date.isoformat(),
             "strategy_id": config.strategy_id,
             "group_by": list(config.group_by),
+            "calibration_scope": config.calibration_scope,
+            "calibration_clean": calibration_clean,
+            "calibration_warnings": warnings,
+            "calibration_data_mode": "historical_candles_only",
+            "not_calibrated_from_history": [
+                "real_spread",
+                "order_book_depth",
+                "book_imbalance",
+                "market_quality_score",
+                "real_slippage",
+                "broker_rejects",
+                "partial_fills",
+                "latency",
+            ],
+            "requires_shadow_live_calibration": True,
+            "normal_days_count": len(all_candidate_keys - special_candidate_keys),
+            "special_days_count": len(special_candidate_keys),
+            "dividend_gap_days_count": special_context["dividend_gap_days_count"],
+            "corporate_action_days_count": special_context["corporate_action_days_count"],
+            "abnormal_gap_days_count": special_context["abnormal_gap_days_count"],
+            "excluded_days_count": special_context["excluded_days_count"],
+            "included_days_count": special_context["included_days_count"],
+            "excluded_from_primary_calibration_count": (
+                special_context["excluded_from_primary_calibration_count"]
+            ),
+            "normal_days_stats": _scope_stats(
+                all_candidates,
+                all_counterfactuals,
+                include_special=False,
+                special_context=special_context,
+            ),
+            "dividend_gap_days_stats": _scope_stats(
+                all_candidates,
+                all_counterfactuals,
+                special_type="dividend_gap_day",
+                special_context=special_context,
+            ),
+            "abnormal_gap_days_stats": _scope_stats(
+                all_candidates,
+                all_counterfactuals,
+                special_type="abnormal_gap_day",
+                special_context=special_context,
+            ),
+            "corporate_action_days_stats": _scope_stats(
+                all_candidates,
+                all_counterfactuals,
+                special_type="corporate_action_day",
+                special_context=special_context,
+            ),
             "candidate_count": len(candidates),
             "approved_count": len(intents),
             "blocked_count": len(blocked_ids),
@@ -173,14 +278,21 @@ class CalibrationReportService:
             "best_instrument": _best_scope(candidates, counterfactuals, "instrument_id"),
             "worst_instrument": _worst_scope(candidates, counterfactuals, "instrument_id"),
             "cost_sensitivity": _cost_sensitivity(counterfactuals),
-            "recommended_threshold_changes": _recommended_threshold_changes(
-                blockers=blockers,
-                counterfactuals=counterfactuals,
-            ),
+            "recommended_threshold_changes": threshold_changes,
+            "recommendations": _split_recommendations(threshold_changes),
             "explainability": {
                 "note": "Recommendations are payload-only and never mutate strategy_config.",
+                "scope_note": (
+                    "Recommendations apply only to the selected calibration_scope and must be "
+                    "confirmed by an operator before any strategy_config change."
+                ),
                 "false_positive_proxy": (
                     "share of blocked rows whose 15m historical counterfactual was net profitable"
+                ),
+                "recommendation": (
+                    "run_market_special_day_classification_before_final_calibration"
+                    if classification_missing
+                    else "review_payload_only_no_auto_apply"
                 ),
             },
         }
@@ -281,6 +393,55 @@ class CalibrationReportService:
             stmt = stmt.where(CounterfactualResult.timeframe.in_(config.timeframes))
         return list(self._session.execute(stmt).scalars())
 
+    def _special_day_context(
+        self,
+        config: CalibrationReportConfig,
+        instrument_ids: tuple[str, ...],
+    ) -> JsonPayload:
+        stmt = select(MarketSpecialDay).where(
+            MarketSpecialDay.trading_date >= config.from_date,
+            MarketSpecialDay.trading_date <= config.to_date,
+        )
+        if instrument_ids:
+            stmt = stmt.where(MarketSpecialDay.instrument_id.in_(instrument_ids))
+        rows = list(self._session.execute(stmt).scalars())
+        keys_by_type: dict[str, set[tuple[date, str]]] = defaultdict(set)
+        excluded_keys: set[tuple[date, str]] = set()
+        included_keys: set[tuple[date, str]] = set()
+        for row in rows:
+            key = (row.trading_date, row.instrument_id)
+            keys_by_type[row.special_day_type].add(key)
+            if row.exclude_from_primary_calibration:
+                excluded_keys.add(key)
+            else:
+                included_keys.add(key)
+        special_keys = set().union(*keys_by_type.values()) if keys_by_type else set()
+        status = (
+            "completed"
+            if rows
+            or _classification_audit_exists(
+                self._session,
+                from_date=config.from_date,
+                to_date=config.to_date,
+            )
+            else "missing"
+        )
+        return {
+            "classification_status": status,
+            "special_keys": special_keys,
+            "excluded_keys": excluded_keys,
+            "included_keys": included_keys,
+            "keys_by_type": keys_by_type,
+            "normal_days_count": 0,
+            "special_days_count": len(special_keys),
+            "dividend_gap_days_count": len(keys_by_type.get("dividend_gap_day", set())),
+            "corporate_action_days_count": len(keys_by_type.get("corporate_action_day", set())),
+            "abnormal_gap_days_count": len(keys_by_type.get("abnormal_gap_day", set())),
+            "excluded_days_count": len(excluded_keys),
+            "included_days_count": len(included_keys),
+            "excluded_from_primary_calibration_count": len(excluded_keys),
+        }
+
 
 def default_calibration_window(
     *,
@@ -294,6 +455,166 @@ def default_calibration_window(
         msg = "from_date must be <= to_date"
         raise ValueError(msg)
     return start, end
+
+
+def _filter_scope[T](
+    rows: list[T],
+    *,
+    config: CalibrationReportConfig,
+    special_context: JsonPayload,
+) -> list[T]:
+    if config.calibration_scope == "all_days":
+        return rows
+    special_keys = _context_key_set(special_context, "special_keys")
+    excluded_keys = _context_key_set(special_context, "excluded_keys")
+    dividend_keys = _keys_for_type(special_context, "dividend_gap_day")
+    corporate_keys = _keys_for_type(special_context, "corporate_action_day")
+    abnormal_keys = _keys_for_type(special_context, "abnormal_gap_day")
+    filtered: list[T] = []
+    for row in rows:
+        key = _row_key(row)
+        if key is None:
+            filtered.append(row)
+            continue
+        is_special = key in special_keys
+        if config.calibration_scope == "special_days_only":
+            if is_special:
+                filtered.append(row)
+            continue
+        if not is_special:
+            filtered.append(row)
+            continue
+        if key in dividend_keys and not config.include_dividend_gap_days:
+            continue
+        if key in corporate_keys and not config.include_corporate_action_days:
+            continue
+        if key in abnormal_keys and not config.include_abnormal_gap_days:
+            continue
+        if key in excluded_keys:
+            continue
+        filtered.append(row)
+    return filtered
+
+
+def _classification_audit_exists(
+    session: Session,
+    *,
+    from_date: date,
+    to_date: date,
+) -> bool:
+    return (
+        session.execute(
+            select(AuditEvent.audit_event_id).where(
+                AuditEvent.trading_date >= from_date,
+                AuditEvent.trading_date <= to_date,
+                AuditEvent.action == "market_special_day_classification_completed",
+            )
+        ).first()
+        is not None
+    )
+
+
+def _scope_stats(
+    candidates: list[SignalCandidate],
+    counterfactuals: list[CounterfactualResult],
+    *,
+    special_context: JsonPayload,
+    include_special: bool | None = None,
+    special_type: str | None = None,
+) -> JsonPayload:
+    if special_type is not None:
+        allowed_keys = _keys_for_type(special_context, special_type)
+    elif include_special is False:
+        allowed_keys = _candidate_keys(candidates) - _context_key_set(
+            special_context,
+            "special_keys",
+        )
+    else:
+        allowed_keys = _candidate_keys(candidates)
+    scoped_candidates = [
+        candidate
+        for candidate in candidates
+        if (candidate.trading_date, candidate.instrument_id) in allowed_keys
+    ]
+    candidate_ids = {candidate.candidate_id for candidate in scoped_candidates}
+    scoped_counterfactuals = [
+        result for result in counterfactuals if result.candidate_id in candidate_ids
+    ]
+    return {
+        "candidate_count": len(scoped_candidates),
+        "counterfactual_count": len(scoped_counterfactuals),
+        "gross_simulated_pnl": str(
+            _sum_decimal(result.pnl_gross for result in scoped_counterfactuals)
+        ),
+        "net_simulated_pnl": str(
+            _sum_decimal(result.pnl_net for result in scoped_counterfactuals)
+        ),
+    }
+
+
+def _split_recommendations(threshold_changes: JsonPayload) -> JsonPayload:
+    return {
+        "safe_from_historical_candles": {
+            "timeframe_enable_disable": "review_by_candidate_funnel",
+            "session_enable_disable": "review_by_session_net_pnl_proxy",
+            "instrument_ranking": "review_best_worst_instrument",
+            "min_move_bps_preliminary": "review_by_counterfactual_distribution",
+            "holding_horizon_preliminary": "review_5m_10m_15m_windows",
+            "long_short_preliminary": threshold_changes.get("allow_short"),
+        },
+        "requires_shadow_confirmation": {
+            "max_spread_bps": threshold_changes.get("max_spread_bps"),
+            "min_market_quality_score": threshold_changes.get("min_market_quality_score"),
+            "slippage_assumptions": "requires_live_execution_observation",
+            "execution_thresholds": "requires_order_book_and_latency_data",
+            "live_order_policy": "operator_approval_required",
+        },
+    }
+
+
+def _row_key(row: object) -> tuple[date, str] | None:
+    trading_date = getattr(row, "trading_date", None)
+    instrument_id = getattr(row, "instrument_id", None)
+    if isinstance(trading_date, date) and isinstance(instrument_id, str):
+        return trading_date, instrument_id
+    return None
+
+
+def _candidate_keys(candidates: list[SignalCandidate]) -> set[tuple[date, str]]:
+    return {(candidate.trading_date, candidate.instrument_id) for candidate in candidates}
+
+
+def _context_key_set(context: JsonPayload, key: str) -> set[tuple[date, str]]:
+    value = context.get(key)
+    result: set[tuple[date, str]] = set()
+    if isinstance(value, set):
+        for item in value:
+            if _is_key(item):
+                result.add(item)
+    return result
+
+
+def _keys_for_type(context: JsonPayload, special_type: str) -> set[tuple[date, str]]:
+    value = context.get("keys_by_type")
+    if not isinstance(value, dict):
+        return set()
+    raw = value.get(special_type, set())
+    result: set[tuple[date, str]] = set()
+    if not isinstance(raw, set):
+        return result
+    for item in raw:
+        if _is_key(item):
+            result.add(item)
+    return result
+
+
+def _is_key(value: object) -> bool:
+    return (
+        isinstance(value, tuple)
+        and len(value) == 2
+        and isinstance(value[0], date)
+        and isinstance(value[1], str)
+    )
 
 
 def _blocker_ranking(

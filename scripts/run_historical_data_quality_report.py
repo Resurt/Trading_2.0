@@ -50,6 +50,7 @@ def main() -> None:
                     fail_on_invalid_ohlc=args.fail_on_invalid_ohlc,
                     max_missing_intervals=args.max_missing_intervals,
                     write_report=not args.no_write,
+                    require_special_day_classification=args.require_special_day_classification,
                 )
             )
             payload = report.as_payload()
@@ -74,6 +75,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fail-on-missing", action="store_true")
     parser.add_argument("--fail-on-invalid-ohlc", action="store_true")
     parser.add_argument("--max-missing-intervals", type=int)
+    parser.add_argument("--require-special-day-classification", action="store_true")
     parser.add_argument("--no-write", action="store_true")
     return parser.parse_args()
 

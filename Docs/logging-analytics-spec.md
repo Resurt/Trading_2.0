@@ -1008,3 +1008,26 @@ Historical replay execution policy:
 - blocked/rejected/cancelled paths получают `counterfactual_result` по
   горизонтам `+5m`, `+10m`, `+15m` с assumptions `commission>=5 bps per side`
   и round-trip fee минимум `10 bps`.
+## Corporate Actions And Calibration Cleanliness
+
+Calibration facts include two additional domain tables:
+
+- `corporate_action_event` - manual/csv/api/synthetic facts for dividend, split,
+  reverse split and other corporate actions;
+- `market_special_day` - per instrument/trading_date flags for `dividend_gap_day`,
+  `corporate_action_day`, `abnormal_gap_day` and `excluded_from_calibration`.
+
+Every historical replay payload generated on a special day must include:
+
+- `special_day_type`;
+- `corporate_action_flag`;
+- `dividend_gap_day`;
+- `abnormal_gap_day`;
+- `excluded_from_primary_calibration`;
+- `special_day_policy`;
+- `eligible_for_live_calibration`.
+
+Primary calibration must set `calibration_clean=false` if special-day classification is
+missing. A clean primary calibration requires `calibration_scope=primary_normal_days` and
+excluded dividend/corporate-action days. Recommendations remain report payload only and
+must not auto-update `strategy_config`.
