@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
 
 from trade_core.broker_gateway import (
+    DividendsRequest,
     InstrumentRef,
     InstrumentResolveRequest,
     OrderPlacementRequest,
@@ -209,6 +212,54 @@ def test_gateway_applies_unary_timeout_floor_for_cold_sdk_channel() -> None:
     )
 
     assert fake_client.calls[0]["timeout_seconds"] == 5.0
+
+
+def test_get_dividends_uses_readonly_unary_call() -> None:
+    fake_client = FakeUnaryClient(
+        [
+            UnaryCallResult(
+                data={
+                    "instrument_id": "uid-sber",
+                    "dividends": [{"amount_per_share": "34.84"}],
+                },
+                headers={"x-tracking-id": "tracking-dividend"},
+            )
+        ]
+    )
+    gateway = TBankBrokerGateway(
+        config=config(),
+        tokens=tokens(),
+        unary_client=fake_client,
+        backoff=ExponentialBackoff(initial_seconds=0.0, max_seconds=0.0),
+    )
+
+    response = asyncio.run(
+        gateway.get_dividends(
+            DividendsRequest(
+                instrument=instrument(),
+                from_=datetime(2026, 1, 1, tzinfo=UTC),
+                to=datetime(2026, 12, 31, tzinfo=UTC),
+            )
+        )
+    )
+
+    assert response.method_name == "GetDividends"
+    assert response.headers["x_tracking_id"] == "tracking-dividend"
+    call = fake_client.calls[0]
+    assert call["method_name"] == "GetDividends"
+    assert call["payload"] == {
+        "instrument": {
+            "instrument_id": "MOEX:SBER",
+            "instrument_uid": "sber-instrument-uid",
+            "class_code": "TQBR",
+            "ticker": "SBER",
+        },
+        "from": "2026-01-01T00:00:00+00:00",
+        "to": "2026-12-31T00:00:00+00:00",
+        "date_filter": "record_date",
+    }
+    metadata = cast(tuple[tuple[str, str], ...], call["metadata"])
+    assert ("authorization", "Bearer readonly-token-for-tests") in metadata
 
 
 def test_idempotent_order_id_generation_reuses_uuid_for_client_key() -> None:

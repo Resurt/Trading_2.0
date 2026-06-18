@@ -35,7 +35,9 @@ $env:TRADING_AUTH_MODE = "static_bearer"
 - Historical candle backfill has been run for the configured instruments, raw `1m`
   and derived `5m/10m/15m` `market_candle` rows are present, and replay/report
   calibration checks were reviewed before enabling live orders.
-- Corporate action import/classification has been run for the historical calibration period.
+- T-Bank dividend sync through `GetDividends` has been run for the historical calibration
+  period and future window; manual CSV/JSON is fallback/override only.
+- Corporate action classification has been run with future dividend windows included.
 - Primary calibration uses `calibration_scope=primary_normal_days` and has
   `calibration_clean=true`.
 - Dividend/corporate-action days are excluded from primary calibration by default or
@@ -55,6 +57,9 @@ $env:TRADING_AUTH_MODE = "static_bearer"
 - Alerts for stream freshness, rejected orders, report backlog and health are active.
 - Operator stop path through `POST /robot/stop` is tested.
 - `emergency_stop` cancellation path is tested: working/submitted/partially-filled orders receive `cancel_reason_code=manual_operator_emergency_stop`; failures put runtime into `degraded`.
+- Production preflight must fail if dividend sync is older than the configured threshold,
+  if future dividend windows are not classified, or if dividend calendar is unavailable
+  while `TRADING_DIVIDEND_SYNC_FAIL_OPEN=false`.
 
 ## Start
 

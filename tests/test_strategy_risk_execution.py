@@ -340,6 +340,36 @@ def test_special_day_risk_blockers_are_machine_readable() -> None:
             special_day_trade_policy="shadow_only",
         )
     )
+    unavailable_calendar = DefaultRiskEngine().evaluate(
+        RiskAssessmentInput(
+            candidate=candidate(side=TradeSide.BUY),
+            session_snapshot=snapshot(),
+            market_state=market_state(spread_bps=Decimal("5")),
+            limits=RiskLimits(block_entries_when_dividend_calendar_unavailable=True),
+            dividend_calendar_available=False,
+        )
+    )
+    future_window = DefaultRiskEngine().evaluate(
+        RiskAssessmentInput(
+            candidate=candidate(side=TradeSide.BUY),
+            session_snapshot=snapshot(),
+            market_state=market_state(spread_bps=Decimal("5")),
+            limits=RiskLimits(block_entries_on_future_dividend_window=True),
+            future_dividend_risk_window=True,
+            days_to_ex_date=5,
+            corporate_action_source="api_import",
+        )
+    )
+    short_dividend_window = DefaultRiskEngine().evaluate(
+        RiskAssessmentInput(
+            candidate=candidate(side=TradeSide.SELL),
+            session_snapshot=snapshot(),
+            market_state=market_state(spread_bps=Decimal("5")),
+            limits=RiskLimits(allow_short=True, max_short_lots=5, max_position_lots=5),
+            special_day_type="dividend_gap_day",
+            special_day_trade_policy="allow",
+        )
+    )
 
     assert dividend.final_blocker is not None
     assert dividend.final_blocker.code is BlockerCode.DIVIDEND_GAP_RISK
@@ -352,6 +382,13 @@ def test_special_day_risk_blockers_are_machine_readable() -> None:
     assert short_shadow_only.final_blocker.reason_payload["special_day_trade_policy"] == (
         "shadow_only"
     )
+    assert unavailable_calendar.final_blocker is not None
+    assert unavailable_calendar.final_blocker.code is BlockerCode.DIVIDEND_CALENDAR_UNAVAILABLE
+    assert future_window.final_blocker is not None
+    assert future_window.final_blocker.code is BlockerCode.FUTURE_DIVIDEND_RISK_WINDOW
+    assert future_window.final_blocker.reason_payload["days_to_ex_date"] == 5
+    assert short_dividend_window.final_blocker is not None
+    assert short_dividend_window.final_blocker.code is BlockerCode.SHORT_BLOCKED_DIVIDEND_WINDOW
 
 
 def test_entry_is_blocked_when_position_state_is_stale() -> None:

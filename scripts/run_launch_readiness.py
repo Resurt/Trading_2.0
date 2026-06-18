@@ -91,6 +91,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--shadow-minutes", type=float, default=0.0)
     parser.add_argument("--skip-build", action="store_true")
     parser.add_argument("--skip-compose-up", action="store_true")
+    parser.add_argument("--allow-manual-corporate-actions", action="store_true")
+    parser.add_argument("--max-dividend-sync-age-hours", type=int, default=24)
+    parser.add_argument("--skip-dividend-sync-check", action="store_true")
     return parser.parse_args()
 
 
@@ -219,6 +222,11 @@ def run_shadow(args: argparse.Namespace, env: Mapping[str, str]) -> list[GateRes
     results = [
         env_gate("shadow_mode_selected", env.get("TRADING_RUNTIME_MODE") == "shadow"),
         env_gate("shadow_no_real_orders", "TRADING_PRODUCTION_CONFIRM" not in env),
+        env_gate(
+            "dividend_calendar_fail_open_policy_known",
+            env.get("TRADING_DIVIDEND_SYNC_FAIL_OPEN", "false").lower()
+            in {"false", "true", "0", "1", "yes", "no"},
+        ),
         run_cmd("replay_day", [sys.executable, "scripts/run_replay_day.py", "--date", args.date]),
         run_cmd(
             "report_rebuild",
@@ -250,6 +258,16 @@ def run_production_preflight(args: argparse.Namespace, env: Mapping[str, str]) -
             or any(key.startswith("TRADING_API_") and key.endswith("_TOKEN_FILE") for key in env),
         ),
         env_gate("dev_auth_disabled", env.get("TRADING_AUTH_MODE", "static_bearer") != "dev"),
+        env_gate(
+            "dividend_sync_enabled",
+            env.get("TRADING_DIVIDEND_SYNC_ENABLED", "true").lower()
+            in {"1", "true", "yes", "on"},
+        ),
+        env_gate(
+            "dividend_sync_fail_closed_default",
+            env.get("TRADING_DIVIDEND_SYNC_FAIL_OPEN", "false").lower()
+            in {"0", "false", "no", "off"},
+        ),
         run_cmd(
             "production_safety_tests",
             [
@@ -284,6 +302,7 @@ def run_historical_replay(args: argparse.Namespace) -> list[GateResult]:
     ]
     dry_run_replay_args = [*replay_args, "--dry-run"]
     config_fallback_args = ["--allow-default-strategy-config"] if args.dry_run else []
+    dividend_sync_args = [] if args.skip_dividend_sync_check else ["--require-dividend-sync"]
     return [
         run_cmd(
             "market_special_day_classification",
@@ -294,6 +313,10 @@ def run_historical_replay(args: argparse.Namespace) -> list[GateResult]:
                 str(args.lookback_days),
                 "--instruments",
                 args.instruments,
+                "--include-future",
+                "--lookahead-days",
+                "365",
+                *dividend_sync_args,
                 "--json-output",
             ],
         ),
@@ -319,6 +342,7 @@ def run_historical_replay(args: argparse.Namespace) -> list[GateResult]:
                 "scripts/run_historical_replay_from_db.py",
                 *dry_run_replay_args,
                 "--require-special-day-classification",
+                *dividend_sync_args,
                 *config_fallback_args,
             ],
         ),
@@ -329,6 +353,7 @@ def run_historical_replay(args: argparse.Namespace) -> list[GateResult]:
                 "scripts/run_historical_replay_from_db.py",
                 *(dry_run_replay_args if args.dry_run else replay_args),
                 "--require-special-day-classification",
+                *dividend_sync_args,
                 *config_fallback_args,
             ],
         ),
@@ -365,6 +390,11 @@ def run_historical_replay(args: argparse.Namespace) -> list[GateResult]:
                 "--calibration-scope",
                 "primary_normal_days",
                 "--require-special-day-classification",
+                *(
+                    ["--allow-manual-corporate-actions"]
+                    if args.allow_manual_corporate_actions
+                    else []
+                ),
                 "--json-output",
             ],
         ),
@@ -380,6 +410,10 @@ def run_historical_replay(args: argparse.Namespace) -> list[GateResult]:
 
 def run_historical_final_calibration(args: argparse.Namespace) -> list[GateResult]:
     quality_timeframes = f"1m,{args.timeframes}"
+    dividend_sync_args = [] if args.skip_dividend_sync_check else ["--require-dividend-sync"]
+    manual_args = (
+        ["--allow-manual-corporate-actions"] if args.allow_manual_corporate_actions else []
+    )
     common_replay_args = [
         "--lookback-days",
         str(args.lookback_days),
@@ -390,9 +424,52 @@ def run_historical_final_calibration(args: argparse.Namespace) -> list[GateResul
         "--strategy-id",
         args.strategy_id,
         "--require-special-day-classification",
+        *dividend_sync_args,
         "--json-output",
     ]
+    calibration_command = [
+        sys.executable,
+        "scripts/run_calibration_report.py",
+        "--lookback-days",
+        str(args.lookback_days),
+        "--strategy-id",
+        args.strategy_id,
+        "--instruments",
+        args.instruments,
+        "--timeframes",
+        args.timeframes,
+        "--calibration-scope",
+        "primary_normal_days",
+        "--require-special-day-classification",
+        *manual_args,
+        "--json-output",
+    ]
+    calibration_gate = (
+        run_cmd("primary_calibration_clean", calibration_command)
+        if args.skip_dividend_sync_check
+        else run_json_cmd_gate(
+            "primary_calibration_clean",
+            calibration_command,
+            expected={"calibration_clean": True},
+        )
+    )
     return [
+        run_cmd(
+            "special_day_classification_requires_dividend_sync",
+            [
+                sys.executable,
+                "scripts/run_market_special_day_classification.py",
+                "--lookback-days",
+                str(args.lookback_days),
+                "--instruments",
+                args.instruments,
+                "--include-future",
+                "--lookahead-days",
+                "365",
+                *dividend_sync_args,
+                "--json-output",
+            ],
+        ),
         run_cmd(
             "historical_quality_requires_special_days",
             [
@@ -428,25 +505,7 @@ def run_historical_final_calibration(args: argparse.Namespace) -> list[GateResul
                 "--json-output",
             ],
         ),
-        run_cmd(
-            "primary_calibration_clean",
-            [
-                sys.executable,
-                "scripts/run_calibration_report.py",
-                "--lookback-days",
-                str(args.lookback_days),
-                "--strategy-id",
-                args.strategy_id,
-                "--instruments",
-                args.instruments,
-                "--timeframes",
-                args.timeframes,
-                "--calibration-scope",
-                "primary_normal_days",
-                "--require-special-day-classification",
-                "--json-output",
-            ],
-        ),
+        calibration_gate,
         GateResult(
             name="historical_final_no_real_orders",
             passed=True,
@@ -495,6 +554,81 @@ def run_cmd(
             "returncode": completed.returncode,
             "stdout_tail": tail(completed.stdout),
             "stderr_tail": tail(completed.stderr),
+        },
+    )
+
+
+def run_json_cmd_gate(
+    name: str,
+    argv: Sequence[str],
+    *,
+    expected: Mapping[str, object],
+    cwd: Path = ROOT,
+    timeout_seconds: int = 240,
+) -> GateResult:
+    try:
+        completed = subprocess.run(
+            list(argv),
+            cwd=cwd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return GateResult(
+            name=name,
+            passed=False,
+            command=format_cmd(argv),
+            details={
+                "status": "timeout",
+                "stdout_tail": tail(exc.stdout or ""),
+                "stderr_tail": tail(exc.stderr or ""),
+            },
+        )
+    if completed.returncode != 0:
+        return GateResult(
+            name=name,
+            passed=False,
+            command=format_cmd(argv),
+            details={
+                "status": "completed",
+                "returncode": completed.returncode,
+                "stdout_tail": tail(completed.stdout),
+                "stderr_tail": tail(completed.stderr),
+            },
+        )
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        return GateResult(
+            name=name,
+            passed=False,
+            command=format_cmd(argv),
+            details={
+                "status": "json_parse_failed",
+                "returncode": completed.returncode,
+                "stdout_tail": tail(completed.stdout),
+                "stderr_tail": tail(completed.stderr),
+                "error_message": str(exc),
+            },
+        )
+    mismatches = {
+        key: {"expected": value, "actual": payload.get(key)}
+        for key, value in expected.items()
+        if payload.get(key) != value
+    }
+    return GateResult(
+        name=name,
+        passed=not mismatches,
+        command=format_cmd(argv),
+        details={
+            "status": "completed",
+            "returncode": completed.returncode,
+            "stdout_tail": tail(completed.stdout),
+            "stderr_tail": tail(completed.stderr),
+            "json_expected": dict(expected),
+            "json_mismatches": mismatches,
         },
     )
 

@@ -56,6 +56,7 @@ def main() -> None:
         exclude_abnormal_gap_days=args.exclude_abnormal_gap_days,
         special_day_policy=args.special_day_policy,
         require_special_day_classification=args.require_special_day_classification,
+        require_dividend_sync=args.require_dividend_sync,
         allow_default_strategy_config=args.allow_default_strategy_config,
         session_template=args.session_template,
         config_version=args.config_version,
@@ -117,6 +118,7 @@ def parse_args() -> argparse.Namespace:
         default="exclude",
     )
     parser.add_argument("--require-special-day-classification", action="store_true")
+    parser.add_argument("--require-dividend-sync", action="store_true")
     parser.add_argument("--allow-default-strategy-config", action="store_true")
     parser.add_argument("--session-template", default="weekday_main")
     parser.add_argument("--config-version", default="latest")

@@ -496,6 +496,8 @@ def create_fastapi_app(
         from_date: Annotated[date | None, Query()] = None,
         to_date: Annotated[date | None, Query()] = None,
         instruments: Annotated[str, Query()] = "",
+        source: Annotated[str | None, Query()] = None,
+        action_type: Annotated[str | None, Query()] = None,
     ) -> list[dict[str, Any]]:
         from trade_core.corporate_actions import CorporateActionService
 
@@ -521,6 +523,111 @@ def create_fastapi_app(
                     from_date=from_date,
                     to_date=to_date,
                     instruments=_split_csv(instruments),
+                    source=source,
+                    action_type=action_type,
+                )
+            ]
+
+    @app.post("/corporate-actions/dividends/sync", tags=["corporate-actions"])
+    def tbank_dividend_sync(
+        request: Request,
+        auth: AuthDep,
+        payload: Annotated[dict[str, Any] | None, Body()] = None,
+    ) -> dict[str, Any]:
+        from decimal import Decimal
+
+        from trade_core.corporate_actions import DividendSyncConfig, DividendSyncService
+        from trade_core.infra.tbank import TBankBrokerGateway
+        from trade_core.runtime import SafeNoopBrokerGateway
+
+        require_role(auth, (ApiRole.OPERATOR, ApiRole.ADMIN))
+        _ensure_historical_api_mode(runtime_mode)
+        data = payload or {}
+        dry_run = bool(data.get("dry_run", False))
+        config = DividendSyncConfig(
+            instruments=_split_csv(str(data.get("instruments", "SBER,GAZP"))),
+            from_date=_date_from_payload(data.get("from_date")),
+            to_date=_date_from_payload(data.get("to_date")),
+            lookback_days=int(data.get("lookback_days", 730)),
+            lookahead_days=int(data.get("lookahead_days", 365)),
+            dry_run=dry_run,
+            force_rebuild=bool(data.get("force_rebuild", False)),
+            classify_special_days=bool(data.get("classify_special_days", True)),
+            gap_threshold_bps=Decimal(str(data.get("gap_threshold_bps", "150"))),
+            dividend_gap_threshold_bps=Decimal(
+                str(data.get("dividend_gap_threshold_bps", "50"))
+            ),
+        )
+        gateway = (
+            SafeNoopBrokerGateway()
+            if dry_run
+            else TBankBrokerGateway()
+        )
+        database = _database_service(request)
+        with database.session_scope() as session:
+            return asyncio.run(
+                DividendSyncService(session=session, broker_gateway=gateway).run(config)
+            ).as_payload()
+
+    @app.get("/corporate-actions/dividends/sync/status", tags=["corporate-actions"])
+    def tbank_dividend_sync_status(
+        request: Request,
+        auth: AuthDep,
+        from_date: Annotated[date | None, Query()] = None,
+        to_date: Annotated[date | None, Query()] = None,
+        lookback_days: Annotated[int, Query(ge=1, le=3660)] = 730,
+        instruments: Annotated[str, Query()] = "SBER,GAZP",
+    ) -> dict[str, Any]:
+        require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
+        window_from, window_to = _historical_window(
+            from_date=from_date,
+            to_date=to_date,
+            lookback_days=lookback_days,
+        )
+        database = _database_service(request)
+        with database.session_scope() as session:
+            return _dividend_sync_status_payload(
+                session=session,
+                from_date=window_from,
+                to_date=window_to,
+                instruments=_split_csv(instruments),
+            )
+
+    @app.get("/corporate-actions/dividends", tags=["corporate-actions"])
+    def tbank_dividends(
+        request: Request,
+        auth: AuthDep,
+        from_date: Annotated[date | None, Query()] = None,
+        to_date: Annotated[date | None, Query()] = None,
+        instruments: Annotated[str, Query()] = "",
+        source: Annotated[str | None, Query()] = None,
+    ) -> list[dict[str, Any]]:
+        from trade_core.corporate_actions import CorporateActionService
+
+        require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
+        database = _database_service(request)
+        with database.session_scope() as session:
+            return [
+                {
+                    "corporate_action_id": str(row.corporate_action_id),
+                    "instrument_id": row.instrument_id,
+                    "ticker": row.ticker,
+                    "action_type": row.action_type,
+                    "ex_date": row.ex_date.isoformat() if row.ex_date else None,
+                    "amount_per_share": str(row.amount_per_share)
+                    if row.amount_per_share is not None
+                    else None,
+                    "currency": row.currency,
+                    "source": row.source,
+                    "confidence": row.confidence,
+                    "payload": row.action_payload,
+                }
+                for row in CorporateActionService(session).list_events(
+                    from_date=from_date,
+                    to_date=to_date,
+                    instruments=_split_csv(instruments),
+                    source=source,
+                    action_type="dividend",
                 )
             ]
 
@@ -544,6 +651,28 @@ def create_fastapi_app(
         )
         database = _database_service(request)
         with database.session_scope() as session:
+            if bool(data.get("require_dividend_sync", False)):
+                from trade_core.corporate_actions import CorporateActionService
+
+                effective_to = window_to
+                if bool(data.get("include_future", False)):
+                    from datetime import timedelta
+
+                    effective_to = effective_to + timedelta(
+                        days=int(data.get("lookahead_days", 365))
+                    )
+                if not CorporateActionService(session).api_imported_dividend_events_exist(
+                    from_date=window_from,
+                    to_date=effective_to,
+                    instruments=_split_csv(str(data.get("instruments", "SBER,GAZP"))),
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "error_code": "dividend_sync_missing",
+                            "message": "Run T-Bank dividend sync before classification",
+                        },
+                    )
             return MarketSpecialDayClassifier(session).classify(
                 from_date=window_from,
                 to_date=window_to,
@@ -553,6 +682,8 @@ def create_fastapi_app(
                     str(data.get("dividend_gap_threshold_bps", "50"))
                 ),
                 force_rebuild=bool(data.get("force_rebuild", False)),
+                include_future=bool(data.get("include_future", False)),
+                lookahead_days=int(data.get("lookahead_days", 365)),
             ).as_payload()
 
     @app.get("/market-special-days", tags=["corporate-actions"])
@@ -592,6 +723,48 @@ def create_fastapi_app(
                     to_date=to_date,
                     instruments=_split_csv(instruments),
                 )
+            ]
+
+    @app.get("/market-special-days/future", tags=["corporate-actions"])
+    def market_special_days_future(
+        request: Request,
+        auth: AuthDep,
+        instruments: Annotated[str, Query()] = "",
+        lookahead_days: Annotated[int, Query(ge=1, le=3660)] = 365,
+    ) -> list[dict[str, Any]]:
+        from datetime import timedelta
+
+        from trade_core.corporate_actions import CorporateActionService
+
+        require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
+        today = datetime.now(tz=UTC).date()
+        database = _database_service(request)
+        with database.session_scope() as session:
+            return [
+                {
+                    "special_day_id": str(row.special_day_id),
+                    "trading_date": row.trading_date.isoformat(),
+                    "instrument_id": row.instrument_id,
+                    "ticker": row.ticker,
+                    "special_day_type": row.special_day_type,
+                    "reason_code": row.reason_code,
+                    "source": row.source,
+                    "open_gap_bps": str(row.open_gap_bps)
+                    if row.open_gap_bps is not None
+                    else None,
+                    "severity": row.severity,
+                    "exclude_from_primary_calibration": (
+                        row.exclude_from_primary_calibration
+                    ),
+                    "trade_policy": row.trade_policy,
+                    "payload": row.special_day_payload,
+                }
+                for row in CorporateActionService(session).list_special_days(
+                    from_date=today,
+                    to_date=today + timedelta(days=lookahead_days),
+                    instruments=_split_csv(instruments),
+                )
+                if row.special_day_type == "future_dividend_risk_window"
             ]
 
     @app.post("/historical/replay/run", tags=["historical"])
@@ -906,6 +1079,64 @@ def _historical_window(
     if start > end:
         raise HTTPException(status_code=400, detail="from_date must be <= to_date")
     return start, end
+
+
+def _dividend_sync_status_payload(
+    *,
+    session: Any,
+    from_date: date,
+    to_date: date,
+    instruments: tuple[str, ...],
+) -> dict[str, Any]:
+    from sqlalchemy import select
+
+    from trade_core.corporate_actions import CorporateActionService
+    from trading_common.db.models import AuditEvent
+
+    service = CorporateActionService(session)
+    api_events = service.list_events(
+        from_date=from_date,
+        to_date=to_date,
+        instruments=instruments,
+        source="api_import",
+        action_type="dividend",
+    )
+    dividend_events = service.list_events(
+        from_date=from_date,
+        to_date=to_date,
+        instruments=instruments,
+        action_type="dividend",
+    )
+    manual_events = [row for row in dividend_events if row.source != "api_import"]
+    latest_audit = session.execute(
+        select(AuditEvent)
+        .where(AuditEvent.action.in_(("dividend_sync_completed", "dividend_sync_failed")))
+        .order_by(AuditEvent.ts_utc.desc())
+    ).scalars().first()
+    latest_payload = latest_audit.audit_payload if latest_audit is not None else {}
+    status = "completed" if api_events else "missing"
+    if not api_events and manual_events:
+        status = "manual_only"
+    if (
+        not api_events
+        and latest_audit is not None
+        and latest_audit.action == "dividend_sync_completed"
+    ):
+        status = "no_dividends_found"
+    return {
+        "source": "api_import",
+        "status": status,
+        "from_date": from_date.isoformat(),
+        "to_date": to_date.isoformat(),
+        "instruments": list(instruments),
+        "api_import_dividend_events_count": len(api_events),
+        "manual_dividend_events_count": len(manual_events),
+        "last_sync_action": latest_audit.action if latest_audit is not None else None,
+        "last_sync_at": latest_audit.ts_utc.isoformat()
+        if latest_audit is not None
+        else None,
+        "last_sync_payload": latest_payload,
+    }
 
 
 def _dashboard_payload(app: FastAPI) -> dict[str, object]:

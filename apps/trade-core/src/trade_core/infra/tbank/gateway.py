@@ -14,6 +14,7 @@ from trade_core.broker_gateway import (
     BrokerUnaryResponse,
     CancelOrderRequest,
     CandleRequest,
+    DividendsRequest,
     InstrumentRef,
     InstrumentResolveRequest,
     LastPricesRequest,
@@ -103,6 +104,22 @@ class TBankBrokerGateway:
                 "exchange": request.exchange,
                 "from": _datetime_to_iso(request.from_),
                 "to": _datetime_to_iso(request.to),
+            },
+            metadata,
+        )
+
+    async def get_dividends(
+        self,
+        request: DividendsRequest,
+        metadata: RequestMetadata | None = None,
+    ) -> BrokerUnaryResponse:
+        return await self._call_readonly(
+            "GetDividends",
+            {
+                "instrument": _instrument_payload(request.instrument),
+                "from": _datetime_to_iso(request.from_),
+                "to": _datetime_to_iso(request.to),
+                "date_filter": request.date_filter,
             },
             metadata,
         )

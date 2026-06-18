@@ -4,6 +4,7 @@ import asyncio
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import cast
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -19,10 +20,18 @@ from report_worker.analytics.historical_reports import (
     HistoricalReportRebuildConfig,
     HistoricalReportRebuildService,
 )
+from trade_core.broker_gateway import (
+    BrokerGateway,
+    BrokerUnaryResponse,
+    DividendsRequest,
+    TradingSchedulesRequest,
+)
 from trade_core.corporate_actions import (
     CorporateActionEvent,
     CorporateActionImportConfig,
     CorporateActionService,
+    DividendSyncConfig,
+    DividendSyncService,
     MarketSpecialDayClassifier,
 )
 from trade_core.market_data.events import Timeframe
@@ -51,6 +60,46 @@ from trading_common.db.models import (
 )
 
 MSK = ZoneInfo("Europe/Moscow")
+
+
+class FakeDividendGateway:
+    async def get_dividends(
+        self,
+        request: DividendsRequest,
+        metadata: object | None = None,
+    ) -> BrokerUnaryResponse:
+        del metadata
+        return BrokerUnaryResponse(
+            method_name="GetDividends",
+            data={
+                "instrument_id": request.instrument.instrument_id,
+                "dividends": [
+                    {
+                        "instrument_id": request.instrument.instrument_id,
+                        "declared_date": "2026-06-01",
+                        "record_date": "2026-07-11",
+                        "last_buy_date": "2026-07-09",
+                        "payment_date": "2026-07-25",
+                        "amount_per_share": "34.84",
+                        "currency": "RUB",
+                        "raw_payload": {"source": "fake"},
+                    }
+                ],
+            },
+            headers={"x-tracking-id": "tracking-dividends"},
+        )
+
+    async def trading_schedules(
+        self,
+        request: TradingSchedulesRequest,
+        metadata: object | None = None,
+    ) -> BrokerUnaryResponse:
+        del request, metadata
+        return BrokerUnaryResponse(
+            method_name="TradingSchedules",
+            data={"windows": []},
+            headers={},
+        )
 
 
 def test_historical_quality_catches_missing_duplicate_invalid_and_session_split() -> None:
@@ -144,6 +193,47 @@ def test_corporate_action_import_is_idempotent_and_classifies_dividend_gap(
     engine.dispose()
 
 
+def test_tbank_dividend_sync_creates_api_import_events_and_future_windows() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        _seed_instrument(session)
+        config = DividendSyncConfig(
+            instruments=("SBER",),
+            from_date=date(2026, 1, 1),
+            to_date=date(2027, 12, 31),
+            classify_special_days=True,
+        )
+
+        first = asyncio.run(
+            DividendSyncService(
+                session=session,
+                broker_gateway=cast(BrokerGateway, FakeDividendGateway()),
+            ).run(config)
+        )
+        second = asyncio.run(
+            DividendSyncService(
+                session=session,
+                broker_gateway=cast(BrokerGateway, FakeDividendGateway()),
+            ).run(config)
+        )
+
+        events = session.execute(select(CorporateActionEventRow)).scalars().all()
+        assert len(events) == 1
+        event = events[0]
+        assert event.source == "api_import"
+        assert event.action_type == "dividend"
+        assert event.ex_date == date(2026, 7, 10)
+        assert event.action_payload["ex_date_inference_source"] == "fallback_next_weekday"
+        assert first.dividends_inserted == 1
+        assert second.existing_unchanged == 1
+        special_days = session.execute(select(MarketSpecialDay)).scalars().all()
+        assert len(special_days) == 1
+        assert special_days[0].special_day_type == "future_dividend_risk_window"
+        assert special_days[0].trade_policy == "shadow_only"
+    engine.dispose()
+
+
 def test_quality_report_requires_special_day_classification_when_final() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -172,7 +262,7 @@ def test_quality_report_requires_special_day_classification_when_final() -> None
         )
         report = HistoricalDataQualityService(session).assert_passes(config)
         assert report.corporate_action_classification_status == "completed"
-        assert report.quality_warnings == ()
+        assert report.quality_warnings == ("dividend_sync_missing",)
     engine.dispose()
 
 
@@ -610,7 +700,7 @@ def _seed_strategy_config(session: Session) -> None:
     session.flush()
 
 
-def _seed_dividend_event(session: Session) -> None:
+def _seed_dividend_event(session: Session, *, source: str = "api_import") -> None:
     CorporateActionService(session).upsert_event(
         CorporateActionEvent(
             instrument_id="MOEX:SBER",
@@ -619,9 +709,9 @@ def _seed_dividend_event(session: Session) -> None:
             ex_date=date(2026, 6, 18),
             amount_per_share=Decimal("34.84"),
             currency="RUB",
-            source="synthetic_test",
+            source=source,
             confidence="confirmed",
-            action_payload={"source": "test"},
+            action_payload={"source": source},
         )
     )
     session.flush()

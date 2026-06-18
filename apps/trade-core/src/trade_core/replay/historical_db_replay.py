@@ -83,6 +83,7 @@ class HistoricalDbReplayConfig:
     exclude_abnormal_gap_days: bool = False
     special_day_policy: str = "exclude"
     require_special_day_classification: bool = False
+    require_dividend_sync: bool = False
     allow_default_strategy_config: bool = False
     session_template: str = "weekday_main"
     config_version: str | int = "latest"
@@ -180,6 +181,7 @@ class HistoricalDbReplayResult:
     risk_limits_source: str = "unknown"
     allow_default_strategy_config: bool = False
     special_day_classification_status: str = "missing"
+    dividend_sync_status: str = "missing"
     real_orders_disabled: bool = True
     dry_run: bool = False
     days: tuple[ReplayDayResult, ...] = ()
@@ -207,6 +209,7 @@ class HistoricalDbReplayResult:
             "risk_limits_source": self.risk_limits_source,
             "allow_default_strategy_config": self.allow_default_strategy_config,
             "special_day_classification_status": self.special_day_classification_status,
+            "dividend_sync_status": self.dividend_sync_status,
             "real_orders_disabled": self.real_orders_disabled,
             "dry_run": self.dry_run,
             "days": [item.as_payload() for item in self.days],
@@ -229,6 +232,10 @@ class HistoricalDbReplayService:
         special_day_status = self._special_day_classification_status(config)
         if config.require_special_day_classification and special_day_status == "missing":
             msg = "market special day classification is required before final historical replay"
+            raise RuntimeError(msg)
+        dividend_sync_status = self._dividend_sync_status(config)
+        if config.require_dividend_sync and dividend_sync_status in {"missing", "manual_only"}:
+            msg = "T-Bank dividend sync is required before final historical replay"
             raise RuntimeError(msg)
         loaded_config = self._load_strategy_config(config)
         strategy_config = loaded_config.config
@@ -282,6 +289,7 @@ class HistoricalDbReplayService:
                 )
                 continue
             special_payload = _special_day_payload(config=config, flags=flags)
+            special_payload["dividend_sync_status"] = dividend_sync_status
             bar = _bar_from_row(row)
             latest_bars = latest_bars_by_instrument.setdefault(row.instrument_id, {})
             latest_bars[bar.timeframe] = bar
@@ -451,6 +459,7 @@ class HistoricalDbReplayService:
             risk_limits_source=loaded_config.source,
             allow_default_strategy_config=config.allow_default_strategy_config,
             special_day_classification_status=special_day_status,
+            dividend_sync_status=dividend_sync_status,
             dry_run=config.dry_run,
             days=day_results,
             instruments=instrument_results,
@@ -625,6 +634,24 @@ class HistoricalDbReplayService:
             else "missing"
         )
 
+    def _dividend_sync_status(self, config: HistoricalDbReplayConfig) -> str:
+        service = CorporateActionService(self._session)
+        if service.api_imported_dividend_events_exist(
+            from_date=config.from_date,
+            to_date=config.to_date,
+            instruments=config.instruments,
+        ):
+            return "completed"
+        manual_events = service.list_events(
+            from_date=config.from_date,
+            to_date=config.to_date,
+            instruments=config.instruments,
+            action_type="dividend",
+        )
+        if any(event.source != "api_import" for event in manual_events):
+            return "manual_only"
+        return "missing"
+
     def _load_special_day_flags(
         self,
         config: HistoricalDbReplayConfig,
@@ -754,6 +781,9 @@ def _special_day_payload(
         **flags.as_payload(),
         "special_day_policy": config.special_day_policy,
         "eligible_for_live_calibration": eligible,
+        "corporate_action_source": flags.corporate_action_source or flags.source,
+        "dividend_event_id": flags.linked_corporate_action_id,
+        "days_to_ex_date": flags.days_to_ex_date,
     }
 
 

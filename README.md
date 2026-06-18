@@ -176,6 +176,8 @@ make historical-replay LOOKBACK_DAYS=90
 make historical-counterfactual LOOKBACK_DAYS=90
 make historical-report-rebuild LOOKBACK_DAYS=90
 make calibration-report LOOKBACK_DAYS=90
+make dividend-sync-730d
+make market-special-days-future
 make corporate-actions-import LOOKBACK_DAYS=90
 make market-special-days LOOKBACK_DAYS=90
 make calibration-primary LOOKBACK_DAYS=90
@@ -185,6 +187,9 @@ make calibration-primary LOOKBACK_DAYS=90
 `Docs/runbooks/calibration.md`. Перед final calibration обязательно выполните
 `Docs/runbooks/corporate-actions.md` и `Docs/runbooks/final-historical-calibration.md`:
 dividend/corporate-action дни исключаются из primary calibration по умолчанию.
+Primary corporate-action path is T-Bank `GetDividends` via `run_tbank_dividend_sync.py`;
+manual CSV/JSON import is fallback/override only and does not make final calibration clean
+unless the operator explicitly allows manual corporate actions.
 
 ## Локальный Docker Compose
 

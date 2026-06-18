@@ -20,6 +20,7 @@
 - `get_portfolio`
 - `get_positions`
 - `get_accounts`
+- `get_dividends`
 - `resolve_instruments`
 - `post_stop_order`
 - `reconcile_order_state`
@@ -90,6 +91,7 @@ Per-method deadlines зафиксированы по официальной та
 | `GetPortfolio` | 500 ms |
 | `GetPositions` | 500 ms |
 | `GetAccounts` | 500 ms |
+| `GetDividends` | 500 ms |
 | `ResolveInstruments` | 500 ms |
 | `PostStopOrder` | 1500 ms |
 
@@ -217,6 +219,33 @@ deprecated user trades stream.
 
 Recovery best-effort: ошибка backfill/refresh логируется как `stream_gap_recovery_failed`, но не
 должна останавливать reconnect loop.
+
+## Dividend calendar
+
+`BrokerGateway.get_dividends(DividendsRequest)` является primary source для dividend
+corporate actions. `TBankSdkUnaryClient` вызывает T-Bank / T-Invest `GetDividends` через
+instruments service и возвращает SDK-neutral payload:
+
+- `instrument_id`
+- `declared_date`
+- `record_date`
+- `last_buy_date`
+- `payment_date`
+- `dividend_type`
+- `amount_per_share`
+- `currency`
+- `close_price`
+- `yield_value`
+- `raw_payload`
+
+SDK/protobuf-типы не поднимаются выше `infra/tbank`. Все даты сериализуются в ISO, money /
+quotation values сериализуются как Decimal-compatible strings, отсутствующие поля остаются
+`null`. Raw token и Authorization metadata не логируются.
+
+`DividendSyncService` сохраняет события в `corporate_action_event` с
+`source=api_import`, `confidence=confirmed`, `action_type=dividend`, затем запускает
+special-day classification. Manual CSV/JSON import остаётся fallback/override и не считается
+clean primary calibration без явного operator flag.
 
 Contract coverage для SDK wrapper находится в `tests/test_tbank_sdk_clients.py`: тесты используют
 fake SDK без сети и проверяют unary payload shapes, stream subscription shapes, `waiting_close=True`,

@@ -81,6 +81,7 @@ python scripts/run_historical_data_quality_report.py --lookback-days 90 --json-o
 python scripts/run_historical_replay_from_db.py --lookback-days 90 --strategy-id baseline --json-output
 python scripts/run_historical_counterfactual_rebuild.py --lookback-days 90 --strategy-id baseline --json-output
 python scripts/run_historical_report_rebuild.py --lookback-days 90 --strategy-id baseline --include-counterfactual --json-output
+python scripts/run_tbank_dividend_sync.py --lookback-days 730 --lookahead-days 365 --json-output
 python scripts/run_market_special_day_classification.py --lookback-days 90 --instruments SBER,GAZP --json-output
 python scripts/run_calibration_report.py --lookback-days 90 --strategy-id baseline --calibration-scope primary_normal_days --require-special-day-classification --json-output
 python scripts/run_launch_readiness.py --mode historical-replay
@@ -97,3 +98,10 @@ real `PostOrder`/`CancelOrder`.
 Перед shadow live special days должны быть классифицированы. Historical candles не
 калибруют real spread/depth/slippage/latency, поэтому execution thresholds требуют
 подтверждения на shadow live data.
+
+## Dividend Calendar Before Shadow
+
+Dividend sync must be recent before shadow. Primary source is T-Bank `GetDividends`;
+manual CSV/JSON is fallback only. If `TRADING_DIVIDEND_SYNC_FAIL_OPEN=false` and the
+broker dividend calendar is unavailable, `trade-core` should enter degraded/fail-closed
+behaviour for new entries. Future dividend windows are shadow-only by default.

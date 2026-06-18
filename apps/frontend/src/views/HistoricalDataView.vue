@@ -4,6 +4,7 @@ import { Play, RefreshCw } from "@lucide/vue";
 
 import { apiClient } from "../api/client";
 import type {
+  DividendSyncStatusResponse,
   HistoricalQualityResponse,
   HistoricalRunResponse,
   MarketSpecialDayClassificationResponse,
@@ -23,7 +24,10 @@ const error = ref("");
 const quality = ref<HistoricalQualityResponse | null>(null);
 const lastRun = ref<HistoricalRunResponse | null>(null);
 const specialDays = ref<MarketSpecialDayResponse[]>([]);
+const futureSpecialDays = ref<MarketSpecialDayResponse[]>([]);
 const classification = ref<MarketSpecialDayClassificationResponse | null>(null);
+const dividendSyncStatus = ref<DividendSyncStatusResponse | null>(null);
+const dividendSyncSummary = ref<Record<string, unknown> | null>(null);
 
 const sourceBars = computed(() =>
   Object.entries(quality.value?.source_distribution ?? {}).map(([label, value]) => ({
@@ -60,6 +64,32 @@ async function runQuality() {
       lookback_days: lookbackDays.value,
       instruments: instruments.value,
     });
+    futureSpecialDays.value = await apiClient.futureMarketSpecialDays({
+      instruments: instruments.value,
+    });
+    dividendSyncStatus.value = await apiClient.dividendSyncStatus({
+      lookback_days: Math.max(lookbackDays.value, 730),
+      instruments: instruments.value,
+    });
+  });
+}
+
+async function syncDividends(dryRun: boolean) {
+  await withLoading(async () => {
+    dividendSyncSummary.value = await apiClient.syncTbankDividends({
+      instruments: instruments.value,
+      lookback_days: 730,
+      lookahead_days: 365,
+      dry_run: dryRun,
+      classify_special_days: true,
+    });
+    dividendSyncStatus.value = await apiClient.dividendSyncStatus({
+      lookback_days: 730,
+      instruments: instruments.value,
+    });
+    futureSpecialDays.value = await apiClient.futureMarketSpecialDays({
+      instruments: instruments.value,
+    });
   });
 }
 
@@ -69,6 +99,8 @@ async function classifySpecialDays() {
       lookback_days: lookbackDays.value,
       instruments: instruments.value,
       force_rebuild: true,
+      include_future: true,
+      lookahead_days: 365,
     });
     specialDays.value = await apiClient.marketSpecialDays({
       instruments: instruments.value,
@@ -164,6 +196,14 @@ async function withLoading(action: () => Promise<void>) {
             <RefreshCw :size="16" aria-hidden="true" />
             <span>Classify special days</span>
           </button>
+          <button class="icon-button" type="button" :disabled="loading" @click="syncDividends(true)">
+            <RefreshCw :size="16" aria-hidden="true" />
+            <span>Dividend sync dry-run</span>
+          </button>
+          <button class="icon-button" type="button" :disabled="loading" @click="syncDividends(false)">
+            <RefreshCw :size="16" aria-hidden="true" />
+            <span>Sync T-Bank dividends</span>
+          </button>
           <button class="icon-button" type="button" :disabled="loading" @click="runReplay(true)">
             <Play :size="16" aria-hidden="true" />
             <span>Replay dry-run</span>
@@ -195,6 +235,8 @@ async function withLoading(action: () => Promise<void>) {
       <MetricTile label="invalid OHLC" :value="quality?.invalid_ohlc_count ?? 0" />
       <MetricTile label="special days" :value="quality?.corporate_action_days_count ?? 0" />
       <MetricTile label="dividend gaps" :value="quality?.dividend_gap_days_count ?? 0" />
+      <MetricTile label="api dividends" :value="quality?.api_import_dividend_events_count ?? 0" />
+      <MetricTile label="future windows" :value="futureSpecialDays.length" />
     </div>
 
     <div class="reports-grid">
@@ -210,6 +252,10 @@ async function withLoading(action: () => Promise<void>) {
           <dd>{{ quality.included_days_count }}</dd>
           <dt>last classify</dt>
           <dd>{{ classification?.classification_status ?? "-" }}</dd>
+          <dt>dividend sync</dt>
+          <dd>{{ quality.dividend_sync_status }}</dd>
+          <dt>api dividends</dt>
+          <dd>{{ quality.api_import_dividend_events_count }}</dd>
         </dl>
         <MiniBars v-if="specialBars.length" :rows="specialBars" />
         <EmptyState
@@ -225,6 +271,35 @@ async function withLoading(action: () => Promise<void>) {
         <template #title>Source distribution</template>
         <MiniBars v-if="sourceBars.length" :rows="sourceBars" />
         <EmptyState v-else title="Run quality report first" />
+      </DataPanel>
+
+      <DataPanel>
+        <template #eyebrow>corporate actions</template>
+        <template #title>Dividend sync</template>
+        <dl class="definition-grid">
+          <dt>status</dt>
+          <dd>{{ dividendSyncStatus?.status ?? quality?.dividend_sync_status ?? "-" }}</dd>
+          <dt>last sync</dt>
+          <dd>{{ dividendSyncStatus?.last_sync_at ?? "-" }}</dd>
+          <dt>api_import</dt>
+          <dd>{{ dividendSyncStatus?.api_import_dividend_events_count ?? 0 }}</dd>
+          <dt>manual</dt>
+          <dd>{{ dividendSyncStatus?.manual_dividend_events_count ?? 0 }}</dd>
+          <dt>last result</dt>
+          <dd>{{ dividendSyncSummary?.source ?? "-" }}</dd>
+        </dl>
+        <EmptyState
+          v-if="quality?.quality_warnings?.includes('dividend_sync_missing')"
+          title="Dividend sync missing"
+          detail="Run T-Bank dividend sync before final calibration."
+          tone="warn"
+        />
+        <EmptyState
+          v-if="quality?.quality_warnings?.includes('manual_corporate_actions_only')"
+          title="Manual corporate actions only"
+          detail="Manual CSV/JSON is fallback; api_import is the primary path."
+          tone="warn"
+        />
       </DataPanel>
 
       <DataPanel>
@@ -250,6 +325,32 @@ async function withLoading(action: () => Promise<void>) {
             </tbody>
           </table>
           <EmptyState v-if="specialDays.length === 0" title="No special days loaded" />
+        </div>
+      </DataPanel>
+
+      <DataPanel>
+        <template #eyebrow>corporate actions</template>
+        <template #title>Future dividend risk windows</template>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>date</th>
+                <th>instrument</th>
+                <th>type</th>
+                <th>policy</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="item in futureSpecialDays" :key="item.special_day_id">
+                <td>{{ item.trading_date }}</td>
+                <td>{{ item.instrument_id }}</td>
+                <td>{{ item.special_day_type }}</td>
+                <td>{{ item.trade_policy }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <EmptyState v-if="futureSpecialDays.length === 0" title="No future risk windows" />
         </div>
       </DataPanel>
 

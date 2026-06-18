@@ -8,7 +8,7 @@ import os
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from enum import Enum
 from types import TracebackType
@@ -220,6 +220,14 @@ def normalize_sdk_response(
                 for candle in _list_attr(response, "candles")
             ]
         }
+    if method_name == "GetDividends":
+        return {
+            "instrument_id": _instrument_id_from_request_payload(request_payload),
+            "dividends": [
+                _dividend_payload(dividend, request_payload)
+                for dividend in _list_attr(response, "dividends")
+            ],
+        }
     if method_name == "GetLastPrices":
         return {
             "prices": [
@@ -394,6 +402,12 @@ def _call_sdk_method(sdk: Any, services: Any, method_name: str, payload: JsonPay
             to=_datetime_from_payload(payload["to"]),
             interval=_candle_interval(sdk, str(payload["interval"])),
             candle_source_type=_enum_or_none(sdk, "CandleSource", "CANDLE_SOURCE_EXCHANGE"),
+        )
+    if method_name == "GetDividends":
+        return services.instruments.get_dividends(
+            instrument_id=_instrument_id(payload["instrument"]),
+            from_=_datetime_from_payload(payload["from"]),
+            to=_datetime_from_payload(payload["to"]),
         )
     if method_name == "GetLastPrices":
         last_price_instruments = cast_list_of_dict(payload["instruments"])
@@ -892,6 +906,26 @@ def _historic_candle_payload(candle: Any, request_payload: Mapping[str, object])
     }
 
 
+def _dividend_payload(dividend: Any, request_payload: Mapping[str, object]) -> JsonPayload:
+    instrument_id = _instrument_id_from_request_payload(request_payload)
+    raw_payload = _dataclass_payload(dividend)
+    return {
+        "instrument_id": instrument_id,
+        "declared_date": _date_or_datetime_iso(_attr(dividend, "declared_date")),
+        "record_date": _date_or_datetime_iso(_attr(dividend, "record_date")),
+        "last_buy_date": _date_or_datetime_iso(_attr(dividend, "last_buy_date")),
+        "payment_date": _date_or_datetime_iso(_attr(dividend, "payment_date")),
+        "dividend_type": _str_or_none(_attr(dividend, "dividend_type")),
+        "regularity": _str_or_none(_attr(dividend, "regularity")),
+        "amount_per_share": _decimal_str_or_none(_attr(dividend, "dividend_net")),
+        "currency": _currency_from_money(_attr(dividend, "dividend_net")),
+        "close_price": _decimal_str_or_none(_attr(dividend, "close_price")),
+        "yield_value": _decimal_str_or_none(_attr(dividend, "yield_value")),
+        "created_at": _iso_or_none(_attr(dividend, "created_at")),
+        "raw_payload": raw_payload,
+    }
+
+
 def _stream_candle_payload(candle: Any) -> JsonPayload:
     open_ts = _attr(candle, "time")
     interval = _stream_interval_value(_attr(candle, "interval"))
@@ -1251,6 +1285,28 @@ def _decimal_from_quotation(value: Any) -> Decimal:
     return units + (nano / NANO)
 
 
+def _decimal_from_money_or_quotation(value: Any) -> Decimal:
+    return _decimal_from_quotation(value)
+
+
+def _decimal_str_or_none(value: Any) -> str | None:
+    if not _is_present(value):
+        return None
+    return str(_decimal_from_money_or_quotation(value))
+
+
+def _currency_from_money(value: Any) -> str | None:
+    currency = _str_or_none(_attr(value, "currency"))
+    return currency.upper() if currency else None
+
+
+def _instrument_id_from_request_payload(request_payload: Mapping[str, object]) -> str:
+    instrument_payload = request_payload.get("instrument")
+    if isinstance(instrument_payload, Mapping):
+        return _instrument_id(instrument_payload)
+    return ""
+
+
 def _dataclass_payload(value: Any) -> JsonPayload:
     if not _is_present(value):
         return {}
@@ -1296,6 +1352,14 @@ def _datetime_from_payload(value: object) -> datetime | None:
 def _date_iso(value: Any) -> str | None:
     if isinstance(value, datetime):
         return value.date().isoformat()
+    return None
+
+
+def _date_or_datetime_iso(value: Any) -> str | None:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
     return None
 
 

@@ -122,6 +122,8 @@ async function refresh() {
       <MetricTile label="net pnl proxy" :value="report?.net_simulated_pnl ?? '-'" />
       <MetricTile label="clean" :value="report?.calibration_clean ? 'true' : 'false'" />
       <MetricTile label="special days" :value="report?.special_days_count ?? 0" />
+      <MetricTile label="dividend sync" :value="report?.dividend_sync_status ?? '-'" />
+      <MetricTile label="future windows" :value="report?.future_dividend_windows_count ?? 0" />
     </div>
 
     <div class="reports-grid">
@@ -137,6 +139,12 @@ async function refresh() {
           <dd>{{ report.calibration_clean }}</dd>
           <dt>requires shadow</dt>
           <dd>{{ report.requires_shadow_live_calibration }}</dd>
+          <dt>dividend sync</dt>
+          <dd>{{ report.dividend_sync_status }}</dd>
+          <dt>api dividends</dt>
+          <dd>{{ report.api_import_dividend_events_count }}</dd>
+          <dt>manual allowed</dt>
+          <dd>{{ report.allow_manual_corporate_actions }}</dd>
           <dt>warnings</dt>
           <dd>{{ report.calibration_warnings.join(", ") || "-" }}</dd>
         </dl>

@@ -679,6 +679,42 @@ def test_websocket_dashboard_stays_live(tmp_path: Path) -> None:
     assert second["payload"]["sequence"] == 1
 
 
+def test_dividend_sync_api_requires_operator_and_returns_status(tmp_path: Path) -> None:
+    client = make_client(tmp_path)
+
+    observer_response = client.post(
+        "/corporate-actions/dividends/sync",
+        headers={"X-API-Role": "observer"},
+        json={"dry_run": True},
+    )
+    operator_response = client.post(
+        "/corporate-actions/dividends/sync",
+        headers={"X-API-Role": "operator"},
+        json={"dry_run": True, "instruments": "SBER"},
+    )
+    status_response = client.get(
+        "/corporate-actions/dividends/sync/status",
+        headers={"X-API-Role": "observer"},
+    )
+    dividends_response = client.get(
+        "/corporate-actions/dividends",
+        headers={"X-API-Role": "observer"},
+    )
+    future_response = client.get(
+        "/market-special-days/future",
+        headers={"X-API-Role": "observer"},
+    )
+
+    assert observer_response.status_code == 403
+    assert operator_response.status_code == 200
+    assert operator_response.json()["source"] == "api_import"
+    assert operator_response.json()["real_orders_disabled"] is True
+    assert status_response.status_code == 200
+    assert "status" in status_response.json()
+    assert dividends_response.status_code == 200
+    assert future_response.status_code == 200
+
+
 def test_production_auth_rejects_role_header_without_bearer(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

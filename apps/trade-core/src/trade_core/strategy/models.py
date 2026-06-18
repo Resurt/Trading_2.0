@@ -77,6 +77,9 @@ class BlockerCode(StrEnum):
     CORPORATE_ACTION_WINDOW = "corporate_action_window"
     DIVIDEND_GAP_RISK = "dividend_gap_risk"
     SPECIAL_DAY_SHADOW_ONLY = "special_day_shadow_only"
+    DIVIDEND_CALENDAR_UNAVAILABLE = "dividend_calendar_unavailable"
+    FUTURE_DIVIDEND_RISK_WINDOW = "future_dividend_risk_window"
+    SHORT_BLOCKED_DIVIDEND_WINDOW = "short_blocked_dividend_window"
 
 
 class CancelReasonCode(StrEnum):
@@ -274,8 +277,11 @@ class RiskLimits:
     freeze_new_entries: bool = False
     block_entries_on_dividend_gap_day: bool = True
     block_entries_on_corporate_action_day: bool = True
+    block_entries_on_future_dividend_window: bool = True
+    block_entries_when_dividend_calendar_unavailable: bool = True
     block_short_on_special_day: bool = True
     special_day_trade_policy: str = "shadow_only"
+    dividend_sync_fail_open: bool = False
 
     @classmethod
     def from_strategy_config(cls, config: ConfigDrivenStrategyConfig) -> RiskLimits:
@@ -321,9 +327,14 @@ class RiskAssessmentInput:
     portfolio: PortfolioSnapshot = PortfolioSnapshot()
     corporate_action_flag: bool = False
     dividend_gap_day: bool = False
+    dividend_calendar_available: bool = True
+    future_dividend_risk_window: bool = False
     abnormal_gap_day: bool = False
     special_day_type: str | None = None
     special_day_trade_policy: str | None = None
+    days_to_ex_date: int | None = None
+    days_to_record_date: int | None = None
+    corporate_action_source: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -16,6 +16,7 @@ from trading_common.db.models import (
     BlockerEvent,
     BrokerOrder,
     CalibrationReport,
+    CorporateActionEvent,
     CounterfactualResult,
     InstrumentRegistry,
     MarketSpecialDay,
@@ -42,6 +43,7 @@ class CalibrationReportConfig:
     include_corporate_action_days: bool = False
     include_abnormal_gap_days: bool = False
     require_special_day_classification: bool = False
+    allow_manual_corporate_actions: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,8 +175,13 @@ class CalibrationReportService:
             result.slippage_bps_assumed or ZERO for result in counterfactuals
         )
         classification_missing = special_context["classification_status"] == "missing"
+        dividend_sync_status = str(special_context["dividend_sync_status"])
+        dividend_sync_ok = dividend_sync_status in {"completed", "no_dividends_found"} or (
+            dividend_sync_status == "manual_only" and config.allow_manual_corporate_actions
+        )
         calibration_clean = (
             not classification_missing
+            and dividend_sync_ok
             and config.calibration_scope == "primary_normal_days"
             and not config.include_dividend_gap_days
             and not config.include_corporate_action_days
@@ -186,6 +193,12 @@ class CalibrationReportService:
         warnings = []
         if classification_missing:
             warnings.append("corporate_action_classification_missing")
+        if dividend_sync_status == "manual_only":
+            warnings.append("manual_corporate_actions_only")
+        if dividend_sync_status == "missing":
+            warnings.append("dividend_sync_missing")
+        if special_context["future_dividend_windows_count"]:
+            warnings.append("future_dividend_window_present")
         if config.calibration_scope != "primary_normal_days":
             warnings.append("non_primary_calibration_scope")
         all_candidate_keys = _candidate_keys(all_candidates)
@@ -202,6 +215,11 @@ class CalibrationReportService:
             "calibration_scope": config.calibration_scope,
             "calibration_clean": calibration_clean,
             "calibration_warnings": warnings,
+            "dividend_sync_status": dividend_sync_status,
+            "api_import_dividend_events_count": (
+                special_context["api_import_dividend_events_count"]
+            ),
+            "allow_manual_corporate_actions": config.allow_manual_corporate_actions,
             "calibration_data_mode": "historical_candles_only",
             "not_calibrated_from_history": [
                 "real_spread",
@@ -219,6 +237,9 @@ class CalibrationReportService:
             "dividend_gap_days_count": special_context["dividend_gap_days_count"],
             "corporate_action_days_count": special_context["corporate_action_days_count"],
             "abnormal_gap_days_count": special_context["abnormal_gap_days_count"],
+            "future_dividend_windows_count": (
+                special_context["future_dividend_windows_count"]
+            ),
             "excluded_days_count": special_context["excluded_days_count"],
             "included_days_count": special_context["included_days_count"],
             "excluded_from_primary_calibration_count": (
@@ -426,8 +447,15 @@ class CalibrationReportService:
             )
             else "missing"
         )
+        dividend_sync = _dividend_sync_context(
+            self._session,
+            from_date=config.from_date,
+            to_date=config.to_date,
+            instrument_ids=instrument_ids,
+        )
         return {
             "classification_status": status,
+            **dividend_sync,
             "special_keys": special_keys,
             "excluded_keys": excluded_keys,
             "included_keys": included_keys,
@@ -437,6 +465,9 @@ class CalibrationReportService:
             "dividend_gap_days_count": len(keys_by_type.get("dividend_gap_day", set())),
             "corporate_action_days_count": len(keys_by_type.get("corporate_action_day", set())),
             "abnormal_gap_days_count": len(keys_by_type.get("abnormal_gap_day", set())),
+            "future_dividend_windows_count": len(
+                keys_by_type.get("future_dividend_risk_window", set())
+            ),
             "excluded_days_count": len(excluded_keys),
             "included_days_count": len(included_keys),
             "excluded_from_primary_calibration_count": len(excluded_keys),
@@ -508,6 +539,56 @@ def _classification_audit_exists(
                 AuditEvent.trading_date >= from_date,
                 AuditEvent.trading_date <= to_date,
                 AuditEvent.action == "market_special_day_classification_completed",
+            )
+        ).first()
+        is not None
+    )
+
+
+def _dividend_sync_context(
+    session: Session,
+    *,
+    from_date: date,
+    to_date: date,
+    instrument_ids: tuple[str, ...],
+) -> JsonPayload:
+    stmt = select(CorporateActionEvent).where(
+        CorporateActionEvent.action_type == "dividend",
+        CorporateActionEvent.ex_date >= from_date,
+        CorporateActionEvent.ex_date <= to_date,
+    )
+    if instrument_ids:
+        stmt = stmt.where(CorporateActionEvent.instrument_id.in_(instrument_ids))
+    rows = list(session.execute(stmt).scalars())
+    api_count = sum(1 for row in rows if row.source == "api_import")
+    manual_count = sum(1 for row in rows if row.source != "api_import")
+    if api_count:
+        status = "completed"
+    elif manual_count:
+        status = "manual_only"
+    elif _dividend_sync_audit_exists(session, from_date=from_date, to_date=to_date):
+        status = "no_dividends_found"
+    else:
+        status = "missing"
+    return {
+        "dividend_sync_status": status,
+        "api_import_dividend_events_count": api_count,
+        "manual_dividend_events_count": manual_count,
+    }
+
+
+def _dividend_sync_audit_exists(
+    session: Session,
+    *,
+    from_date: date,
+    to_date: date,
+) -> bool:
+    return (
+        session.execute(
+            select(AuditEvent.audit_event_id).where(
+                AuditEvent.trading_date >= from_date,
+                AuditEvent.trading_date <= to_date,
+                AuditEvent.action == "dividend_sync_completed",
             )
         ).first()
         is not None

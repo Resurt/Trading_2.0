@@ -72,6 +72,35 @@ class TradingSchedulesRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class DividendsRequest:
+    instrument: InstrumentRef
+    from_: datetime
+    to: datetime
+    date_filter: str = "record_date"
+
+
+@dataclass(frozen=True, slots=True)
+class DividendEventPayload:
+    instrument_id: str
+    declared_date: str | None = None
+    record_date: str | None = None
+    last_buy_date: str | None = None
+    payment_date: str | None = None
+    dividend_type: str | None = None
+    amount_per_share: str | None = None
+    currency: str | None = None
+    close_price: str | None = None
+    yield_value: str | None = None
+    raw_payload: JsonPayload = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class DividendsResponse:
+    instrument_id: str
+    dividends: tuple[DividendEventPayload, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class InstrumentResolveRequest:
     tickers: tuple[str, ...]
     class_code: str = "TQBR"
@@ -159,6 +188,12 @@ class BrokerGateway(Protocol):
     async def trading_schedules(
         self,
         request: TradingSchedulesRequest,
+        metadata: RequestMetadata | None = None,
+    ) -> BrokerUnaryResponse: ...
+
+    async def get_dividends(
+        self,
+        request: DividendsRequest,
         metadata: RequestMetadata | None = None,
     ) -> BrokerUnaryResponse: ...
 

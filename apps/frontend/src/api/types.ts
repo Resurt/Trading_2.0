@@ -294,6 +294,8 @@ export interface HistoricalQualityResponse {
   included_days_count: number;
   special_day_distribution: Record<string, number>;
   corporate_action_classification_status: string;
+  dividend_sync_status: string;
+  api_import_dividend_events_count: number;
   quality_warnings: string[];
 }
 
@@ -327,6 +329,10 @@ export interface CalibrationResponse {
   calibration_clean: boolean;
   calibration_warnings: string[];
   calibration_data_mode: string;
+  dividend_sync_status: string;
+  api_import_dividend_events_count: number;
+  allow_manual_corporate_actions: boolean;
+  future_dividend_windows_count: number;
   not_calibrated_from_history: string[];
   requires_shadow_live_calibration: boolean;
   normal_days_count: number;
@@ -375,6 +381,19 @@ export interface CorporateActionResponse {
   source: string;
   confidence: string;
   payload: JsonPayload;
+}
+
+export interface DividendSyncStatusResponse {
+  source: string;
+  status: string;
+  from_date: string;
+  to_date: string;
+  instruments: string[];
+  api_import_dividend_events_count: number;
+  manual_dividend_events_count: number;
+  last_sync_action: string | null;
+  last_sync_at: string | null;
+  last_sync_payload: JsonPayload;
 }
 
 export interface MarketSpecialDayResponse {

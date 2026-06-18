@@ -5,11 +5,12 @@ STRATEGY_ID ?= baseline
 REPORT_WORKER_SMOKE_MICRO_SESSION_ID ?= 2026-06-12:weekday_main:1000
 REPORT_WORKER_SMOKE_TIMEOUT ?= 30
 LOOKBACK_DAYS ?= 90
+LOOKAHEAD_DAYS ?= 365
 INSTRUMENTS ?= SBER,GAZP
 TIMEFRAMES ?= 5m,10m,15m
 CORPORATE_ACTIONS_FILE ?= data/corporate_actions/sample_dividends.csv
 
-.PHONY: lint test up down logs frontend-build migrate migrate-down replay-smoke sandbox-smoke historical-backfill-dry-run historical-quality historical-replay historical-counterfactual historical-report-rebuild calibration-report corporate-actions-import market-special-days calibration-primary calibration-special-days historical-replay-clean analytics-smoke report-rebuild replay-day controlled-launch-acceptance launch-readiness observability-up report-worker-smoke celery-inspect
+.PHONY: lint test up down logs frontend-build migrate migrate-down replay-smoke sandbox-smoke historical-backfill-dry-run historical-quality historical-replay historical-counterfactual historical-report-rebuild calibration-report corporate-actions-import dividend-sync dividend-sync-730d market-special-days market-special-days-future calibration-primary calibration-special-days historical-replay-clean analytics-smoke report-rebuild replay-day controlled-launch-acceptance launch-readiness observability-up report-worker-smoke celery-inspect
 
 lint:
 	$(PYTHON) -m ruff check .
@@ -63,8 +64,17 @@ calibration-report:
 corporate-actions-import:
 	$(PYTHON) scripts/run_corporate_actions_import.py --file $(CORPORATE_ACTIONS_FILE) --source manual --json-output
 
+dividend-sync:
+	$(PYTHON) scripts/run_tbank_dividend_sync.py --lookback-days $(LOOKBACK_DAYS) --lookahead-days $(LOOKAHEAD_DAYS) --instruments $(INSTRUMENTS) --json-output
+
+dividend-sync-730d:
+	$(PYTHON) scripts/run_tbank_dividend_sync.py --lookback-days 730 --lookahead-days $(LOOKAHEAD_DAYS) --instruments $(INSTRUMENTS) --json-output
+
 market-special-days:
 	$(PYTHON) scripts/run_market_special_day_classification.py --lookback-days $(LOOKBACK_DAYS) --instruments $(INSTRUMENTS) --json-output
+
+market-special-days-future:
+	$(PYTHON) scripts/run_market_special_day_classification.py --lookback-days $(LOOKBACK_DAYS) --include-future --lookahead-days $(LOOKAHEAD_DAYS) --instruments $(INSTRUMENTS) --require-dividend-sync --json-output
 
 calibration-primary:
 	$(PYTHON) scripts/run_calibration_report.py --lookback-days $(LOOKBACK_DAYS) --strategy-id $(STRATEGY_ID) --instruments $(INSTRUMENTS) --timeframes $(TIMEFRAMES) --calibration-scope primary_normal_days --require-special-day-classification --json-output

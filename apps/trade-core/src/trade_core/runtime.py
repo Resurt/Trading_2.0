@@ -25,6 +25,7 @@ from trade_core.broker_gateway import (
     BrokerUnaryResponse,
     CancelOrderRequest,
     CandleRequest,
+    DividendsRequest,
     InstrumentRef,
     InstrumentResolveRequest,
     LastPricesRequest,
@@ -40,7 +41,12 @@ from trade_core.broker_gateway import (
     TradingSchedulesRequest,
     TradingStatusRequest,
 )
-from trade_core.corporate_actions import CorporateActionService, SpecialDayFlags
+from trade_core.corporate_actions import (
+    CorporateActionService,
+    DividendSyncConfig,
+    DividendSyncService,
+    SpecialDayFlags,
+)
 from trade_core.corporate_actions.service import special_day_classification_exists
 from trade_core.infra.tbank import (
     TBankBrokerConfig,
@@ -165,10 +171,21 @@ class TradeCoreRuntimeConfig:
         "info",
         "market_trades",
     )
+    dividend_sync_enabled: bool = False
+    dividend_sync_lookback_days: int = 730
+    dividend_sync_lookahead_days: int = 365
+    dividend_sync_interval_hours: int = 24
+    dividend_sync_fail_open: bool = False
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> TradeCoreRuntimeConfig:
         env = environ if environ is not None else os.environ
+        runtime_mode = env.get("TRADING_RUNTIME_MODE", RuntimeMode.HISTORICAL_REPLAY.value)
+        default_dividend_sync_enabled = runtime_mode in {
+            RuntimeMode.SANDBOX.value,
+            RuntimeMode.SHADOW.value,
+            RuntimeMode.PRODUCTION.value,
+        }
         database_url: str
         auto_create_sqlite_schema = False
         if _local_sqlite_requested(env):
@@ -195,6 +212,23 @@ class TradeCoreRuntimeConfig:
             ),
             position_snapshot_freshness_seconds=int(
                 env.get("TRADE_CORE_POSITION_SNAPSHOT_FRESHNESS_SECONDS", "900")
+            ),
+            dividend_sync_enabled=_bool_env(
+                env.get("TRADING_DIVIDEND_SYNC_ENABLED"),
+                default=default_dividend_sync_enabled,
+            ),
+            dividend_sync_lookback_days=int(
+                env.get("TRADING_DIVIDEND_SYNC_LOOKBACK_DAYS", "730")
+            ),
+            dividend_sync_lookahead_days=int(
+                env.get("TRADING_DIVIDEND_SYNC_LOOKAHEAD_DAYS", "365")
+            ),
+            dividend_sync_interval_hours=int(
+                env.get("TRADING_DIVIDEND_SYNC_INTERVAL_HOURS", "24")
+            ),
+            dividend_sync_fail_open=_bool_env(
+                env.get("TRADING_DIVIDEND_SYNC_FAIL_OPEN"),
+                default=False,
             ),
         )
 
@@ -244,6 +278,22 @@ class SafeNoopBrokerGateway:
                 "windows": [
                     _window_payload(window) for window in default_trading_schedule(moment).windows
                 ],
+            },
+            headers={},
+        )
+
+    async def get_dividends(
+        self,
+        request: DividendsRequest,
+        metadata: RequestMetadata | None = None,
+    ) -> BrokerUnaryResponse:
+        del metadata
+        return BrokerUnaryResponse(
+            method_name="GetDividends",
+            data={
+                "instrument_id": request.instrument.instrument_id,
+                "dividends": [],
+                "source": "safe_noop_gateway",
             },
             headers={},
         )
@@ -526,7 +576,10 @@ class TradeCoreRuntime:
         self.strategy_config = strategy_config or default_strategy_config
         self.strategy_engine = ConfigDrivenStrategyEngine(self.strategy_config)
         self.risk_engine = DefaultRiskEngine()
-        self.risk_limits = risk_limits or RiskLimits.from_strategy_config(self.strategy_config)
+        self.risk_limits = replace(
+            risk_limits or RiskLimits.from_strategy_config(self.strategy_config),
+            dividend_sync_fail_open=self.config.dividend_sync_fail_open,
+        )
         self.runtime_id = uuid4()
         self.stats = TradeCoreRuntimeStats()
         self.robot_control_state = "running"
@@ -554,6 +607,8 @@ class TradeCoreRuntime:
         self._strategy_states: dict[str, StrategyState] = {}
         self._loaded_strategy_config_identity: tuple[str, int, str | None] | None = None
         self._corporate_action_calendar_warnings: set[tuple[date, str]] = set()
+        self._dividend_calendar_available = True
+        self._last_dividend_sync_at: datetime | None = None
 
     @classmethod
     def from_env(
@@ -587,6 +642,7 @@ class TradeCoreRuntime:
             return
         self._session = self.database.session_factory()
         await self._resolve_runtime_instruments()
+        await self._sync_dividend_calendar_if_due(force=True)
         session = self._require_session()
         self.strategy_config_loader = StrategyConfigLoader(session)
         self._reload_strategy_config_if_changed(force=True)
@@ -735,6 +791,7 @@ class TradeCoreRuntime:
             await self.start()
         await self.process_robot_commands_async()
         self._reload_strategy_config_if_changed()
+        await self._sync_dividend_calendar_if_due()
         observed_at = _ensure_msk(now or datetime.now(tz=MSK))
         instrument = self.config.instruments[0]
         schedule = await self.refresh_trading_schedule(now=observed_at)
@@ -1031,7 +1088,10 @@ class TradeCoreRuntime:
         previous_identity = self._loaded_strategy_config_identity
         self.strategy_config = loaded.config
         self.strategy_engine = ConfigDrivenStrategyEngine(self.strategy_config)
-        self.risk_limits = loaded.risk_limits
+        self.risk_limits = replace(
+            loaded.risk_limits,
+            dividend_sync_fail_open=self.config.dividend_sync_fail_open,
+        )
         self._loaded_strategy_config_identity = identity
         action = (
             "strategy_config_loaded"
@@ -1354,6 +1414,66 @@ class TradeCoreRuntime:
             setter(resolved)
         self.flush_domain_events()
 
+    async def _sync_dividend_calendar_if_due(self, *, force: bool = False) -> None:
+        if not self.config.dividend_sync_enabled:
+            return
+        now = datetime.now(tz=UTC)
+        if not force and self._last_dividend_sync_at is not None:
+            next_sync = self._last_dividend_sync_at + timedelta(
+                hours=self.config.dividend_sync_interval_hours
+            )
+            if now < next_sync:
+                return
+        session = self._require_session()
+        try:
+            result = await DividendSyncService(
+                session=session,
+                broker_gateway=self.broker_gateway,
+            ).run(
+                DividendSyncConfig(
+                    instruments=tuple(
+                        instrument.ticker or instrument.instrument_id
+                        for instrument in self.config.instruments
+                    ),
+                    lookback_days=self.config.dividend_sync_lookback_days,
+                    lookahead_days=self.config.dividend_sync_lookahead_days,
+                    dry_run=False,
+                    force_rebuild=False,
+                    classify_special_days=True,
+                    exchange=self.config.exchange,
+                )
+            )
+            self._last_dividend_sync_at = now
+            self._dividend_calendar_available = True
+            self._write_audit_event(
+                action="dividend_sync_completed",
+                severity="info",
+                payload=result.as_payload(),
+            )
+        except Exception as exc:
+            self._dividend_calendar_available = False
+            if not self.config.dividend_sync_fail_open:
+                self.robot_control_state = "degraded"
+            self._write_audit_event(
+                action="dividend_calendar_unavailable",
+                severity="error",
+                payload={
+                    "reason_code": "dividend_calendar_unavailable",
+                    "error_code": type(exc).__name__,
+                    "error_message": str(exc),
+                    "fail_open": self.config.dividend_sync_fail_open,
+                },
+            )
+            if not self.config.dividend_sync_fail_open:
+                log_event(
+                    logger=LOGGER,
+                    level="ERROR",
+                    event_type="dividend_sync_failed",
+                    component="runtime.dividends",
+                    error_code=type(exc).__name__,
+                    error_message=str(exc),
+                )
+
     def _session_context_for(self, instrument_id: str) -> SessionEventContext:
         del instrument_id
         snapshot = self._current_snapshot or self._fallback_snapshot()
@@ -1489,9 +1609,14 @@ class TradeCoreRuntime:
                     ),
                     corporate_action_flag=special_flags.corporate_action_flag,
                     dividend_gap_day=special_flags.dividend_gap_day,
+                    dividend_calendar_available=self._dividend_calendar_available,
+                    future_dividend_risk_window=special_flags.future_dividend_risk_window,
                     abnormal_gap_day=special_flags.abnormal_gap_day,
                     special_day_type=special_flags.special_day_type,
                     special_day_trade_policy=special_flags.trade_policy,
+                    days_to_ex_date=special_flags.days_to_ex_date,
+                    days_to_record_date=special_flags.days_to_record_date,
+                    corporate_action_source=special_flags.corporate_action_source,
                 )
             )
             blockers = event_store.record_blockers(
@@ -1909,6 +2034,12 @@ def _loaded_config_identity(loaded: LoadedStrategyConfig) -> tuple[str, int, str
 
 def _local_sqlite_requested(env: Mapping[str, str]) -> bool:
     return env.get(LOCAL_SQLITE_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _bool_env(value: str | None, *, default: bool) -> bool:
+    if value is None or value.strip() == "":
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _build_report_job_dispatcher() -> ReportJobDispatcher:

@@ -59,6 +59,79 @@ class DefaultRiskEngine:
 
         self._append_gate(
             gates,
+            code=BlockerCode.DIVIDEND_CALENDAR_UNAVAILABLE,
+            gate_name="dividend_calendar_available",
+            passed=not (
+                is_entry
+                and not request.dividend_calendar_available
+                and request.limits.block_entries_when_dividend_calendar_unavailable
+                and not request.limits.dividend_sync_fail_open
+            ),
+            reason_payload={
+                "dividend_calendar_available": request.dividend_calendar_available,
+                "block_entries_when_dividend_calendar_unavailable": (
+                    request.limits.block_entries_when_dividend_calendar_unavailable
+                ),
+                "dividend_sync_fail_open": request.limits.dividend_sync_fail_open,
+                "corporate_action_source": request.corporate_action_source,
+            },
+            limit_value=Decimal("1"),
+            observed_value=Decimal("1") if request.dividend_calendar_available else Decimal("0"),
+        )
+        self._append_gate(
+            gates,
+            code=BlockerCode.FUTURE_DIVIDEND_RISK_WINDOW,
+            gate_name="future_dividend_risk_window_policy",
+            passed=not (
+                is_entry
+                and request.future_dividend_risk_window
+                and request.limits.block_entries_on_future_dividend_window
+            ),
+            reason_payload={
+                "future_dividend_risk_window": request.future_dividend_risk_window,
+                "block_entries_on_future_dividend_window": (
+                    request.limits.block_entries_on_future_dividend_window
+                ),
+                "days_to_ex_date": request.days_to_ex_date,
+                "days_to_record_date": request.days_to_record_date,
+                "corporate_action_source": request.corporate_action_source,
+                "special_day_trade_policy": request.special_day_trade_policy,
+            },
+            limit_value=Decimal("0"),
+            observed_value=(
+                Decimal("1") if request.future_dividend_risk_window else Decimal("0")
+            ),
+        )
+        self._append_gate(
+            gates,
+            code=BlockerCode.SHORT_BLOCKED_DIVIDEND_WINDOW,
+            gate_name="short_blocked_dividend_window",
+            passed=not (
+                is_short_entry
+                and request.limits.block_short_on_special_day
+                and (
+                    request.future_dividend_risk_window
+                    or request.dividend_gap_day
+                    or "dividend" in (request.special_day_type or "")
+                )
+            ),
+            reason_payload={
+                "future_dividend_risk_window": request.future_dividend_risk_window,
+                "dividend_gap_day": request.dividend_gap_day,
+                "days_to_ex_date": request.days_to_ex_date,
+                "block_short_on_special_day": request.limits.block_short_on_special_day,
+                "candidate_side": request.candidate.side.value,
+            },
+            limit_value=Decimal("0"),
+            observed_value=(
+                Decimal("1")
+                if request.future_dividend_risk_window or request.dividend_gap_day
+                else Decimal("0")
+            ),
+        )
+
+        self._append_gate(
+            gates,
             code=BlockerCode.DIVIDEND_GAP_RISK,
             gate_name="dividend_gap_day_policy",
             passed=not (

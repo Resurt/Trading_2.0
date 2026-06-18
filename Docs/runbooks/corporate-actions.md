@@ -9,7 +9,25 @@ calibration не смешивали обычные дни с dividend gap / spli
 
 ## Импорт
 
-Первый шаг поддерживает ручной CSV/JSON import без внешнего API:
+Основной путь теперь автоматический: `trade-core` и CLI вызывают readonly broker method
+`BrokerGateway.get_dividends`, который внутри `infra/tbank` маппится на T-Bank / T-Invest
+`GetDividends`. Ручной CSV/JSON import остаётся только fallback/override, когда данные брокера
+недоступны или оператор хочет явно переопределить событие.
+
+```powershell
+python scripts/run_tbank_dividend_sync.py `
+  --instruments SBER,GAZP `
+  --lookback-days 730 `
+  --lookahead-days 365 `
+  --json-output
+```
+
+После успешного sync события сохраняются в `corporate_action_event` с
+`source=api_import`, `confidence=confirmed`, `action_type=dividend`. Будущие ex-date
+помечаются в `market_special_day` как `future_dividend_risk_window` или
+`dividend_gap_day`, `exclude_from_primary_calibration=true`, `trade_policy=shadow_only`.
+
+Ручной fallback:
 
 ```powershell
 python scripts/run_corporate_actions_import.py `
@@ -46,12 +64,15 @@ CSV columns:
 
 ## Special Day Classification
 
-После импорта нужно классифицировать период:
+После dividend sync или manual fallback нужно классифицировать период:
 
 ```powershell
 python scripts/run_market_special_day_classification.py `
   --lookback-days 90 `
   --instruments SBER,GAZP `
+  --include-future `
+  --lookahead-days 365 `
+  --require-dividend-sync `
   --json-output
 ```
 
@@ -65,7 +86,11 @@ python scripts/run_market_special_day_classification.py `
 
 ## Операционные правила
 
+- Primary source для dividend calendar: T-Bank `GetDividends`.
+- Manual CSV/JSON: только fallback/override, в отчётах отображается warning
+  `manual_corporate_actions_only`, если нет `api_import`.
 - Dividend ex-date / dividend gap day нельзя смешивать с обычными днями primary calibration.
+- Future dividend risk window по умолчанию переводит entries в `shadow_only`/block policy.
 - Special days можно анализировать отдельно через `calibration_scope=special_days_only`.
 - Если classification не запускалась, `historical data quality` и `calibration` должны
   показывать warning `corporate_action_classification_missing`.
@@ -75,14 +100,20 @@ python scripts/run_market_special_day_classification.py `
 ## Make Targets
 
 ```powershell
+make dividend-sync
+make dividend-sync-730d
 make corporate-actions-import
 make market-special-days
+make market-special-days-future
 ```
 
 ## Definition Of Done
 
-- `corporate_action_event` заполнена по нужным инструментам.
+- `corporate_action_event` заполнена по нужным инструментам через `source=api_import`
+  или manual fallback явно разрешён оператором.
 - `market_special_day` есть за replay/calibration период.
+- Будущие dividend risk windows классифицированы.
 - `python scripts/run_historical_data_quality_report.py --require-special-day-classification ...`
   проходит без ошибки.
-- Primary calibration возвращает `calibration_clean=true`.
+- Primary calibration возвращает `calibration_clean=true`; без dividend sync это запрещено,
+  кроме явного `--allow-manual-corporate-actions`.

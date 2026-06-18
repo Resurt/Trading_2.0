@@ -1031,3 +1031,30 @@ Primary calibration must set `calibration_clean=false` if special-day classifica
 missing. A clean primary calibration requires `calibration_scope=primary_normal_days` and
 excluded dividend/corporate-action days. Recommendations remain report payload only and
 must not auto-update `strategy_config`.
+
+## Dividend Sync Analytics
+
+Corporate-action analytics now distinguish source quality:
+
+- `source=api_import`: primary path from T-Bank `GetDividends`;
+- `source=manual`, `csv_import`, `manual_unverified`: fallback/override only;
+- `source=synthetic_test`: tests only.
+
+Historical quality report payload includes:
+
+- `dividend_sync_status`;
+- `api_import_dividend_events_count`;
+- warning `manual_corporate_actions_only` when manual events exist without `api_import`;
+- warning `dividend_sync_missing` when no broker dividend sync exists for the period.
+
+Calibration report payload includes:
+
+- `dividend_sync_status`;
+- `future_dividend_windows_count`;
+- warning `future_dividend_window_present` when upcoming ex-date risk exists;
+- `calibration_clean=false` unless `api_import` dividend sync is complete or the operator
+  explicitly runs with `--allow-manual-corporate-actions`.
+
+Technical JSON logs are not the analytics source of truth. Dividend sync, special days,
+replay decisions, blockers and calibration facts must be persisted in PostgreSQL domain
+tables and report payloads.

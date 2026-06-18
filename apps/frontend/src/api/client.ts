@@ -7,6 +7,7 @@ import type {
   CorporateActionResponse,
   CounterfactualResponse,
   DailyReportResponse,
+  DividendSyncStatusResponse,
   DailyReportRunRequest,
   HistoricalQualityResponse,
   HistoricalRunResponse,
@@ -139,6 +140,18 @@ export const apiClient = {
     requestJson<HistoricalQualityResponse>(withQuery("/historical/data-quality", query)),
   corporateActions: (query: Record<string, QueryValue>) =>
     requestJson<CorporateActionResponse[]>(withQuery("/corporate-actions", query)),
+  dividends: (query: Record<string, QueryValue>) =>
+    requestJson<CorporateActionResponse[]>(withQuery("/corporate-actions/dividends", query)),
+  dividendSyncStatus: (query: Record<string, QueryValue>) =>
+    requestJson<DividendSyncStatusResponse>(
+      withQuery("/corporate-actions/dividends/sync/status", query),
+    ),
+  syncTbankDividends: (payload: Record<string, unknown>) =>
+    requestJson<Record<string, unknown>>(
+      "/corporate-actions/dividends/sync",
+      { method: "POST", body: JSON.stringify(payload) },
+      "operator",
+    ),
   importCorporateActions: (payload: Record<string, unknown>) =>
     requestJson<{ rows_imported: number; corporate_action_ids: string[] }>(
       "/corporate-actions/import",
@@ -147,6 +160,8 @@ export const apiClient = {
     ),
   marketSpecialDays: (query: Record<string, QueryValue>) =>
     requestJson<MarketSpecialDayResponse[]>(withQuery("/market-special-days", query)),
+  futureMarketSpecialDays: (query: Record<string, QueryValue>) =>
+    requestJson<MarketSpecialDayResponse[]>(withQuery("/market-special-days/future", query)),
   classifyMarketSpecialDays: (payload: Record<string, unknown>) =>
     requestJson<MarketSpecialDayClassificationResponse>(
       "/market-special-days/classify",

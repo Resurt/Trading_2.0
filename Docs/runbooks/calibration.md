@@ -141,3 +141,17 @@ python scripts/run_calibration_report.py --lookback-days 90 --strategy-id baseli
 Если special-day classification отсутствует, report возвращает
 `calibration_clean=false`, warning `corporate_action_classification_missing` и
 recommendation `run_market_special_day_classification_before_final_calibration`.
+
+## Dividend Sync Requirement
+
+Before final calibration run broker dividend sync and special-day classification:
+
+```powershell
+python scripts/run_tbank_dividend_sync.py --lookback-days 730 --lookahead-days 365 --json-output
+python scripts/run_market_special_day_classification.py --lookback-days 730 --include-future --lookahead-days 365 --require-dividend-sync --json-output
+```
+
+Manual CSV/JSON corporate actions are fallback/override only. If there are no
+`source=api_import` dividend events, primary calibration must show
+`manual_corporate_actions_only` or `dividend_sync_missing` and is not final unless the
+operator explicitly allows manual corporate actions.

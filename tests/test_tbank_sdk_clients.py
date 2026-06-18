@@ -219,6 +219,7 @@ class FakeInstrumentsService:
     def __init__(self) -> None:
         self.trading_schedules_kwargs: dict[str, object] | None = None
         self.share_by_kwargs: dict[str, object] | None = None
+        self.get_dividends_kwargs: dict[str, object] | None = None
 
     def trading_schedules(self, **kwargs: object) -> Box:
         self.trading_schedules_kwargs = dict(kwargs)
@@ -262,6 +263,24 @@ class FakeInstrumentsService:
                 weekend_flag=False,
                 exchange="MOEX",
             )
+        )
+
+    def get_dividends(self, **kwargs: object) -> Box:
+        self.get_dividends_kwargs = dict(kwargs)
+        return Box(
+            dividends=[
+                Box(
+                    instrument_uid=str(kwargs["instrument_id"]),
+                    dividend_net=Box(units=34, nano=840_000_000, currency="rub"),
+                    payment_date=datetime(2026, 7, 25, tzinfo=UTC),
+                    declared_date=datetime(2026, 6, 1, tzinfo=UTC),
+                    last_buy_date=datetime(2026, 7, 9, tzinfo=UTC),
+                    record_date=datetime(2026, 7, 11, tzinfo=UTC),
+                    dividend_type="regular",
+                    close_price=Box(units=300, nano=0),
+                    yield_value=Box(units=11, nano=200_000_000),
+                )
+            ]
         )
 
 
@@ -812,6 +831,42 @@ def test_sdk_unary_resolves_share_instruments_by_ticker() -> None:
     assert instrument_payload["ticker"] == "SBER"
     assert instrument_payload["lot_size"] == 10
     assert instrument_payload["min_price_increment"] == "0.01"
+
+
+def test_sdk_unary_get_dividends_maps_sdk_payload() -> None:
+    services = FakeServices()
+    client = TBankSdkUnaryClient(
+        config=config(),
+        sdk_module=fake_sdk(),
+        services_factory=services_factory(services),
+    )
+
+    result = asyncio.run(
+        client.call_unary(
+            "GetDividends",
+            {
+                "instrument": {"instrument_uid": "uid-sber", "ticker": "SBER"},
+                "from": datetime(2026, 1, 1, tzinfo=UTC).isoformat(),
+                "to": datetime(2026, 12, 31, tzinfo=UTC).isoformat(),
+            },
+            metadata=(("authorization", "Bearer token"),),
+            timeout_seconds=0.1,
+        )
+    )
+
+    assert services.instruments.get_dividends_kwargs is not None
+    assert services.instruments.get_dividends_kwargs["instrument_id"] == "uid-sber"
+    assert result.data["instrument_id"] == "uid-sber"
+    dividend = result.data["dividends"][0]
+    assert dividend["instrument_id"] == "uid-sber"
+    assert dividend["declared_date"] == "2026-06-01T00:00:00+00:00"
+    assert dividend["record_date"] == "2026-07-11T00:00:00+00:00"
+    assert dividend["last_buy_date"] == "2026-07-09T00:00:00+00:00"
+    assert dividend["amount_per_share"] == "34.84"
+    assert dividend["currency"] == "RUB"
+    assert dividend["close_price"] == "300"
+    assert dividend["yield_value"] == "11.2"
+    assert isinstance(dividend["raw_payload"], dict)
 
 
 def test_sdk_unary_maps_portfolio_positions_and_accounts_payload_shapes() -> None:

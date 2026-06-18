@@ -5,7 +5,7 @@ from __future__ import annotations
 import csv
 import json
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -63,9 +63,14 @@ class SpecialDayFlags:
     corporate_action_flag: bool = False
     dividend_gap_day: bool = False
     abnormal_gap_day: bool = False
+    future_dividend_risk_window: bool = False
     excluded_from_primary_calibration: bool = False
     trade_policy: str = "allow"
     source: str | None = None
+    linked_corporate_action_id: str | None = None
+    days_to_ex_date: int | None = None
+    days_to_record_date: int | None = None
+    corporate_action_source: str | None = None
 
     def as_payload(self) -> JsonPayload:
         return {
@@ -73,9 +78,15 @@ class SpecialDayFlags:
             "corporate_action_flag": self.corporate_action_flag,
             "dividend_gap_day": self.dividend_gap_day,
             "abnormal_gap_day": self.abnormal_gap_day,
+            "future_dividend_risk_window": self.future_dividend_risk_window,
             "excluded_from_primary_calibration": self.excluded_from_primary_calibration,
             "special_day_trade_policy": self.trade_policy,
             "special_day_source": self.source,
+            "linked_corporate_action_id": self.linked_corporate_action_id,
+            "dividend_event_id": self.linked_corporate_action_id,
+            "days_to_ex_date": self.days_to_ex_date,
+            "days_to_record_date": self.days_to_record_date,
+            "corporate_action_source": self.corporate_action_source or self.source,
         }
 
 
@@ -86,6 +97,7 @@ class MarketSpecialDayResult:
     special_days_created: int
     dividend_gap_days: int
     abnormal_gap_days: int
+    future_risk_windows_created: int
     excluded_from_primary_calibration: int
     instruments: tuple[str, ...]
     from_date: date
@@ -97,6 +109,7 @@ class MarketSpecialDayResult:
             "special_days_created": self.special_days_created,
             "dividend_gap_days": self.dividend_gap_days,
             "abnormal_gap_days": self.abnormal_gap_days,
+            "future_risk_windows_created": self.future_risk_windows_created,
             "excluded_from_primary_calibration": self.excluded_from_primary_calibration,
             "instruments": list(self.instruments),
             "from_date": self.from_date.isoformat(),
@@ -189,6 +202,8 @@ class CorporateActionService:
         from_date: date | None = None,
         to_date: date | None = None,
         instruments: tuple[str, ...] = (),
+        source: str | None = None,
+        action_type: str | None = None,
     ) -> list[CorporateActionEventRow]:
         instrument_ids = self.resolve_instrument_ids(instruments)
         stmt = select(CorporateActionEventRow).order_by(
@@ -201,6 +216,10 @@ class CorporateActionService:
             stmt = stmt.where(CorporateActionEventRow.ex_date <= to_date)
         if instrument_ids:
             stmt = stmt.where(CorporateActionEventRow.instrument_id.in_(instrument_ids))
+        if source is not None:
+            stmt = stmt.where(CorporateActionEventRow.source == source)
+        if action_type is not None:
+            stmt = stmt.where(CorporateActionEventRow.action_type == action_type)
         return list(self._session.execute(stmt).scalars())
 
     def list_special_days(
@@ -266,6 +285,23 @@ class CorporateActionService:
                 resolved.append(f"MOEX:{value.upper()}")
         return tuple(dict.fromkeys(resolved))
 
+    def api_imported_dividend_events_exist(
+        self,
+        *,
+        from_date: date,
+        to_date: date,
+        instruments: tuple[str, ...] = (),
+    ) -> bool:
+        return bool(
+            self.list_events(
+                from_date=from_date,
+                to_date=to_date,
+                instruments=instruments,
+                source="api_import",
+                action_type="dividend",
+            )
+        )
+
 
 class MarketSpecialDayClassifier:
     """Classify dividend/corporate-action and abnormal-gap trading days."""
@@ -283,12 +319,15 @@ class MarketSpecialDayClassifier:
         gap_threshold_bps: Decimal = Decimal("150"),
         dividend_gap_threshold_bps: Decimal = Decimal("50"),
         force_rebuild: bool = False,
+        include_future: bool = False,
+        lookahead_days: int = 365,
     ) -> MarketSpecialDayResult:
         instrument_ids = self._corporate_actions.resolve_instrument_ids(instruments)
+        effective_to_date = to_date + timedelta(days=lookahead_days) if include_future else to_date
         if force_rebuild:
             stmt = delete(MarketSpecialDay).where(
                 MarketSpecialDay.trading_date >= from_date,
-                MarketSpecialDay.trading_date <= to_date,
+                MarketSpecialDay.trading_date <= effective_to_date,
             )
             if instrument_ids:
                 stmt = stmt.where(MarketSpecialDay.instrument_id.in_(instrument_ids))
@@ -297,11 +336,12 @@ class MarketSpecialDayClassifier:
         created = 0
         dividend_days = 0
         abnormal_days = 0
+        future_windows = 0
         excluded = 0
 
         actions = self._corporate_actions.list_events(
             from_date=from_date,
-            to_date=to_date,
+            to_date=effective_to_date,
             instruments=instrument_ids,
         )
         for action in actions:
@@ -312,16 +352,13 @@ class MarketSpecialDayClassifier:
                 amount=action.amount_per_share,
                 previous_close=gap.previous_close,
             )
-            day_type = (
-                "dividend_gap_day"
-                if action.action_type == "dividend"
-                else "corporate_action_day"
+            is_future = (
+                include_future
+                and gap.session_open_price is None
+                and action.ex_date > to_date
             )
-            reason_code = (
-                "dividend_ex_date"
-                if action.action_type == "dividend"
-                else "corporate_action_window"
-            )
+            day_type = _special_day_type_for_action(action, is_future=is_future)
+            reason_code = _special_day_reason_code_for_action(action, is_future=is_future)
             row, was_created = _upsert_special_day(
                 self._session,
                 trading_date=action.ex_date,
@@ -345,11 +382,14 @@ class MarketSpecialDayClassifier:
                     "corporate_action_id": str(action.corporate_action_id),
                     "action_type": action.action_type,
                     "confidence": action.confidence,
+                    "source": action.source,
                     "dividend_gap_threshold_bps": str(dividend_gap_threshold_bps),
+                    "raw_corporate_action_payload": dict(action.action_payload),
                 },
             )
             created += int(was_created)
             dividend_days += int(row.special_day_type == "dividend_gap_day")
+            future_windows += int(row.special_day_type == "future_dividend_risk_window")
             excluded += int(row.exclude_from_primary_calibration)
 
         for instrument_id in instrument_ids:
@@ -386,10 +426,11 @@ class MarketSpecialDayClassifier:
             special_days_created=created,
             dividend_gap_days=dividend_days,
             abnormal_gap_days=abnormal_days,
+            future_risk_windows_created=future_windows,
             excluded_from_primary_calibration=excluded,
             instruments=instrument_ids,
             from_date=from_date,
-            to_date=to_date,
+            to_date=effective_to_date,
         )
         self._session.add(_classification_audit_event(result))
         self._session.flush()
@@ -413,16 +454,48 @@ def flags_from_rows(rows: list[MarketSpecialDay]) -> SpecialDayFlags:
         if any(row.trade_policy == "shadow_only" for row in rows)
         else rows[0].trade_policy
     )
+    linked_ids = {
+        str(row.linked_corporate_action_id)
+        for row in rows
+        if row.linked_corporate_action_id is not None
+    }
+    sources = {row.source for row in rows if row.source}
+    today = datetime.now(tz=UTC).date()
+    nearest_ex_date = min(
+        (row.trading_date for row in rows if row.trading_date >= today),
+        default=None,
+    )
+    nearest_record_date = min(
+        (
+            date.fromisoformat(str(value))
+            for row in rows
+            for value in (_payload_value(row.special_day_payload, "record_date"),)
+            if isinstance(value, str)
+        ),
+        default=None,
+    )
     return SpecialDayFlags(
         special_day_type=",".join(sorted(types)),
-        corporate_action_flag=bool(types & {"corporate_action_day", "dividend_gap_day"}),
+        corporate_action_flag=bool(
+            types
+            & {"corporate_action_day", "dividend_gap_day", "future_dividend_risk_window"}
+        ),
         dividend_gap_day="dividend_gap_day" in types,
         abnormal_gap_day="abnormal_gap_day" in types,
+        future_dividend_risk_window="future_dividend_risk_window" in types,
         excluded_from_primary_calibration=any(
             row.exclude_from_primary_calibration for row in rows
         ),
         trade_policy=policy,
-        source=",".join(sorted({row.source for row in rows})),
+        source=",".join(sorted(sources)),
+        linked_corporate_action_id=sorted(linked_ids)[0] if linked_ids else None,
+        days_to_ex_date=(
+            (nearest_ex_date - today).days if nearest_ex_date is not None else None
+        ),
+        days_to_record_date=(
+            (nearest_record_date - today).days if nearest_record_date is not None else None
+        ),
+        corporate_action_source=",".join(sorted(sources)),
     )
 
 
@@ -558,6 +631,36 @@ def _upsert_special_day(
     )
     session.add(row)
     return row, True
+
+
+def _special_day_type_for_action(
+    action: CorporateActionEventRow,
+    *,
+    is_future: bool,
+) -> str:
+    if is_future and action.action_type == "dividend":
+        return "future_dividend_risk_window"
+    return "dividend_gap_day" if action.action_type == "dividend" else "corporate_action_day"
+
+
+def _special_day_reason_code_for_action(
+    action: CorporateActionEventRow,
+    *,
+    is_future: bool,
+) -> str:
+    if is_future and action.action_type == "dividend":
+        return "future_dividend_ex_date"
+    return "dividend_ex_date" if action.action_type == "dividend" else "corporate_action_window"
+
+
+def _payload_value(payload: JsonPayload, key: str) -> object:
+    value = payload.get(key)
+    if value is not None:
+        return value
+    raw_payload = payload.get("raw_corporate_action_payload")
+    if isinstance(raw_payload, dict):
+        return raw_payload.get(key)
+    return None
 
 
 def _open_gap_for(session: Session, instrument_id: str, trading_day: date) -> _OpenGap:

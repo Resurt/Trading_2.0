@@ -325,3 +325,29 @@ Historical replay не добавляет новую торговую страт
   `max_spread_bps`, `min_market_quality_score`,
   `min_edge_after_total_costs_bps`, `max_data_age_ms` и `allow_short`, но не
   применяет их автоматически.
+
+## Dividend Calendar Risk Gates
+
+Dividend calendar is a risk input, not a strategy alpha signal. The primary source is
+T-Bank `GetDividends`; manual CSV/JSON is fallback/override only.
+
+`RiskAssessmentInput` carries:
+
+- `dividend_calendar_available`;
+- `future_dividend_risk_window`;
+- `dividend_gap_day`;
+- `days_to_ex_date`;
+- `days_to_record_date`;
+- `corporate_action_source`.
+
+New machine-readable blockers:
+
+- `dividend_calendar_unavailable`;
+- `future_dividend_risk_window`;
+- `short_blocked_dividend_window`;
+- existing `dividend_gap_risk` and `corporate_action_window`.
+
+Default policy is fail-closed for shadow/production when the dividend calendar is unavailable:
+`TRADING_DIVIDEND_SYNC_FAIL_OPEN=false`. Future dividend windows and ex-date gap days are
+`shadow_only`/entry-blocked by default. Shorts are blocked separately in dividend windows because
+borrow, margin and dividend liability assumptions must be confirmed before live use.
