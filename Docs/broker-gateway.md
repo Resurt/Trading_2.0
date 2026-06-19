@@ -261,3 +261,33 @@ The concrete SDK wrapper maps T-Bank `instrument_uid`, `figi` and ticker payload
 into plain dictionaries. Upper layers normalize those broker aliases back to the
 project `instrument_id` through `InstrumentRef`; SDK/protobuf objects must not leak
 into strategy, risk, execution or reporting code.
+
+## Instrument identity guard
+
+`instrument_id` is the internal canonical id, for example `MOEX:SBER`. It is used
+for analytics, reports, session events and UI filters. It is not a T-Bank broker
+identifier.
+
+Real T-Bank calls must use `instrument_uid` or, when supported, `figi`. Seed rows
+such as `MOEX:SBER` / `MOEX:GAZP` are local bootstrap records only. In
+sandbox/shadow/production and real readonly scripts, `GetDividends`, `GetCandles`,
+market streams and order placement fail fast if only an internal `MOEX:*` id is
+available.
+
+`instrument_registry` stores resolution state explicitly:
+
+- `source=seed|tbank_resolved|manual|safe_noop`;
+- `resolution_status=resolved|unresolved|failed`;
+- `resolved_at`;
+- `resolution_error_code` / `resolution_error_message`;
+- `broker_payload`.
+
+Before dividend sync, real historical backfill, shadow or production, run:
+
+```powershell
+python scripts/run_tbank_instrument_resolve.py --instruments SBER,GAZP,LKOH --strict --json-output
+python scripts/run_launch_readiness.py --mode instrument-resolution
+```
+
+If T-Bank returns `NOT_FOUND` for `MOEX:SBER` / `MOEX:GAZP`, treat it as an
+unresolved instrument-registry problem, not as a missing MOEX share.

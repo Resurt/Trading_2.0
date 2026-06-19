@@ -758,13 +758,16 @@ def _instrument_id(value: object) -> str:
     if isinstance(value, Mapping):
         raw = (
             value.get("instrument_uid")
-            or value.get("instrument_id")
             or value.get("figi")
-            or value.get("ticker")
+            or value.get("instrument_id")
         )
         if raw:
-            return str(raw)
-    msg = "instrument payload must contain instrument_uid or instrument_id"
+            identifier = str(raw)
+            if identifier.upper().startswith("MOEX:"):
+                msg = "T-Bank broker calls require resolved instrument_uid or figi"
+                raise ValueError(msg)
+            return identifier
+    msg = "instrument payload must contain instrument_uid or figi"
     raise ValueError(msg)
 
 

@@ -28,6 +28,7 @@ from trade_core.broker_gateway import (
     BrokerGateway,
     BrokerUnaryResponse,
     DividendsRequest,
+    InstrumentResolveRequest,
     TradingSchedulesRequest,
 )
 from trade_core.corporate_actions import (
@@ -110,6 +111,50 @@ class FakeDividendGateway:
             data={"windows": []},
             headers={},
         )
+
+
+class ResolvingDividendGateway(FakeDividendGateway):
+    def __init__(self) -> None:
+        super().__init__()
+        self.dividend_instrument_ids: list[str | None] = []
+
+    async def resolve_instruments(
+        self,
+        request: InstrumentResolveRequest,
+        metadata: object | None = None,
+    ) -> BrokerUnaryResponse:
+        del metadata
+        return BrokerUnaryResponse(
+            method_name="ResolveInstruments",
+            data={
+                "instruments": [
+                    {
+                        "instrument_id": f"uid-{ticker.lower()}",
+                        "instrument_uid": f"uid-{ticker.lower()}",
+                        "figi": f"figi-{ticker.lower()}",
+                        "ticker": ticker,
+                        "class_code": request.class_code,
+                        "name": ticker,
+                        "lot_size": 10,
+                        "min_price_increment": "0.01",
+                        "currency": "RUB",
+                        "api_trade_available": True,
+                        "short_available": True,
+                        "supports_weekend": False,
+                    }
+                    for ticker in request.tickers
+                ]
+            },
+            headers={},
+        )
+
+    async def get_dividends(
+        self,
+        request: DividendsRequest,
+        metadata: object | None = None,
+    ) -> BrokerUnaryResponse:
+        self.dividend_instrument_ids.append(request.instrument.instrument_uid)
+        return await super().get_dividends(request, metadata)
 
 
 def test_historical_quality_catches_missing_duplicate_invalid_and_session_split() -> None:
@@ -243,6 +288,98 @@ def test_tbank_dividend_sync_creates_api_import_events_and_future_windows() -> N
         assert len(special_days) == 1
         assert special_days[0].special_day_type == "future_dividend_risk_window"
         assert special_days[0].trade_policy == "shadow_only"
+    engine.dispose()
+
+
+def test_dividend_sync_resolves_seed_registry_before_get_dividends() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    gateway = ResolvingDividendGateway()
+    with Session(engine) as session:
+        session.add(
+            InstrumentRegistry(
+                instrument_id="MOEX:SBER",
+                ticker="SBER",
+                class_code="TQBR",
+                figi=None,
+                instrument_uid=None,
+                name="SBER",
+                lot_size=10,
+                min_price_increment=Decimal("0.01"),
+                currency="RUB",
+                is_enabled=True,
+                supports_morning=True,
+                supports_evening=True,
+                supports_weekend=False,
+                instrument_payload={},
+            )
+        )
+        config = DividendSyncConfig(
+            instruments=("SBER",),
+            from_date=date(2026, 1, 1),
+            to_date=date(2027, 12, 31),
+            classify_special_days=False,
+        )
+
+        result = asyncio.run(
+            DividendSyncService(
+                session=session,
+                broker_gateway=cast(BrokerGateway, gateway),
+            ).run(config)
+        )
+
+        row = session.get(InstrumentRegistry, "MOEX:SBER")
+        assert row is not None
+        assert row.instrument_uid == "uid-sber"
+        assert row.source == "tbank_resolved"
+        assert row.resolution_status == "resolved"
+        assert gateway.dividend_instrument_ids == ["uid-sber"]
+        assert result.clean is True
+        assert result.resolution_attempted is True
+        assert result.instrument_resolution_status == "resolved"
+    engine.dispose()
+
+
+def test_dividend_sync_fails_cleanly_when_seed_registry_unresolved() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(
+            InstrumentRegistry(
+                instrument_id="MOEX:SBER",
+                ticker="SBER",
+                class_code="TQBR",
+                figi=None,
+                instrument_uid=None,
+                name="SBER",
+                lot_size=10,
+                min_price_increment=Decimal("0.01"),
+                currency="RUB",
+                is_enabled=True,
+                supports_morning=True,
+                supports_evening=True,
+                supports_weekend=False,
+                instrument_payload={},
+            )
+        )
+        result = asyncio.run(
+            DividendSyncService(
+                session=session,
+                broker_gateway=cast(BrokerGateway, FakeDividendGateway()),
+            ).run(
+                DividendSyncConfig(
+                    instruments=("SBER",),
+                    from_date=date(2026, 1, 1),
+                    to_date=date(2027, 12, 31),
+                    classify_special_days=False,
+                )
+            )
+        )
+
+        assert result.status == "failed"
+        assert result.clean is False
+        assert result.instruments_unresolved == 1
+        assert result.errors[0]["error_code"] == "instrument_not_resolved_for_dividend_sync"
     engine.dispose()
 
 
@@ -829,6 +966,10 @@ def _seed_instrument(session: Session, *, ticker: str = "SBER") -> None:
             supports_morning=True,
             supports_evening=True,
             supports_weekend=True,
+            source="tbank_resolved",
+            resolved_at=datetime.now(tz=UTC),
+            resolution_status="resolved",
+            broker_payload={"source": "test"},
             instrument_payload={},
         )
     )

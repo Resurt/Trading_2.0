@@ -111,6 +111,12 @@ class InstrumentRepository:
         existing.supports_morning = instrument.supports_morning
         existing.supports_evening = instrument.supports_evening
         existing.supports_weekend = instrument.supports_weekend
+        existing.source = instrument.source
+        existing.resolved_at = instrument.resolved_at
+        existing.resolution_status = instrument.resolution_status
+        existing.resolution_error_code = instrument.resolution_error_code
+        existing.resolution_error_message = instrument.resolution_error_message
+        existing.broker_payload = instrument.broker_payload
         existing.instrument_payload = instrument.instrument_payload
         self._session.flush()
         return existing

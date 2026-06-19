@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -17,7 +18,19 @@ from trading_common.db.repositories import InstrumentRepository
 from trading_common.telemetry import get_logger, log_event
 
 LOGGER = get_logger(__name__)
-PLACEHOLDER_MARKERS = ("placeholder", "runtime-placeholder", "test-placeholder")
+PLACEHOLDER_MARKERS = (
+    "placeholder",
+    "runtime-placeholder",
+    "test-placeholder",
+    "safe-noop",
+    "safe_noop",
+)
+UNRESOLVED_INSTRUMENT_ERROR_CODE = "instrument_not_resolved_for_broker_call"
+REAL_BROKER_MODES = {
+    RuntimeMode.SANDBOX,
+    RuntimeMode.SHADOW,
+    RuntimeMode.PRODUCTION,
+}
 
 
 @dataclass(slots=True)
@@ -42,14 +55,23 @@ class InstrumentResolverService:
             InstrumentResolveRequest(tickers=tickers, class_code=class_code)
         )
         resolved = tuple(
-            self._upsert_resolved_payload(payload)
+            self._upsert_resolved_payload(payload, exchange=self.exchange)
             for payload in _instrument_payloads(response.data)
         )
         missing_tickers = sorted(set(tickers) - {instrument.ticker for instrument in resolved})
         if missing_tickers:
+            self._mark_failed_tickers(
+                missing_tickers,
+                class_code=class_code,
+                error_code="instrument_resolver_missing_ticker",
+                error_message=(
+                    "T-Bank instrument resolver did not return requested tickers: "
+                    + ", ".join(missing_tickers)
+                ),
+            )
             msg = f"T-Bank instrument resolver did not return tickers: {', '.join(missing_tickers)}"
             raise RuntimeError(msg)
-        if any(_has_placeholder_uid(instrument) for instrument in resolved):
+        if any(not is_broker_resolved_instrument(instrument) for instrument in resolved):
             msg = "production-like runtime refuses placeholder instrument_uid"
             raise RuntimeError(msg)
 
@@ -72,6 +94,18 @@ class InstrumentResolverService:
         registered: list[InstrumentRef] = []
         for instrument in requested:
             ticker = _ticker_for(instrument)
+            existing = repository.get_by_ticker(ticker)
+            if existing is not None and existing.is_enabled:
+                registered.append(
+                    InstrumentRef(
+                        instrument_id=existing.instrument_id,
+                        instrument_uid=existing.instrument_uid,
+                        figi=existing.figi,
+                        ticker=existing.ticker,
+                        class_code=existing.class_code,
+                    )
+                )
+                continue
             registry = InstrumentRegistry(
                 instrument_id=instrument.instrument_id,
                 ticker=ticker,
@@ -86,6 +120,12 @@ class InstrumentResolverService:
                 supports_morning=True,
                 supports_evening=True,
                 supports_weekend=False,
+                source="seed",
+                resolved_at=None,
+                resolution_status="unresolved",
+                resolution_error_code=None,
+                resolution_error_message=None,
+                broker_payload=None,
                 instrument_payload={"source": "historical_replay_local_registry"},
             )
             repository.upsert(registry)
@@ -93,6 +133,7 @@ class InstrumentResolverService:
                 InstrumentRef(
                     instrument_id=registry.instrument_id,
                     instrument_uid=registry.instrument_uid,
+                    figi=registry.figi,
                     ticker=registry.ticker,
                     class_code=registry.class_code,
                 )
@@ -100,15 +141,22 @@ class InstrumentResolverService:
         self.session.flush()
         return tuple(registered)
 
-    def _upsert_resolved_payload(self, payload: Mapping[str, object]) -> InstrumentRef:
+    def _upsert_resolved_payload(
+        self,
+        payload: Mapping[str, object],
+        *,
+        exchange: str,
+    ) -> InstrumentRef:
         ticker = _required_str(payload, "ticker")
         instrument_uid = _required_str(payload, "instrument_uid")
-        canonical_instrument_id = instrument_uid
+        canonical_instrument_id = f"{exchange}:{ticker}"
         existing_by_ticker = self.session.execute(
             select(InstrumentRegistry).where(InstrumentRegistry.ticker == ticker)
         ).scalars().first()
         if existing_by_ticker is not None:
-            existing_by_ticker.instrument_id = canonical_instrument_id
+            existing_by_ticker.instrument_id = (
+                existing_by_ticker.instrument_id or canonical_instrument_id
+            )
             existing_by_ticker.class_code = _optional_str(payload, "class_code") or "TQBR"
             existing_by_ticker.figi = _optional_str(payload, "figi")
             existing_by_ticker.instrument_uid = instrument_uid
@@ -124,6 +172,12 @@ class InstrumentResolverService:
             existing_by_ticker.supports_morning = True
             existing_by_ticker.supports_evening = True
             existing_by_ticker.supports_weekend = _bool_payload(payload, "supports_weekend")
+            existing_by_ticker.source = "tbank_resolved"
+            existing_by_ticker.resolved_at = datetime.now(tz=UTC)
+            existing_by_ticker.resolution_status = "resolved"
+            existing_by_ticker.resolution_error_code = None
+            existing_by_ticker.resolution_error_message = None
+            existing_by_ticker.broker_payload = dict(payload)
             existing_by_ticker.instrument_payload = dict(payload)
             registry = existing_by_ticker
         else:
@@ -145,6 +199,12 @@ class InstrumentResolverService:
                 supports_morning=True,
                 supports_evening=True,
                 supports_weekend=_bool_payload(payload, "supports_weekend"),
+                source="tbank_resolved",
+                resolved_at=datetime.now(tz=UTC),
+                resolution_status="resolved",
+                resolution_error_code=None,
+                resolution_error_message=None,
+                broker_payload=dict(payload),
                 instrument_payload=dict(payload),
             )
             self.session.add(registry)
@@ -152,9 +212,107 @@ class InstrumentResolverService:
         return InstrumentRef(
             instrument_id=registry.instrument_id,
             instrument_uid=registry.instrument_uid,
+            figi=registry.figi,
             ticker=registry.ticker,
             class_code=registry.class_code,
         )
+
+    def _mark_failed_tickers(
+        self,
+        tickers: list[str],
+        *,
+        class_code: str,
+        error_code: str,
+        error_message: str,
+    ) -> None:
+        for ticker in tickers:
+            existing = self.session.execute(
+                select(InstrumentRegistry).where(InstrumentRegistry.ticker == ticker)
+            ).scalars().first()
+            if existing is None:
+                existing = InstrumentRegistry(
+                    instrument_id=f"{self.exchange}:{ticker}",
+                    ticker=ticker,
+                    class_code=class_code,
+                    figi=None,
+                    instrument_uid=None,
+                    name=ticker,
+                    lot_size=1,
+                    min_price_increment=Decimal("0.01"),
+                    currency="RUB",
+                    is_enabled=True,
+                    supports_morning=True,
+                    supports_evening=True,
+                    supports_weekend=False,
+                    source="seed",
+                    resolved_at=None,
+                    resolution_status="failed",
+                    resolution_error_code=error_code,
+                    resolution_error_message=error_message,
+                    broker_payload=None,
+                    instrument_payload={},
+                )
+                self.session.add(existing)
+            else:
+                existing.resolution_status = "failed"
+                existing.resolution_error_code = error_code
+                existing.resolution_error_message = error_message
+        self.session.flush()
+
+
+def is_broker_resolved_instrument(value: InstrumentRef | InstrumentRegistry) -> bool:
+    """Return whether an instrument is safe to pass to real T-Bank broker calls."""
+
+    instrument_id = str(getattr(value, "instrument_id", "") or "")
+    instrument_uid = str(getattr(value, "instrument_uid", "") or "")
+    figi = str(getattr(value, "figi", "") or "")
+    source = str(getattr(value, "source", "") or "")
+    resolution_status = str(getattr(value, "resolution_status", "") or "")
+    has_broker_identity = bool(instrument_uid or figi)
+    if _looks_internal_moex_id(instrument_uid) or _looks_internal_moex_id(figi):
+        return False
+    if _has_placeholder_value(instrument_id) or _has_placeholder_value(instrument_uid):
+        return False
+    if isinstance(value, InstrumentRegistry):
+        return has_broker_identity and (
+            source == "tbank_resolved" or resolution_status == "resolved"
+        )
+    return has_broker_identity and not _has_placeholder_uid(value)
+
+
+def assert_resolved_for_broker_call(
+    instrument: InstrumentRef | InstrumentRegistry,
+    *,
+    mode: RuntimeMode,
+    operation_name: str,
+) -> None:
+    """Fail fast when a production-like broker call would use a seed/internal ID."""
+
+    if mode not in REAL_BROKER_MODES:
+        return
+    if is_broker_resolved_instrument(instrument):
+        return
+    instrument_id = str(getattr(instrument, "instrument_id", "") or "")
+    ticker = str(getattr(instrument, "ticker", "") or "")
+    msg = (
+        f"{operation_name} requires resolved T-Bank instrument_uid or figi "
+        f"for {ticker or instrument_id}"
+    )
+    raise RuntimeError(
+        f"{UNRESOLVED_INSTRUMENT_ERROR_CODE}: {msg}"
+    )
+
+
+def broker_identity_for(instrument: InstrumentRef | InstrumentRegistry) -> str | None:
+    """Return the broker-facing identity without falling back to internal MOEX IDs."""
+
+    instrument_uid = str(getattr(instrument, "instrument_uid", "") or "")
+    if instrument_uid and not _looks_internal_moex_id(instrument_uid):
+        return instrument_uid
+    figi = str(getattr(instrument, "figi", "") or "")
+    if figi and not _looks_internal_moex_id(figi):
+        return figi
+    return None
 
 
 def _instrument_payloads(payload: Mapping[str, Any]) -> tuple[Mapping[str, object], ...]:
@@ -171,8 +329,21 @@ def _ticker_for(instrument: InstrumentRef) -> str:
 
 
 def _has_placeholder_uid(instrument: InstrumentRef) -> bool:
-    value = (instrument.instrument_uid or instrument.instrument_id).lower()
-    return any(marker in value for marker in PLACEHOLDER_MARKERS)
+    values = (
+        instrument.instrument_id,
+        instrument.instrument_uid or "",
+        instrument.figi or "",
+    )
+    return any(_has_placeholder_value(value) for value in values)
+
+
+def _has_placeholder_value(value: str) -> bool:
+    lower = value.lower()
+    return any(marker in lower for marker in PLACEHOLDER_MARKERS)
+
+
+def _looks_internal_moex_id(value: str) -> bool:
+    return value.upper().startswith("MOEX:")
 
 
 def _required_str(payload: Mapping[str, object], key: str) -> str:

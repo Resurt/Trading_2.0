@@ -251,6 +251,7 @@ def test_get_dividends_uses_readonly_unary_call() -> None:
         "instrument": {
             "instrument_id": "MOEX:SBER",
             "instrument_uid": "sber-instrument-uid",
+            "figi": None,
             "class_code": "TQBR",
             "ticker": "SBER",
         },
@@ -457,6 +458,7 @@ def test_stream_gap_recovery_backfills_recent_candles(
     assert payload["instrument"] == {
         "instrument_id": "uid-sber",
         "instrument_uid": None,
+        "figi": None,
         "class_code": None,
         "ticker": None,
     }

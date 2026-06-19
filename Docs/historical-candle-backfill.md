@@ -141,3 +141,26 @@ Historical candle backfill сам по себе не делает калибро
 7. `run_launch_readiness.py --mode historical-final-calibration`.
 
 Dividend/corporate-action days excluded from primary calibration by default.
+
+## Instrument Resolution For Real Backfill
+
+Dry-run backfill may use seed registry rows and does not require a T-Bank token.
+Real readonly backfill calls `GetCandles`, so it requires resolved T-Bank
+`instrument_uid` or `figi`.
+
+Required order:
+
+```powershell
+python scripts/run_tbank_instrument_resolve.py --instruments SBER,GAZP,LKOH --strict --json-output
+python scripts/run_historical_candle_backfill.py --instruments SBER,GAZP --lookback-days 10 --json-output
+```
+
+`run_historical_candle_backfill.py` resolves instruments by default for real
+runs and fails if an enabled instrument remains `source=seed` /
+`resolution_status=unresolved`. `--allow-unresolved` is intended only for
+dry-run/local smoke.
+
+Backfill also clamps broker request chunks to T-Bank GetCandles interval
+limits. For the default raw `1m` interval one broker request is at most one
+day, even if CLI `--chunk-days` is larger. This prevents API error `30014`
+(`maximum request period for the given candle interval has been exceeded`).

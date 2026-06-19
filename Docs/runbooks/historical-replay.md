@@ -145,6 +145,23 @@ Historical replay исключает `dividend_gap_day` и `corporate_action_day
 - `--include-corporate-action-days`;
 - `--special-day-policy include_with_flags|shadow_only`.
 
+## Instrument Resolution Boundary
+
+Historical replay from DB uses already persisted candles and never calls
+`PostOrder`/`CancelOrder`. However the prerequisite data-loading steps are real
+readonly broker calls.
+
+Before real dividend sync or real historical candle backfill:
+
+```powershell
+python scripts/run_tbank_instrument_resolve.py --instruments SBER,GAZP,LKOH --strict --json-output
+python scripts/run_launch_readiness.py --mode instrument-resolution
+```
+
+Replay may still run in dry-run/local mode with seed rows, but final calibration
+and shadow readiness require `source=tbank_resolved` and
+`resolution_status=resolved` for enabled instruments.
+
 В payload каждого replay-generated event попадают `special_day_type`,
 `dividend_gap_day`, `corporate_action_flag`, `abnormal_gap_day`,
 `excluded_from_primary_calibration` и `eligible_for_live_calibration`.

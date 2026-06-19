@@ -89,7 +89,8 @@ class TBankBrokerGateway:
         """Use resolved broker IDs for all subsequent market stream subscriptions."""
 
         stream_ids = tuple(
-            instrument.instrument_uid or instrument.instrument_id for instrument in instruments
+            instrument.instrument_uid or instrument.figi or instrument.instrument_id
+            for instrument in instruments
         )
         self._stream_client = TBankSdkStreamClient(config=self.config, instruments=stream_ids)
 
@@ -113,6 +114,7 @@ class TBankBrokerGateway:
         request: DividendsRequest,
         metadata: RequestMetadata | None = None,
     ) -> BrokerUnaryResponse:
+        _ensure_resolved_broker_identity(request.instrument, operation_name="GetDividends")
         return await self._call_readonly(
             "GetDividends",
             {
@@ -143,6 +145,7 @@ class TBankBrokerGateway:
         request: TradingStatusRequest,
         metadata: RequestMetadata | None = None,
     ) -> BrokerUnaryResponse:
+        _ensure_resolved_broker_identity(request.instrument, operation_name="GetTradingStatus")
         return await self._call_readonly(
             "GetTradingStatus",
             {"instrument": _instrument_payload(request.instrument)},
@@ -154,6 +157,7 @@ class TBankBrokerGateway:
         request: CandleRequest,
         metadata: RequestMetadata | None = None,
     ) -> BrokerUnaryResponse:
+        _ensure_resolved_broker_identity(request.instrument, operation_name="GetCandles")
         return await self._call_readonly(
             "GetCandles",
             {
@@ -170,6 +174,8 @@ class TBankBrokerGateway:
         request: LastPricesRequest,
         metadata: RequestMetadata | None = None,
     ) -> BrokerUnaryResponse:
+        for instrument in request.instruments:
+            _ensure_resolved_broker_identity(instrument, operation_name="GetLastPrices")
         return await self._call_readonly(
             "GetLastPrices",
             {
@@ -186,6 +192,7 @@ class TBankBrokerGateway:
         request: OrderBookRequest,
         metadata: RequestMetadata | None = None,
     ) -> BrokerUnaryResponse:
+        _ensure_resolved_broker_identity(request.instrument, operation_name="GetOrderBook")
         return await self._call_readonly(
             "GetOrderBook",
             {
@@ -200,6 +207,7 @@ class TBankBrokerGateway:
         request: OrderPlacementRequest,
         metadata: RequestMetadata | None = None,
     ) -> BrokerUnaryResponse:
+        _ensure_resolved_broker_identity(request.instrument, operation_name="PostOrder")
         request_order_id = self._request_order_id_for_order(request)
         payload = {
             "account_id": request.account_id,
@@ -252,6 +260,7 @@ class TBankBrokerGateway:
         request: StopOrderPlacementRequest,
         metadata: RequestMetadata | None = None,
     ) -> BrokerUnaryResponse:
+        _ensure_resolved_broker_identity(request.instrument, operation_name="PostStopOrder")
         request_order_id = self._request_order_id_for_stop_order(request)
         payload = {
             "account_id": request.account_id,
@@ -551,9 +560,22 @@ def _instrument_payload(instrument: InstrumentRef) -> JsonPayload:
     return {
         "instrument_id": instrument.instrument_id,
         "instrument_uid": instrument.instrument_uid,
+        "figi": instrument.figi,
         "class_code": instrument.class_code,
         "ticker": instrument.ticker,
     }
+
+
+def _ensure_resolved_broker_identity(
+    instrument: InstrumentRef,
+    *,
+    operation_name: str,
+) -> None:
+    if instrument.instrument_uid or instrument.figi:
+        return
+    if instrument.instrument_id.upper().startswith("MOEX:"):
+        msg = f"{operation_name} requires resolved instrument_uid or figi"
+        raise ValueError(msg)
 
 
 def _datetime_to_iso(value: datetime | None) -> str | None:

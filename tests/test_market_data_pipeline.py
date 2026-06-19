@@ -15,6 +15,7 @@ from trade_core.broker_gateway import (
     BrokerUnaryResponse,
     CandleRequest,
     InstrumentRef,
+    InstrumentResolveRequest,
     OrdersRequest,
     OrderStateRequest,
 )
@@ -42,7 +43,7 @@ from trade_core.market_data.persistence import SqlAlchemyMarketDataStore
 from trade_core.session.models import SessionEventContext
 from trading_common import LaunchModePolicy, RuntimeMode
 from trading_common.db import Base
-from trading_common.db.models import MarketCandle
+from trading_common.db.models import InstrumentRegistry, MarketCandle
 from trading_common.enums import SessionPhase, SessionType
 
 MSK = ZoneInfo("Europe/Moscow")
@@ -241,6 +242,38 @@ class FakeHistoricalBackfillGateway:
     def __init__(self, candles: list[dict[str, object]]) -> None:
         self.candles = candles
         self.candle_requests: list[CandleRequest] = []
+        self.resolve_requests: list[InstrumentResolveRequest] = []
+
+    async def resolve_instruments(
+        self,
+        request: InstrumentResolveRequest,
+        metadata: object | None = None,
+    ) -> BrokerUnaryResponse:
+        del metadata
+        self.resolve_requests.append(request)
+        return BrokerUnaryResponse(
+            method_name="ResolveInstruments",
+            data={
+                "instruments": [
+                    {
+                        "instrument_id": f"uid-{ticker.lower()}",
+                        "instrument_uid": f"uid-{ticker.lower()}",
+                        "figi": f"figi-{ticker.lower()}",
+                        "ticker": ticker,
+                        "class_code": request.class_code,
+                        "name": ticker,
+                        "lot_size": 10,
+                        "min_price_increment": "0.01",
+                        "currency": "RUB",
+                        "api_trade_available": True,
+                        "short_available": True,
+                        "supports_weekend": False,
+                    }
+                    for ticker in request.tickers
+                ]
+            },
+            headers={},
+        )
 
     async def get_candles(
         self,
@@ -521,6 +554,60 @@ def test_historical_backfill_writes_raw_and_derived_bars_idempotently() -> None:
     assert len(fake_gateway.candle_requests) == 2
 
 
+def test_historical_backfill_resolves_seed_row_before_real_get_candles() -> None:
+    candles = [recovered_candle_payload(0)]
+    fake_gateway = FakeHistoricalBackfillGateway(candles)
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        session.add(
+            InstrumentRegistry(
+                instrument_id="MOEX:SBER",
+                ticker="SBER",
+                class_code="TQBR",
+                figi=None,
+                instrument_uid=None,
+                name="SBER",
+                lot_size=10,
+                min_price_increment=Decimal("0.01"),
+                currency="RUB",
+                is_enabled=True,
+                supports_morning=True,
+                supports_evening=True,
+                supports_weekend=False,
+                instrument_payload={},
+            )
+        )
+        service = HistoricalCandleBackfillService(
+            broker_gateway=cast(BrokerGateway, fake_gateway),
+            session=session,
+            launch_policy=LaunchModePolicy.from_mode(RuntimeMode.SHADOW),
+        )
+        result = asyncio.run(
+            service.run(
+                HistoricalBackfillConfig(
+                    instruments=("SBER",),
+                    chunk_days=1,
+                    dry_run=False,
+                    runtime_mode=RuntimeMode.SHADOW.value,
+                ),
+                from_ts_utc=utc(2026, 6, 12, 7),
+                to_ts_utc=utc(2026, 6, 12, 7, 1),
+            )
+        )
+
+        row = session.get(InstrumentRegistry, "MOEX:SBER")
+
+    assert row is not None
+    assert row.instrument_uid == "uid-sber"
+    assert row.source == "tbank_resolved"
+    assert fake_gateway.resolve_requests[0].tickers == ("SBER",)
+    assert fake_gateway.candle_requests[0].instrument.instrument_uid == "uid-sber"
+    assert result.plan.instruments[0].instrument_id == "MOEX:SBER"
+    engine.dispose()
+
+
 def test_historical_backfill_dry_run_builds_plan_without_fetching_candles() -> None:
     fake_gateway = FakeHistoricalBackfillGateway([])
     engine = create_engine("sqlite+pysqlite:///:memory:")
@@ -542,5 +629,5 @@ def test_historical_backfill_dry_run_builds_plan_without_fetching_candles() -> N
 
     assert result.dry_run
     assert len(result.plan.instruments) == 3
-    assert len(result.plan.chunks) == 9
+    assert len(result.plan.chunks) == 51
     assert fake_gateway.candle_requests == []

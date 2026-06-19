@@ -14,7 +14,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from trade_core.broker_gateway import BrokerGateway, CandleRequest, InstrumentRef
-from trade_core.instruments import InstrumentResolverService
+from trade_core.instruments import (
+    InstrumentResolverService,
+    assert_resolved_for_broker_call,
+    is_broker_resolved_instrument,
+)
 from trade_core.market_data.bars import BarEngine
 from trade_core.market_data.events import Candle, Timeframe, ensure_utc, parse_timeframe
 from trade_core.market_data.persistence import SqlAlchemyMarketDataStore
@@ -49,6 +53,9 @@ class HistoricalBackfillConfig:
     class_code: str = "TQBR"
     dry_run: bool = False
     runtime_mode: str = RuntimeMode.HISTORICAL_REPLAY.value
+    resolve_instruments: bool = True
+    require_resolved_instruments: bool = True
+    allow_unresolved: bool = False
 
     def normalized_instruments(self) -> tuple[str, ...]:
         values = tuple(ticker.strip().upper() for ticker in self.instruments if ticker.strip())
@@ -228,6 +235,10 @@ class HistoricalCandleBackfillService:
             msg = "from_ts_utc must be before to_ts_utc"
             raise ValueError(msg)
         instruments = await self._resolve_instruments(config)
+        chunk_delta = _broker_chunk_delta(
+            raw_interval=config.raw_interval,
+            requested_chunk_days=config.chunk_days,
+        )
         chunks = tuple(
             chunk
             for instrument in instruments
@@ -236,7 +247,7 @@ class HistoricalCandleBackfillService:
                 from_ts_utc=from_ts,
                 to_ts_utc=to_ts,
                 raw_interval=config.raw_interval,
-                chunk_days=config.chunk_days,
+                chunk_delta=chunk_delta,
             )
         )
         return HistoricalBackfillPlan(
@@ -394,7 +405,7 @@ class HistoricalCandleBackfillService:
         config: HistoricalBackfillConfig,
     ) -> tuple[InstrumentRef, ...]:
         tickers = config.normalized_instruments()
-        from_registry = self._load_registry_instruments(tickers)
+        from_registry = self._load_registry_instruments(tickers, config=config)
         missing_tickers = tuple(ticker for ticker in tickers if ticker not in from_registry)
         if missing_tickers:
             requested = tuple(
@@ -415,7 +426,11 @@ class HistoricalCandleBackfillService:
             for instrument in resolved:
                 from_registry[_ticker_for(instrument)] = instrument
         instruments = tuple(from_registry[ticker] for ticker in tickers)
-        if self._launch_policy.mode is not RuntimeMode.HISTORICAL_REPLAY:
+        if (
+            not config.dry_run
+            and config.require_resolved_instruments
+            and not config.allow_unresolved
+        ):
             placeholders = [
                 instrument.instrument_id
                 for instrument in instruments
@@ -426,14 +441,31 @@ class HistoricalCandleBackfillService:
                     placeholders
                 )
                 raise RuntimeError(msg)
+            for instrument in instruments:
+                assert_resolved_for_broker_call(
+                    instrument,
+                    mode=self._launch_policy.mode,
+                    operation_name="GetCandles",
+                )
         return instruments
 
-    def _load_registry_instruments(self, tickers: tuple[str, ...]) -> dict[str, InstrumentRef]:
+    def _load_registry_instruments(
+        self,
+        tickers: tuple[str, ...],
+        *,
+        config: HistoricalBackfillConfig,
+    ) -> dict[str, InstrumentRef]:
         repository = InstrumentRepository(self._session)
         result: dict[str, InstrumentRef] = {}
         for ticker in tickers:
             row = repository.get_by_ticker(ticker)
             if row is not None and row.is_enabled:
+                if (
+                    not config.dry_run
+                    and config.resolve_instruments
+                    and not is_broker_resolved_instrument(row)
+                ):
+                    continue
                 result[ticker] = _instrument_from_registry(row)
         return result
 
@@ -465,6 +497,9 @@ def config_from_strings(
     strategy_id: str,
     dry_run: bool,
     runtime_mode: str = RuntimeMode.HISTORICAL_REPLAY.value,
+    resolve_instruments: bool = True,
+    require_resolved_instruments: bool = True,
+    allow_unresolved: bool = False,
 ) -> HistoricalBackfillConfig:
     """Parse CLI strings into a typed config."""
 
@@ -479,6 +514,9 @@ def config_from_strings(
         strategy_id=strategy_id,
         dry_run=dry_run,
         runtime_mode=runtime_mode,
+        resolve_instruments=resolve_instruments,
+        require_resolved_instruments=require_resolved_instruments,
+        allow_unresolved=allow_unresolved,
     )
 
 
@@ -600,15 +638,15 @@ def _chunk_range(
     from_ts_utc: datetime,
     to_ts_utc: datetime,
     raw_interval: Timeframe,
-    chunk_days: int,
+    chunk_delta: timedelta,
 ) -> Iterable[HistoricalBackfillChunk]:
-    if chunk_days < 1:
-        msg = "chunk_days must be >= 1"
+    if chunk_delta <= timedelta(0):
+        msg = "chunk_delta must be positive"
         raise ValueError(msg)
     cursor = ensure_utc(from_ts_utc)
     end = ensure_utc(to_ts_utc)
     while cursor < end:
-        chunk_end = min(cursor + timedelta(days=chunk_days), end)
+        chunk_end = min(cursor + chunk_delta, end)
         yield HistoricalBackfillChunk(
             instrument=instrument,
             from_ts_utc=cursor,
@@ -616,6 +654,26 @@ def _chunk_range(
             raw_interval=raw_interval,
         )
         cursor = chunk_end
+
+
+def _broker_chunk_delta(
+    *,
+    raw_interval: Timeframe,
+    requested_chunk_days: int,
+) -> timedelta:
+    """Clamp chunks to T-Bank GetCandles interval limits."""
+
+    if requested_chunk_days < 1:
+        msg = "chunk_days must be >= 1"
+        raise ValueError(msg)
+    requested = timedelta(days=requested_chunk_days)
+    broker_limit = {
+        Timeframe.M1: timedelta(days=1),
+        Timeframe.M5: timedelta(days=7),
+        Timeframe.M10: timedelta(days=7),
+        Timeframe.M15: timedelta(days=21),
+    }[raw_interval]
+    return min(requested, broker_limit)
 
 
 def _quality_summary(
@@ -679,6 +737,7 @@ def _instrument_from_registry(row: InstrumentRegistry) -> InstrumentRef:
     return InstrumentRef(
         instrument_id=row.instrument_id,
         instrument_uid=row.instrument_uid,
+        figi=row.figi,
         class_code=row.class_code,
         ticker=row.ticker,
     )
@@ -691,8 +750,12 @@ def _ticker_for(instrument: InstrumentRef) -> str:
 
 
 def _looks_like_placeholder(instrument: InstrumentRef) -> bool:
-    value = (instrument.instrument_uid or instrument.instrument_id).lower()
-    return "placeholder" in value
+    value = (
+        instrument.instrument_uid
+        or instrument.figi
+        or instrument.instrument_id
+    ).lower()
+    return "placeholder" in value or "safe-noop" in value or "safe_noop" in value
 
 
 def count_market_candles(

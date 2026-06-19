@@ -21,7 +21,12 @@ from trade_core.corporate_actions.service import (
     CorporateActionService,
     MarketSpecialDayClassifier,
 )
-from trading_common import ServiceName
+from trade_core.instruments import (
+    InstrumentResolverService,
+    assert_resolved_for_broker_call,
+    is_broker_resolved_instrument,
+)
+from trading_common import LaunchModePolicy, RuntimeMode, ServiceName
 from trading_common.db.models import (
     AuditEvent,
     DividendSyncRun,
@@ -48,6 +53,10 @@ class DividendSyncConfig:
     gap_threshold_bps: Decimal = Decimal("150")
     dividend_gap_threshold_bps: Decimal = Decimal("50")
     exchange: str = "MOEX"
+    class_code: str = "TQBR"
+    runtime_mode: str = RuntimeMode.SHADOW.value
+    resolve_instruments: bool = True
+    require_resolved_instruments: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +105,10 @@ class DividendSyncResult:
     source: str = "api_import"
     real_orders_disabled: bool = True
     dry_run: bool = False
+    instruments_unresolved: int = 0
+    unresolved_instruments: tuple[JsonPayload, ...] = field(default_factory=tuple)
+    resolution_attempted: bool = False
+    instrument_resolution_status: str = "not_required"
     instruments: tuple[DividendSyncInstrumentResult, ...] = field(default_factory=tuple)
 
     def as_payload(self) -> JsonPayload:
@@ -120,6 +133,10 @@ class DividendSyncResult:
             "source": self.source,
             "real_orders_disabled": self.real_orders_disabled,
             "dry_run": self.dry_run,
+            "instruments_unresolved": self.instruments_unresolved,
+            "unresolved_instruments": list(self.unresolved_instruments),
+            "resolution_attempted": self.resolution_attempted,
+            "instrument_resolution_status": self.instrument_resolution_status,
             "instruments": [item.as_payload() for item in self.instruments],
         }
 
@@ -140,7 +157,7 @@ class DividendSyncService:
     async def run(self, config: DividendSyncConfig) -> DividendSyncResult:
         started_at = datetime.now(tz=UTC)
         from_date, to_date = dividend_sync_window(config)
-        instruments = self._resolve_instruments(config.instruments)
+        instruments, unresolved, resolution_attempted = await self._resolve_instruments(config)
         if config.force_rebuild and not config.dry_run:
             self._delete_api_import_dividends(
                 from_date=from_date,
@@ -159,6 +176,21 @@ class DividendSyncService:
         )
 
         instrument_results: list[DividendSyncInstrumentResult] = []
+        for item in unresolved:
+            instrument_results.append(
+                DividendSyncInstrumentResult(
+                    instrument_id=str(item.get("instrument_id") or ""),
+                    ticker=str(item.get("ticker") or "") or None,
+                    error_code=str(
+                        item.get("error_code")
+                        or "instrument_not_resolved_for_dividend_sync"
+                    ),
+                    error_message=str(
+                        item.get("error_message")
+                        or "Instrument is not resolved for T-Bank dividend sync."
+                    ),
+                )
+            )
         for instrument in instruments:
             instrument_results.append(
                 await self._sync_instrument(
@@ -195,7 +227,7 @@ class DividendSyncService:
         result = DividendSyncResult(
             from_date=from_date,
             to_date=to_date,
-            instruments_processed=len(instruments),
+            instruments_processed=len(instrument_results),
             successful_instruments=successful_instruments,
             failed_instruments=failed_instruments,
             dividends_fetched=sum(item.dividends_fetched for item in instrument_results),
@@ -209,6 +241,13 @@ class DividendSyncService:
             status=status,
             clean=clean,
             dry_run=config.dry_run,
+            instruments_unresolved=len(unresolved),
+            unresolved_instruments=tuple(unresolved),
+            resolution_attempted=resolution_attempted,
+            instrument_resolution_status=_instrument_resolution_status(
+                unresolved=unresolved,
+                attempted=resolution_attempted,
+            ),
             instruments=tuple(instrument_results),
         )
         self._persist_sync_run(
@@ -424,9 +463,15 @@ class DividendSyncService:
                 dates.add(value)
         return min(dates) if dates else None
 
-    def _resolve_instruments(self, instruments: tuple[str, ...]) -> tuple[InstrumentRef, ...]:
-        raw_values = instruments or DEFAULT_INSTRUMENTS
+    async def _resolve_instruments(
+        self,
+        config: DividendSyncConfig,
+    ) -> tuple[tuple[InstrumentRef, ...], tuple[JsonPayload, ...], bool]:
+        raw_values = config.instruments or DEFAULT_INSTRUMENTS
         refs: list[InstrumentRef] = []
+        unresolved: list[JsonPayload] = []
+        resolution_attempted = False
+        mode = RuntimeMode.HISTORICAL_REPLAY if config.dry_run else RuntimeMode(config.runtime_mode)
         for raw in raw_values:
             value = raw.strip()
             if not value:
@@ -436,24 +481,96 @@ class DividendSyncService:
             ).scalars().first()
             if row is None and ":" in value:
                 row = self._session.get(InstrumentRegistry, value)
-            if row is None:
-                refs.append(
-                    InstrumentRef(
-                        instrument_id=f"MOEX:{value.upper()}",
-                        ticker=value.upper(),
-                        class_code="TQBR",
+            if (
+                not config.dry_run
+                and config.resolve_instruments
+                and (row is None or not is_broker_resolved_instrument(row))
+            ):
+                resolution_attempted = True
+                try:
+                    resolved = await InstrumentResolverService(
+                        broker_gateway=self._gateway,
+                        session=self._session,
+                        launch_policy=LaunchModePolicy.from_mode(mode),
+                        exchange=config.exchange,
+                    ).resolve_startup_instruments(
+                        (
+                            InstrumentRef(
+                                instrument_id=(
+                                    row.instrument_id
+                                    if row is not None
+                                    else f"{config.exchange}:{value.upper()}"
+                                ),
+                                ticker=(row.ticker if row is not None else value.upper()),
+                                class_code=(
+                                    row.class_code if row is not None else config.class_code
+                                ),
+                            ),
+                        )
                     )
+                    row = self._session.execute(
+                        select(InstrumentRegistry).where(
+                            InstrumentRegistry.ticker == (resolved[0].ticker or value.upper())
+                        )
+                    ).scalars().first()
+                except Exception as exc:
+                    unresolved.append(
+                        {
+                            "instrument_id": row.instrument_id
+                            if row is not None
+                            else f"{config.exchange}:{value.upper()}",
+                            "ticker": row.ticker if row is not None else value.upper(),
+                            "error_code": "instrument_not_resolved_for_dividend_sync",
+                            "error_message": str(exc),
+                        }
+                    )
+                    continue
+            if row is None:
+                fallback = InstrumentRef(
+                    instrument_id=f"{config.exchange}:{value.upper()}",
+                    ticker=value.upper(),
+                    class_code=config.class_code,
                 )
+                if config.dry_run or not config.require_resolved_instruments:
+                    refs.append(fallback)
+                else:
+                    unresolved.append(
+                        {
+                            "instrument_id": fallback.instrument_id,
+                            "ticker": fallback.ticker,
+                            "error_code": "instrument_not_resolved_for_dividend_sync",
+                            "error_message": "No instrument_registry row exists after resolve.",
+                        }
+                    )
                 continue
-            refs.append(
-                InstrumentRef(
-                    instrument_id=row.instrument_id,
-                    instrument_uid=row.instrument_uid,
-                    ticker=row.ticker,
-                    class_code=row.class_code,
-                )
+            ref = InstrumentRef(
+                instrument_id=row.instrument_id,
+                instrument_uid=row.instrument_uid,
+                figi=row.figi,
+                ticker=row.ticker,
+                class_code=row.class_code,
             )
-        return tuple(dict.fromkeys(refs))
+            if not config.dry_run and config.require_resolved_instruments:
+                try:
+                    assert_resolved_for_broker_call(
+                        ref,
+                        mode=mode,
+                        operation_name="GetDividends",
+                    )
+                except RuntimeError as exc:
+                    unresolved.append(
+                        {
+                            "instrument_id": ref.instrument_id,
+                            "ticker": ref.ticker,
+                            "error_code": "instrument_not_resolved_for_dividend_sync",
+                            "error_message": str(exc),
+                        }
+                    )
+                    continue
+            refs.append(
+                ref
+            )
+        return tuple(dict.fromkeys(refs)), tuple(unresolved), resolution_attempted
 
     def _delete_api_import_dividends(
         self,
@@ -599,6 +716,18 @@ def _sync_status(
     if failed == processed:
         return "failed", False, errors
     return "completed_with_errors", False, errors
+
+
+def _instrument_resolution_status(
+    *,
+    unresolved: tuple[JsonPayload, ...],
+    attempted: bool,
+) -> str:
+    if unresolved:
+        return "unresolved"
+    if attempted:
+        return "resolved"
+    return "not_required"
 
 
 def _audit_action_for_result(result: DividendSyncResult) -> str:

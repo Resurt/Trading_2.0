@@ -116,3 +116,18 @@ docker compose ps
 python scripts/run_launch_readiness.py --mode historical-replay
 python scripts/run_launch_readiness.py --mode historical-final-calibration
 ```
+
+## Instrument Registry Gate
+
+Production preflight requires clean T-Bank instrument resolution:
+
+```powershell
+python scripts/run_tbank_instrument_resolve.py --instruments SBER,GAZP,LKOH --strict --json-output
+python scripts/run_launch_readiness.py --mode instrument-resolution
+python scripts/run_launch_readiness.py --mode production-preflight
+```
+
+Fail production if any enabled row in `instrument_registry` is still
+`source=seed`, `source=safe_noop`, `resolution_status!=resolved`, or has no
+`instrument_uid`/`figi`. `MOEX:*` is an internal canonical id and is never a valid
+broker id for real T-Bank calls.

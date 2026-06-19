@@ -430,6 +430,88 @@ def create_fastapi_app(
         with database.session_scope() as session:
             return HistoricalDataQualityService(session).build_report(config).as_payload()
 
+    @app.get("/instruments/registry", tags=["instruments"])
+    def instruments_registry(request: Request, auth: AuthDep) -> list[dict[str, Any]]:
+        from sqlalchemy import select
+
+        from trade_core.instruments import is_broker_resolved_instrument
+        from trading_common.db.models import InstrumentRegistry
+
+        require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
+        database = _database_service(request)
+        with database.session_scope() as session:
+            rows = session.execute(
+                select(InstrumentRegistry).order_by(InstrumentRegistry.ticker)
+            ).scalars()
+            return [
+                _instrument_registry_payload(row, is_broker_resolved_instrument(row))
+                for row in rows
+            ]
+
+    @app.get("/instruments/unresolved", tags=["instruments"])
+    def unresolved_instruments(request: Request, auth: AuthDep) -> list[dict[str, Any]]:
+        from sqlalchemy import select
+
+        from trade_core.instruments import is_broker_resolved_instrument
+        from trading_common.db.models import InstrumentRegistry
+
+        require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
+        database = _database_service(request)
+        with database.session_scope() as session:
+            rows = session.execute(
+                select(InstrumentRegistry)
+                .where(InstrumentRegistry.is_enabled.is_(True))
+                .order_by(InstrumentRegistry.ticker)
+            ).scalars()
+            return [
+                _instrument_registry_payload(row, False)
+                for row in rows
+                if not is_broker_resolved_instrument(row)
+            ]
+
+    @app.post("/instruments/resolve", tags=["instruments"])
+    def resolve_instruments(
+        request: Request,
+        auth: AuthDep,
+        payload: Annotated[dict[str, Any] | None, Body()] = None,
+    ) -> dict[str, Any]:
+        from trade_core.broker_gateway import InstrumentRef
+        from trade_core.infra.tbank import TBankBrokerGateway
+        from trade_core.instruments import InstrumentResolverService, is_broker_resolved_instrument
+        from trading_common import LaunchModePolicy, RuntimeMode
+
+        require_role(auth, (ApiRole.OPERATOR, ApiRole.ADMIN))
+        data = payload or {}
+        instruments = _split_csv(str(data.get("instruments", "SBER,GAZP")))
+        class_code = str(data.get("class_code", "TQBR"))
+        requested = tuple(
+            InstrumentRef(
+                instrument_id=f"MOEX:{ticker}",
+                ticker=ticker,
+                class_code=class_code,
+            )
+            for ticker in instruments
+        )
+        database = _database_service(request)
+        with database.session_scope() as session:
+            resolved = asyncio.run(
+                InstrumentResolverService(
+                    broker_gateway=TBankBrokerGateway(),
+                    session=session,
+                    launch_policy=LaunchModePolicy.from_mode(RuntimeMode.SHADOW),
+                    exchange="MOEX",
+                ).resolve_startup_instruments(requested)
+            )
+            return {
+                "source": "tbank_resolved",
+                "instruments_requested": len(instruments),
+                "instruments_resolved": len(resolved),
+                "ready_for_broker_calls": all(
+                    is_broker_resolved_instrument(item) for item in resolved
+                ),
+                "real_orders_disabled": True,
+            }
+
     @app.post("/corporate-actions/import", tags=["corporate-actions"])
     def corporate_actions_import(
         request: Request,
@@ -557,6 +639,7 @@ def create_fastapi_app(
             dividend_gap_threshold_bps=Decimal(
                 str(data.get("dividend_gap_threshold_bps", "50"))
             ),
+            runtime_mode=runtime_mode.value,
         )
         gateway = (
             SafeNoopBrokerGateway()
@@ -1122,6 +1205,28 @@ def _dividend_sync_status_payload(
         }
     )
     return payload
+
+
+def _instrument_registry_payload(row: Any, resolved: bool) -> dict[str, Any]:
+    return {
+        "instrument_id": row.instrument_id,
+        "ticker": row.ticker,
+        "class_code": row.class_code,
+        "source": row.source,
+        "resolution_status": row.resolution_status,
+        "resolved_at": row.resolved_at.isoformat() if row.resolved_at else None,
+        "instrument_uid_present": bool(row.instrument_uid),
+        "figi_present": bool(row.figi),
+        "lot_size": row.lot_size,
+        "min_price_increment": str(row.min_price_increment)
+        if row.min_price_increment is not None
+        else None,
+        "currency": row.currency,
+        "is_enabled": row.is_enabled,
+        "ready_for_broker_calls": resolved,
+        "resolution_error_code": row.resolution_error_code,
+        "resolution_error_message": row.resolution_error_message,
+    }
 
 
 def _dashboard_payload(app: FastAPI) -> dict[str, object]:

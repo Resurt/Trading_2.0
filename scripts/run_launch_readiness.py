@@ -86,6 +86,7 @@ def parse_args() -> argparse.Namespace:
             "production-preflight",
             "historical-replay",
             "historical-final-calibration",
+            "instrument-resolution",
         ),
         default="local",
     )
@@ -120,6 +121,8 @@ def run_mode(args: argparse.Namespace, env: Mapping[str, str]) -> list[GateResul
         return run_historical_replay(args)
     if args.mode == "historical-final-calibration":
         return run_historical_final_calibration(args)
+    if args.mode == "instrument-resolution":
+        return run_instrument_resolution(args)
     raise ValueError(args.mode)
 
 
@@ -230,6 +233,7 @@ def run_shadow(args: argparse.Namespace, env: Mapping[str, str]) -> list[GateRes
     results = [
         env_gate("shadow_mode_selected", env.get("TRADING_RUNTIME_MODE") == "shadow"),
         env_gate("shadow_no_real_orders", "TRADING_PRODUCTION_CONFIRM" not in env),
+        run_instrument_registry_gate(args),
         run_dividend_sync_status_gate(args, name="shadow_clean_dividend_sync"),
         env_gate(
             "dividend_calendar_fail_open_policy_known",
@@ -293,6 +297,7 @@ def run_production_preflight(args: argparse.Namespace, env: Mapping[str, str]) -
             ],
         ),
         run_compose_shared_db_gate(),
+        run_instrument_registry_gate(args),
         run_no_placeholder_instrument_gate(),
         run_secret_scan_gate(),
     ]
@@ -469,6 +474,7 @@ def run_historical_final_calibration(args: argparse.Namespace) -> list[GateResul
         )
     )
     return [
+        run_instrument_registry_gate(args),
         run_dividend_sync_status_gate(
             args,
             name="historical_final_clean_dividend_sync",
@@ -533,6 +539,38 @@ def run_historical_final_calibration(args: argparse.Namespace) -> list[GateResul
             details={"post_order": "disabled", "cancel_order": "disabled"},
         ),
         run_secret_scan_gate(),
+    ]
+
+
+def run_instrument_resolution(args: argparse.Namespace) -> list[GateResult]:
+    command = [
+        sys.executable,
+        "scripts/run_tbank_instrument_resolve.py",
+        "--instruments",
+        args.instruments,
+        "--json-output",
+    ]
+    if args.dry_run:
+        command.append("--dry-run")
+    else:
+        command.append("--strict")
+    return [
+        run_cmd(
+            "tbank_sdk_import_check",
+            [sys.executable, "scripts/run_tbank_sdk_import_check.py"],
+        ),
+        run_json_cmd_gate(
+            "instrument_resolve",
+            command,
+            expected={"ready_for_broker_calls": True},
+        ),
+        run_instrument_registry_gate(args, allow_empty=args.dry_run),
+        GateResult(
+            name="instrument_resolution_no_real_orders",
+            passed=True,
+            command="readonly instrument resolve",
+            details={"post_order": "disabled", "cancel_order": "disabled"},
+        ),
     ]
 
 
@@ -700,6 +738,76 @@ def run_dividend_sync_status_gate(
         passed=passed,
         command="select latest dividend_sync_run",
         details={**payload, "checked_at": datetime.now(tz=UTC).isoformat()},
+    )
+
+
+def run_instrument_registry_gate(
+    args: argparse.Namespace,
+    *,
+    allow_empty: bool = False,
+) -> GateResult:
+    if allow_empty:
+        return GateResult(
+            name="instrument_registry_resolved",
+            passed=True,
+            command="dry-run registry check skipped",
+            details={"status": "skipped_for_dry_run"},
+        )
+    try:
+        from trade_core.instruments import is_broker_resolved_instrument
+        from trading_common.db.config import build_database_url_from_env
+        from trading_common.db.models import InstrumentRegistry
+        from trading_common.db.service import DatabaseService
+
+        database = DatabaseService(build_database_url_from_env())
+        try:
+            with database.session_scope() as session:
+                requested = {
+                    item.strip().upper()
+                    for item in args.instruments.split(",")
+                    if item.strip()
+                }
+                rows = (
+                    session.query(InstrumentRegistry)
+                    .filter(InstrumentRegistry.is_enabled.is_(True))
+                    .all()
+                )
+                scoped_rows = [
+                    row for row in rows if not requested or row.ticker.upper() in requested
+                ]
+                unresolved = [
+                    {
+                        "instrument_id": row.instrument_id,
+                        "ticker": row.ticker,
+                        "source": row.source,
+                        "resolution_status": row.resolution_status,
+                        "instrument_uid_present": bool(row.instrument_uid),
+                        "figi_present": bool(row.figi),
+                        "resolution_error_code": row.resolution_error_code,
+                        "resolution_error_message": row.resolution_error_message,
+                    }
+                    for row in scoped_rows
+                    if not is_broker_resolved_instrument(row)
+                ]
+        finally:
+            database.engine.dispose()
+    except Exception as exc:
+        return GateResult(
+            name="instrument_registry_resolved",
+            passed=False,
+            command="select instrument_registry",
+            details={"error_code": type(exc).__name__, "error_message": str(exc)},
+        )
+    passed = (allow_empty and not scoped_rows) or (bool(scoped_rows) and not unresolved)
+    return GateResult(
+        name="instrument_registry_resolved",
+        passed=passed,
+        command="select instrument_registry",
+        details={
+            "requested_instruments": sorted(requested),
+            "row_count": len(scoped_rows),
+            "unresolved_enabled_instruments": unresolved,
+        },
     )
 
 

@@ -351,3 +351,15 @@ Default policy is fail-closed for shadow/production when the dividend calendar i
 `TRADING_DIVIDEND_SYNC_FAIL_OPEN=false`. Future dividend windows and ex-date gap days are
 `shadow_only`/entry-blocked by default. Shorts are blocked separately in dividend windows because
 borrow, margin and dividend liability assumptions must be confirmed before live use.
+
+## Instrument Identity Preconditions
+
+Risk and execution receive internal canonical `instrument_id` values such as
+`MOEX:SBER`, but real broker calls require resolved T-Bank `instrument_uid` or
+`figi`. `trade-core` resolves instruments before dividend sync, market data
+streams, historical real backfill and order placement.
+
+If an enabled instrument remains `source=seed` / `resolution_status=unresolved`
+in sandbox/shadow/production, startup/readiness must fail before strategy/risk can
+approve an entry. This avoids treating `MOEX:*` as a broker id and prevents
+misleading `NOT_FOUND` broker errors during calibration.

@@ -54,7 +54,11 @@ from trade_core.infra.tbank import (
     load_tbank_tokens_for_launch,
 )
 from trade_core.infra.tbank.sdk_clients import load_tbank_sdk
-from trade_core.instruments import InstrumentResolverService
+from trade_core.instruments import (
+    InstrumentResolverService,
+    assert_resolved_for_broker_call,
+    is_broker_resolved_instrument,
+)
 from trade_core.market_data import (
     Bar,
     BarEngine,
@@ -1401,17 +1405,97 @@ class TradeCoreRuntime:
         return tuple(session.execute(stmt).scalars())
 
     async def _resolve_runtime_instruments(self) -> None:
+        self._write_audit_event(
+            action="instrument_resolution_started",
+            severity="info",
+            payload={
+                "mode": self.launch_policy.mode.value,
+                "requested_instruments": [
+                    {
+                        "instrument_id": instrument.instrument_id,
+                        "ticker": instrument.ticker,
+                        "instrument_uid_present": bool(instrument.instrument_uid),
+                    }
+                    for instrument in self.config.instruments
+                ],
+            },
+        )
         resolver = InstrumentResolverService(
             broker_gateway=self.broker_gateway,
             session=self._require_session(),
             launch_policy=self.launch_policy,
             exchange=self.config.exchange,
         )
-        resolved = await resolver.resolve_startup_instruments(self.config.instruments)
+        try:
+            resolved = await resolver.resolve_startup_instruments(self.config.instruments)
+            for instrument in resolved:
+                assert_resolved_for_broker_call(
+                    instrument,
+                    mode=self.launch_policy.mode,
+                    operation_name="runtime_startup",
+                )
+        except Exception as exc:
+            self._write_audit_event(
+                action="instrument_resolution_failed",
+                severity="error",
+                payload={
+                    "mode": self.launch_policy.mode.value,
+                    "error_code": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+            )
+            self._write_audit_event(
+                action="unresolved_instrument_blocked_startup",
+                severity="error",
+                payload={
+                    "mode": self.launch_policy.mode.value,
+                    "reason_code": "instrument_not_resolved_for_broker_call",
+                },
+            )
+            raise
+        unresolved = [
+            {
+                "instrument_id": instrument.instrument_id,
+                "ticker": instrument.ticker,
+                "instrument_uid_present": bool(instrument.instrument_uid),
+                "figi_present": bool(instrument.figi),
+            }
+            for instrument in resolved
+            if not is_broker_resolved_instrument(instrument)
+        ]
+        if unresolved and self.launch_policy.mode is not RuntimeMode.HISTORICAL_REPLAY:
+            self._write_audit_event(
+                action="unresolved_instrument_blocked_startup",
+                severity="error",
+                payload={
+                    "mode": self.launch_policy.mode.value,
+                    "unresolved_instruments": unresolved,
+                    "reason_code": "instrument_not_resolved_for_broker_call",
+                },
+            )
+            msg = f"unresolved instruments block startup: {unresolved}"
+            raise RuntimeError(msg)
         self.config = replace(self.config, instruments=resolved)
         setter = getattr(self.broker_gateway, "set_market_stream_instruments", None)
         if callable(setter):
             setter(resolved)
+        self._write_audit_event(
+            action="instrument_resolution_completed",
+            severity="info",
+            payload={
+                "mode": self.launch_policy.mode.value,
+                "instrument_count": len(resolved),
+                "instruments": [
+                    {
+                        "instrument_id": instrument.instrument_id,
+                        "ticker": instrument.ticker,
+                        "instrument_uid_present": bool(instrument.instrument_uid),
+                        "figi_present": bool(instrument.figi),
+                    }
+                    for instrument in resolved
+                ],
+            },
+        )
         self.flush_domain_events()
 
     async def _sync_dividend_calendar_if_due(self, *, force: bool = False) -> None:
@@ -1441,6 +1525,7 @@ class TradeCoreRuntime:
                     force_rebuild=False,
                     classify_special_days=True,
                     exchange=self.config.exchange,
+                    runtime_mode=self.launch_policy.mode.value,
                 )
             )
             self._last_dividend_sync_at = now

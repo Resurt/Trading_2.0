@@ -12,6 +12,7 @@ import type {
   HistoricalQualityResponse,
   HistoricalRunResponse,
   HourlyReportResponse,
+  InstrumentRegistryResponse,
   MarketOverviewResponse,
   MarketSpecialDayClassificationResponse,
   MarketSpecialDayResponse,
@@ -138,6 +139,16 @@ export const apiClient = {
     requestJson<CanceledOrderDiagnosticsResponse>(withQuery("/analytics/canceled-orders", query)),
   historicalDataQuality: (query: Record<string, QueryValue>) =>
     requestJson<HistoricalQualityResponse>(withQuery("/historical/data-quality", query)),
+  instrumentsRegistry: () =>
+    requestJson<InstrumentRegistryResponse[]>("/instruments/registry"),
+  unresolvedInstruments: () =>
+    requestJson<InstrumentRegistryResponse[]>("/instruments/unresolved"),
+  resolveInstruments: (payload: Record<string, unknown>) =>
+    requestJson<Record<string, unknown>>(
+      "/instruments/resolve",
+      { method: "POST", body: JSON.stringify(payload) },
+      "operator",
+    ),
   corporateActions: (query: Record<string, QueryValue>) =>
     requestJson<CorporateActionResponse[]>(withQuery("/corporate-actions", query)),
   dividends: (query: Record<string, QueryValue>) =>

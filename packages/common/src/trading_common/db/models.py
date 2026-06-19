@@ -84,6 +84,16 @@ class InstrumentRegistry(Base, TimestampMixin):
     supports_morning: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     supports_evening: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     supports_weekend: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    source: Mapped[str] = mapped_column(String(32), nullable=False, default="seed")
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resolution_status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="unresolved",
+    )
+    resolution_error_code: Mapped[str | None] = mapped_column(String(128))
+    resolution_error_message: Mapped[str | None] = mapped_column(String(1024))
+    broker_payload: Mapped[JsonPayload | None] = mapped_column(JSONB_TYPE)
     instrument_payload: Mapped[JsonPayload] = mapped_column(
         JSONB_TYPE,
         nullable=False,

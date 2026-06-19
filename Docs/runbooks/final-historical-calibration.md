@@ -86,4 +86,22 @@ Historical candles не калибруют:
 - `partial_fills`;
 - `latency`.
 
+## Instrument Resolution Gate
+
+Final historical calibration requires broker-resolved instruments even though
+replay itself does not place real orders. Dividend sync and real historical
+backfill both call readonly T-Bank methods.
+
+Run before final calibration:
+
+```powershell
+python scripts/run_tbank_instrument_resolve.py --instruments SBER,GAZP,LKOH --strict --json-output
+python scripts/run_launch_readiness.py --mode instrument-resolution
+```
+
+The readiness gate fails if any requested enabled row in `instrument_registry`
+has `source=seed`, `resolution_status!=resolved`, and no `instrument_uid`/`figi`.
+Clean calibration is not allowed while GetDividends/GetCandles would use
+`MOEX:*` as a broker id.
+
 Эти параметры требуют shadow live calibration.

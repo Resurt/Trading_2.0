@@ -133,6 +133,28 @@ make market-special-days
 make market-special-days-future
 ```
 
+## Instrument Resolution Prerequisite
+
+Dividend sync is readonly, but it is still a real T-Bank broker call. It must not
+send internal ids such as `MOEX:SBER` to `GetDividends`.
+
+Before real dividend sync:
+
+```powershell
+python scripts/run_tbank_instrument_resolve.py --instruments SBER,GAZP,LKOH --strict --json-output
+python scripts/run_launch_readiness.py --mode instrument-resolution
+```
+
+Expected state in `instrument_registry`:
+
+- `instrument_id` remains canonical, for example `MOEX:SBER`;
+- `instrument_uid` or `figi` is present;
+- `source=tbank_resolved`;
+- `resolution_status=resolved`.
+
+`source=seed` / `resolution_status=unresolved` is allowed only for local or
+historical dry-run. It is not clean for final calibration, shadow or production.
+
 ## Definition Of Done
 
 - `corporate_action_event` заполнена по нужным инструментам через `source=api_import`

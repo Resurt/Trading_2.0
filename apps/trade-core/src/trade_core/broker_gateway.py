@@ -18,6 +18,7 @@ class InstrumentRef:
 
     instrument_id: str
     instrument_uid: str | None = None
+    figi: str | None = None
     class_code: str | None = None
     ticker: str | None = None
 

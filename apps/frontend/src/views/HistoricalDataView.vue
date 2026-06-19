@@ -7,6 +7,7 @@ import type {
   DividendSyncStatusResponse,
   HistoricalQualityResponse,
   HistoricalRunResponse,
+  InstrumentRegistryResponse,
   MarketSpecialDayClassificationResponse,
   MarketSpecialDayResponse,
 } from "../api/types";
@@ -28,6 +29,8 @@ const futureSpecialDays = ref<MarketSpecialDayResponse[]>([]);
 const classification = ref<MarketSpecialDayClassificationResponse | null>(null);
 const dividendSyncStatus = ref<DividendSyncStatusResponse | null>(null);
 const dividendSyncSummary = ref<Record<string, unknown> | null>(null);
+const instrumentRegistry = ref<InstrumentRegistryResponse[]>([]);
+const instrumentResolveSummary = ref<Record<string, unknown> | null>(null);
 
 const sourceBars = computed(() =>
   Object.entries(quality.value?.source_distribution ?? {}).map(([label, value]) => ({
@@ -71,6 +74,17 @@ async function runQuality() {
       lookback_days: Math.max(lookbackDays.value, 730),
       instruments: instruments.value,
     });
+    instrumentRegistry.value = await apiClient.instrumentsRegistry();
+  });
+}
+
+async function resolveInstruments() {
+  await withLoading(async () => {
+    instrumentResolveSummary.value = await apiClient.resolveInstruments({
+      instruments: instruments.value,
+      class_code: "TQBR",
+    });
+    instrumentRegistry.value = await apiClient.instrumentsRegistry();
   });
 }
 
@@ -200,6 +214,10 @@ async function withLoading(action: () => Promise<void>) {
             <RefreshCw :size="16" aria-hidden="true" />
             <span>Dividend sync dry-run</span>
           </button>
+          <button class="icon-button" type="button" :disabled="loading" @click="resolveInstruments">
+            <RefreshCw :size="16" aria-hidden="true" />
+            <span>Resolve T-Bank instruments</span>
+          </button>
           <button class="icon-button" type="button" :disabled="loading" @click="syncDividends(false)">
             <RefreshCw :size="16" aria-hidden="true" />
             <span>Sync T-Bank dividends</span>
@@ -240,6 +258,46 @@ async function withLoading(action: () => Promise<void>) {
     </div>
 
     <div class="reports-grid">
+      <DataPanel>
+        <template #eyebrow>instruments</template>
+        <template #title>Registry readiness</template>
+        <dl class="definition-grid">
+          <dt>ready</dt>
+          <dd>{{ instrumentRegistry.filter((item) => item.ready_for_broker_calls).length }}/{{ instrumentRegistry.length }}</dd>
+          <dt>last resolve</dt>
+          <dd>{{ instrumentResolveSummary?.source ?? "-" }}</dd>
+        </dl>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>ticker</th>
+                <th>source</th>
+                <th>status</th>
+                <th>uid</th>
+                <th>figi</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="item in instrumentRegistry" :key="item.instrument_id">
+                <td>{{ item.ticker }}</td>
+                <td>{{ item.source }}</td>
+                <td>{{ item.resolution_status }}</td>
+                <td>{{ item.instrument_uid_present ? "present" : "missing" }}</td>
+                <td>{{ item.figi_present ? "present" : "missing" }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <EmptyState v-if="instrumentRegistry.length === 0" title="No registry rows loaded" />
+        </div>
+        <EmptyState
+          v-if="instrumentRegistry.some((item) => !item.ready_for_broker_calls)"
+          title="Unresolved enabled instruments"
+          detail="Resolve T-Bank instruments before dividend sync, real backfill, shadow or production."
+          tone="warn"
+        />
+      </DataPanel>
+
       <DataPanel>
         <template #eyebrow>corporate actions</template>
         <template #title>Special-day classification</template>

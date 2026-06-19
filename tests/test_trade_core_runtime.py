@@ -205,7 +205,11 @@ def test_runtime_does_not_call_post_order_in_replay_or_shadow(
     tmp_path: Path,
     mode: RuntimeMode,
 ) -> None:
-    gateway = SafeNoopBrokerGateway(now=msk(2026, 6, 12, 10))
+    gateway: SafeNoopBrokerGateway = (
+        ResolvingGateway(now=msk(2026, 6, 12, 10))
+        if mode is RuntimeMode.SHADOW
+        else SafeNoopBrokerGateway(now=msk(2026, 6, 12, 10))
+    )
     runtime = build_runtime(tmp_path, mode=mode, gateway=gateway)
 
     asyncio.run(_run_candidate_path(runtime))
@@ -258,10 +262,14 @@ def test_runtime_resolves_default_instruments_for_shadow_streams(
 
     assert gateway.resolve_calls[0].tickers == ("SBER", "GAZP")
     assert tuple(instrument.instrument_id for instrument in runtime.config.instruments) == (
+        "MOEX:SBER",
+        "MOEX:GAZP",
+    )
+    assert tuple(instrument.instrument_uid for instrument in runtime.config.instruments) == (
         "uid-sber",
         "uid-gazp",
     )
-    assert tuple(instrument.instrument_id for instrument in gateway.stream_instruments) == (
+    assert tuple(instrument.instrument_uid for instrument in gateway.stream_instruments) == (
         "uid-sber",
         "uid-gazp",
     )
@@ -270,9 +278,11 @@ def test_runtime_resolves_default_instruments_for_shadow_streams(
             select(InstrumentRegistry).order_by(InstrumentRegistry.ticker)
         ).scalars()
         registry = {row.ticker: row for row in rows}
-    assert registry["SBER"].instrument_id == "uid-sber"
+    assert registry["SBER"].instrument_id == "MOEX:SBER"
     assert registry["SBER"].instrument_uid == "uid-sber"
-    assert registry["GAZP"].instrument_id == "uid-gazp"
+    assert registry["SBER"].source == "tbank_resolved"
+    assert registry["SBER"].resolution_status == "resolved"
+    assert registry["GAZP"].instrument_id == "MOEX:GAZP"
     asyncio.run(runtime.shutdown())
 
 

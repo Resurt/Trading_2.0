@@ -147,6 +147,7 @@ recommendation `run_market_special_day_classification_before_final_calibration`.
 Before final calibration run broker dividend sync and special-day classification:
 
 ```powershell
+python scripts/run_tbank_instrument_resolve.py --instruments SBER,GAZP,LKOH --strict --json-output
 python scripts/run_tbank_dividend_sync.py --lookback-days 730 --lookahead-days 365 --json-output
 python scripts/run_market_special_day_classification.py --lookback-days 730 --include-future --lookahead-days 365 --require-dividend-sync --json-output
 ```
@@ -155,3 +156,6 @@ Manual CSV/JSON corporate actions are fallback/override only. If there are no
 `source=api_import` dividend events, primary calibration must show
 `manual_corporate_actions_only` or `dividend_sync_missing` and is not final unless the
 operator explicitly allows manual corporate actions.
+
+Clean calibration is also blocked if enabled instruments are unresolved in
+`instrument_registry`. `MOEX:*` ids are internal analytics ids, not broker ids.

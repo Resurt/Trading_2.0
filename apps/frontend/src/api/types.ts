@@ -417,6 +417,24 @@ export interface DividendSyncStatusResponse {
   last_sync_payload: JsonPayload;
 }
 
+export interface InstrumentRegistryResponse {
+  instrument_id: string;
+  ticker: string;
+  class_code: string;
+  source: string;
+  resolution_status: string;
+  resolved_at: string | null;
+  instrument_uid_present: boolean;
+  figi_present: boolean;
+  lot_size: number;
+  min_price_increment: string | null;
+  currency: string;
+  is_enabled: boolean;
+  ready_for_broker_calls: boolean;
+  resolution_error_code: string | null;
+  resolution_error_message: string | null;
+}
+
 export interface MarketSpecialDayResponse {
   special_day_id: string;
   trading_date: string;

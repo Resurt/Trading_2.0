@@ -130,6 +130,10 @@ def seed_database(database: DatabaseService) -> None:
                     supports_morning=True,
                     supports_evening=True,
                     supports_weekend=False,
+                    source="tbank_resolved",
+                    resolved_at=now,
+                    resolution_status="resolved",
+                    broker_payload={"source": "test"},
                     instrument_payload={},
                 ),
                 SessionRun(
@@ -760,6 +764,68 @@ def test_dividend_sync_status_endpoint_returns_unclean_latest_run(tmp_path: Path
     assert payload["error_count"] == 1
     assert payload["ready_for_shadow"] is False
     assert payload["ready_for_production"] is False
+
+
+def test_instrument_registry_api_and_resolve_roles(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import trade_core.infra.tbank as tbank_module
+    from trade_core.broker_gateway import BrokerUnaryResponse, InstrumentResolveRequest
+
+    class FakeResolveGateway:
+        async def resolve_instruments(
+            self,
+            request: InstrumentResolveRequest,
+            metadata: object | None = None,
+        ) -> BrokerUnaryResponse:
+            del metadata
+            return BrokerUnaryResponse(
+                method_name="ResolveInstruments",
+                data={
+                    "instruments": [
+                        {
+                            "instrument_id": "uid-sber",
+                            "instrument_uid": "uid-sber",
+                            "figi": "figi-sber",
+                            "ticker": "SBER",
+                            "class_code": request.class_code,
+                            "name": "SBER",
+                            "lot_size": 10,
+                            "min_price_increment": "0.01",
+                            "currency": "RUB",
+                            "api_trade_available": True,
+                            "short_available": True,
+                            "supports_weekend": False,
+                        }
+                    ]
+                },
+                headers={},
+            )
+
+    monkeypatch.setattr(tbank_module, "TBankBrokerGateway", FakeResolveGateway)
+    client = make_client(tmp_path)
+
+    registry = client.get(
+        "/instruments/registry",
+        headers={"X-API-Role": "observer"},
+    )
+    forbidden = client.post(
+        "/instruments/resolve",
+        headers={"X-API-Role": "observer"},
+        json={"instruments": "SBER"},
+    )
+    resolved = client.post(
+        "/instruments/resolve",
+        headers={"X-API-Role": "operator"},
+        json={"instruments": "SBER"},
+    )
+
+    assert registry.status_code == 200
+    assert registry.json()[0]["resolution_status"] == "resolved"
+    assert forbidden.status_code == 403
+    assert resolved.status_code == 200
+    assert resolved.json()["ready_for_broker_calls"] is True
 
 
 def test_production_auth_rejects_role_header_without_bearer(

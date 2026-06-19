@@ -83,6 +83,9 @@ async def async_main() -> None:
                 strategy_id=args.strategy_id,
                 dry_run=args.dry_run,
                 runtime_mode=runtime_mode.value,
+                resolve_instruments=args.resolve_instruments,
+                require_resolved_instruments=args.require_resolved_instruments,
+                allow_unresolved=args.allow_unresolved,
             )
             result = await service.run(
                 config,
@@ -108,7 +111,14 @@ async def async_main() -> None:
                     "run report rebuild/counterfactual after replay creates candidates",
                 ],
             }
-        print(json.dumps(payload, ensure_ascii=False, indent=2, default=json_default))
+        print(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                indent=2 if args.json_output else None,
+                default=json_default,
+            )
+        )
     finally:
         database.engine.dispose()
 
@@ -133,6 +143,22 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--json-output", action="store_true")
+    parser.add_argument(
+        "--resolve-instruments",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument(
+        "--require-resolved-instruments",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument(
+        "--allow-unresolved",
+        action="store_true",
+        help="Allow seed/internal instrument IDs; intended only for dry-run/local smoke.",
+    )
     parser.add_argument(
         "--create-schema",
         action=argparse.BooleanOptionalAction,

@@ -869,6 +869,29 @@ def test_sdk_unary_get_dividends_maps_sdk_payload() -> None:
     assert isinstance(dividend["raw_payload"], dict)
 
 
+def test_sdk_unary_rejects_internal_moex_id_without_broker_identity() -> None:
+    services = FakeServices()
+    client = TBankSdkUnaryClient(
+        config=config(),
+        sdk_module=fake_sdk(),
+        services_factory=services_factory(services),
+    )
+
+    with pytest.raises(ValueError, match="resolved instrument_uid or figi"):
+        asyncio.run(
+            client.call_unary(
+                "GetDividends",
+                {
+                    "instrument": {"instrument_id": "MOEX:SBER", "ticker": "SBER"},
+                    "from": datetime(2026, 1, 1, tzinfo=UTC).isoformat(),
+                    "to": datetime(2026, 12, 31, tzinfo=UTC).isoformat(),
+                },
+                metadata=(("authorization", "Bearer token"),),
+                timeout_seconds=0.1,
+            )
+        )
+
+
 def test_sdk_unary_maps_portfolio_positions_and_accounts_payload_shapes() -> None:
     services = FakeServices()
     client = TBankSdkUnaryClient(

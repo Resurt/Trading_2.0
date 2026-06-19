@@ -225,3 +225,18 @@ docker compose logs -f --tail=200
 - Prometheus: `http://localhost:9090`
 - Grafana: `http://localhost:3000`
 - Loki: `http://localhost:3100/ready`
+
+## Instrument Resolution
+
+Before real readonly dividend sync, historical candle backfill, shadow or
+production, resolve internal canonical instruments to T-Bank `instrument_uid` /
+`figi`:
+
+```powershell
+python scripts/run_tbank_instrument_resolve.py --instruments SBER,GAZP,LKOH --strict --json-output
+python scripts/run_launch_readiness.py --mode instrument-resolution
+```
+
+`MOEX:SBER` and `MOEX:GAZP` remain internal canonical ids for analytics and
+reports. They are not broker ids and must not be sent to `GetDividends`,
+`GetCandles`, streams or order placement in sandbox/shadow/production.

@@ -571,6 +571,7 @@ class HistoricalDbReplayService:
         return InstrumentRef(
             instrument_id=row.instrument_id,
             instrument_uid=row.instrument_uid,
+            figi=row.figi,
             ticker=row.ticker,
             class_code=row.class_code,
         )

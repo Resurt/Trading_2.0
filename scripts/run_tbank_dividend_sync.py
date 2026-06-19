@@ -23,14 +23,17 @@ for src in (
 from trade_core.corporate_actions import DividendSyncConfig, DividendSyncService  # noqa: E402
 from trade_core.infra.tbank import TBankBrokerGateway  # noqa: E402
 from trade_core.runtime import SafeNoopBrokerGateway  # noqa: E402
+from trading_common import RuntimeMode, parse_runtime_mode  # noqa: E402
+from trading_common.db.base import Base  # noqa: E402
 from trading_common.db.config import build_database_url_from_env  # noqa: E402
 from trading_common.db.service import DatabaseService  # noqa: E402
 
 
 def main() -> None:
     args = parse_args()
-    database = DatabaseService(args.database_url or build_database_url_from_env())
+    database = DatabaseService(_database_url(args.database_url, dry_run=args.dry_run))
     broker_gateway = SafeNoopBrokerGateway() if args.dry_run else TBankBrokerGateway()
+    runtime_mode = _runtime_mode(args.runtime_mode, dry_run=args.dry_run)
     config = DividendSyncConfig(
         instruments=split_csv(args.instruments),
         from_date=args.from_date,
@@ -42,8 +45,13 @@ def main() -> None:
         classify_special_days=args.classify_special_days,
         gap_threshold_bps=args.gap_threshold_bps,
         dividend_gap_threshold_bps=args.dividend_gap_threshold_bps,
+        runtime_mode=runtime_mode.value,
+        resolve_instruments=args.resolve_instruments,
+        require_resolved_instruments=args.require_resolved_instruments,
     )
     try:
+        if args.dry_run:
+            Base.metadata.create_all(database.engine)
         with database.session_scope() as session:
             result = asyncio.run(
                 DividendSyncService(
@@ -69,6 +77,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--force-rebuild", action="store_true")
     parser.add_argument("--allow-partial", action="store_true")
+    parser.add_argument("--runtime-mode", default=None)
+    parser.add_argument(
+        "--resolve-instruments",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument(
+        "--require-resolved-instruments",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     parser.add_argument(
         "--classify-special-days",
         dest="classify_special_days",
@@ -92,6 +111,20 @@ def parse_date(raw: str) -> date:
 
 def split_csv(raw: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in raw.split(",") if item.strip())
+
+
+def _runtime_mode(value: str | None, *, dry_run: bool) -> RuntimeMode:
+    if value:
+        return parse_runtime_mode(value)
+    return RuntimeMode.HISTORICAL_REPLAY if dry_run else RuntimeMode.SHADOW
+
+
+def _database_url(value: str | None, *, dry_run: bool) -> str:
+    if value:
+        return value
+    if dry_run:
+        return "sqlite+pysqlite:///:memory:"
+    return build_database_url_from_env()
 
 
 def _exit_code(payload: dict[str, object], *, allow_partial: bool) -> int:

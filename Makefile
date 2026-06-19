@@ -9,8 +9,9 @@ LOOKAHEAD_DAYS ?= 365
 INSTRUMENTS ?= SBER,GAZP
 TIMEFRAMES ?= 5m,10m,15m
 CORPORATE_ACTIONS_FILE ?= data/corporate_actions/sample_dividends.csv
+CLASS_CODE ?= TQBR
 
-.PHONY: lint test up down logs frontend-build migrate migrate-down replay-smoke sandbox-smoke historical-backfill-dry-run historical-quality historical-replay historical-counterfactual historical-report-rebuild calibration-report corporate-actions-import dividend-sync dividend-sync-730d market-special-days market-special-days-future calibration-primary calibration-special-days historical-replay-clean analytics-smoke report-rebuild replay-day controlled-launch-acceptance launch-readiness observability-up report-worker-smoke celery-inspect
+.PHONY: lint test up down logs frontend-build migrate migrate-down replay-smoke sandbox-smoke historical-backfill-dry-run historical-quality historical-replay historical-counterfactual historical-report-rebuild calibration-report corporate-actions-import instrument-resolve instrument-resolution-check dividend-sync dividend-sync-730d market-special-days market-special-days-future calibration-primary calibration-special-days historical-replay-clean analytics-smoke report-rebuild replay-day controlled-launch-acceptance launch-readiness observability-up report-worker-smoke celery-inspect
 
 lint:
 	$(PYTHON) -m ruff check .
@@ -63,6 +64,12 @@ calibration-report:
 
 corporate-actions-import:
 	$(PYTHON) scripts/run_corporate_actions_import.py --file $(CORPORATE_ACTIONS_FILE) --source manual --json-output
+
+instrument-resolve:
+	$(PYTHON) scripts/run_tbank_instrument_resolve.py --instruments $(INSTRUMENTS) --class-code $(CLASS_CODE) --strict --json-output
+
+instrument-resolution-check:
+	$(PYTHON) scripts/run_launch_readiness.py --mode instrument-resolution --instruments $(INSTRUMENTS)
 
 dividend-sync:
 	$(PYTHON) scripts/run_tbank_dividend_sync.py --lookback-days $(LOOKBACK_DAYS) --lookahead-days $(LOOKAHEAD_DAYS) --instruments $(INSTRUMENTS) --json-output

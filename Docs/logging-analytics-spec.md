@@ -1058,3 +1058,23 @@ Calibration report payload includes:
 Technical JSON logs are not the analytics source of truth. Dividend sync, special days,
 replay decisions, blockers and calibration facts must be persisted in PostgreSQL domain
 tables and report payloads.
+
+## Instrument Resolution Events
+
+`instrument_registry` stores broker-resolution state for every enabled instrument.
+The internal `instrument_id` remains stable (`MOEX:SBER`), while real T-Bank calls
+use `instrument_uid`/`figi`.
+
+Runtime and readiness should emit/write these audit events:
+
+- `instrument_resolution_started`;
+- `instrument_resolution_completed`;
+- `instrument_resolution_failed`;
+- `unresolved_instrument_blocked_startup`.
+
+Machine-readable failure code:
+
+- `instrument_not_resolved_for_broker_call`.
+
+This code must be present when dividend sync, historical backfill, market streams
+or order placement would otherwise send an internal `MOEX:*` id to T-Bank.

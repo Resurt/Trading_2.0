@@ -112,3 +112,17 @@ Dividend sync must be recent before shadow. Primary source is T-Bank `GetDividen
 manual CSV/JSON is fallback only. If `TRADING_DIVIDEND_SYNC_FAIL_OPEN=false` and the
 broker dividend calendar is unavailable, `trade-core` should enter degraded/fail-closed
 behaviour for new entries. Future dividend windows are shadow-only by default.
+
+## Instrument Registry Before Shadow
+
+Shadow uses live readonly broker data. Before starting shadow:
+
+```powershell
+python scripts/run_tbank_instrument_resolve.py --instruments SBER,GAZP,LKOH --strict --json-output
+python scripts/run_launch_readiness.py --mode instrument-resolution
+python scripts/run_launch_readiness.py --mode shadow
+```
+
+Shadow is not ready if any enabled instrument remains `source=seed` /
+`resolution_status=unresolved`, or if `instrument_uid`/`figi` is missing. Internal
+`MOEX:*` ids stay canonical for analytics, but they must not be sent to T-Bank.
