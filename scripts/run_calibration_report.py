@@ -14,6 +14,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 for src in (
     ROOT,
+    ROOT / "apps" / "trade-core" / "src",
     ROOT / "apps" / "report-worker" / "src",
     ROOT / "packages" / "common" / "src",
 ):
@@ -50,6 +51,7 @@ def main() -> None:
         include_abnormal_gap_days=args.include_abnormal_gap_days,
         require_special_day_classification=args.require_special_day_classification,
         allow_manual_corporate_actions=args.allow_manual_corporate_actions,
+        max_dividend_sync_age_hours=args.max_dividend_sync_age_hours,
     )
     database = DatabaseService(args.database_url or build_database_url_from_env())
     try:
@@ -87,6 +89,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--include-abnormal-gap-days", action="store_true")
     parser.add_argument("--require-special-day-classification", action="store_true")
     parser.add_argument("--allow-manual-corporate-actions", action="store_true")
+    parser.add_argument("--max-dividend-sync-age-hours", type=int, default=24)
     parser.add_argument("--json-output", action="store_true")
     return parser.parse_args()
 

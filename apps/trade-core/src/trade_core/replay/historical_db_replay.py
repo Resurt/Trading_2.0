@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from trade_core.broker_gateway import BrokerGateway, InstrumentRef
 from trade_core.corporate_actions import CorporateActionService, SpecialDayFlags
 from trade_core.corporate_actions.service import (
+    dividend_sync_status_payload,
     flags_from_rows,
     special_day_classification_exists,
 )
@@ -234,7 +235,7 @@ class HistoricalDbReplayService:
             msg = "market special day classification is required before final historical replay"
             raise RuntimeError(msg)
         dividend_sync_status = self._dividend_sync_status(config)
-        if config.require_dividend_sync and dividend_sync_status in {"missing", "manual_only"}:
+        if config.require_dividend_sync and dividend_sync_status != "completed":
             msg = "T-Bank dividend sync is required before final historical replay"
             raise RuntimeError(msg)
         loaded_config = self._load_strategy_config(config)
@@ -635,19 +636,25 @@ class HistoricalDbReplayService:
         )
 
     def _dividend_sync_status(self, config: HistoricalDbReplayConfig) -> str:
-        service = CorporateActionService(self._session)
-        if service.api_imported_dividend_events_exist(
-            from_date=config.from_date,
-            to_date=config.to_date,
-            instruments=config.instruments,
+        latest = dividend_sync_status_payload(self._session)
+        status = str(latest["status"])
+        if (
+            status == "completed"
+            and bool(latest["clean"])
+            and latest["failed_instruments"] == 0
+            and latest["error_count"] == 0
+            and latest["ready_for_shadow"]
         ):
             return "completed"
+        service = CorporateActionService(self._session)
         manual_events = service.list_events(
             from_date=config.from_date,
             to_date=config.to_date,
             instruments=config.instruments,
             action_type="dividend",
         )
+        if status in {"completed_with_errors", "failed", "dry_run"}:
+            return status
         if any(event.source != "api_import" for event in manual_events):
             return "manual_only"
         return "missing"

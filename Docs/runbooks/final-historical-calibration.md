@@ -1,5 +1,22 @@
 # Final Historical Calibration Runbook
 
+## Strict Dividend Sync Gate
+
+Final historical calibration is not clean when latest dividend sync is missing,
+stale, partial, or failed.
+
+Required latest sync state:
+
+- `dividend_sync_run.status=completed`;
+- `dividend_sync_run.clean=true`;
+- `failed_instruments=0`;
+- `error_count=0`;
+- sync age is within `--max-dividend-sync-age-hours`.
+
+`completed_with_errors` is treated as a launch blocker. Manual corporate-action data
+can be used only with an explicit operator override and must not hide a failed
+T-Bank `GetDividends` run.
+
 ## Назначение
 
 Финальная historical calibration нужна только как подготовка к shadow live. Она не

@@ -1444,12 +1444,50 @@ class TradeCoreRuntime:
                 )
             )
             self._last_dividend_sync_at = now
-            self._dividend_calendar_available = True
-            self._write_audit_event(
-                action="dividend_sync_completed",
-                severity="info",
-                payload=result.as_payload(),
+            self._dividend_calendar_available = result.clean
+            if not result.clean and not self.config.dividend_sync_fail_open:
+                self.robot_control_state = "degraded"
+            action = (
+                "dividend_sync_completed"
+                if result.clean
+                else (
+                    "dividend_sync_failed"
+                    if result.status == "failed"
+                    else "dividend_sync_completed_with_errors"
+                )
             )
+            severity = (
+                "info"
+                if result.clean
+                else ("warning" if self.config.dividend_sync_fail_open else "error")
+            )
+            self._write_audit_event(
+                action=action,
+                severity=severity,
+                payload={
+                    **result.as_payload(),
+                    "dividend_sync_status": result.status,
+                    "dividend_sync_clean": result.clean,
+                    "failed_instruments": result.failed_instruments,
+                    "successful_instruments": result.successful_instruments,
+                    "error_count": result.error_count,
+                    "fail_open": self.config.dividend_sync_fail_open,
+                    "mode": self.launch_policy.mode.value,
+                },
+            )
+            if not result.clean:
+                log_event(
+                    logger=LOGGER,
+                    level="WARNING" if self.config.dividend_sync_fail_open else "ERROR",
+                    event_type=action,
+                    component="runtime.dividends",
+                    dividend_sync_status=result.status,
+                    dividend_sync_clean=result.clean,
+                    failed_instruments=result.failed_instruments,
+                    error_count=result.error_count,
+                    fail_open=self.config.dividend_sync_fail_open,
+                    mode=self.launch_policy.mode.value,
+                )
         except Exception as exc:
             self._dividend_calendar_available = False
             if not self.config.dividend_sync_fail_open:
@@ -1462,6 +1500,7 @@ class TradeCoreRuntime:
                     "error_code": type(exc).__name__,
                     "error_message": str(exc),
                     "fail_open": self.config.dividend_sync_fail_open,
+                    "mode": self.launch_policy.mode.value,
                 },
             )
             if not self.config.dividend_sync_fail_open:

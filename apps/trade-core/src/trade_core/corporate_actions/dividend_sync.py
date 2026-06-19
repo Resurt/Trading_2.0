@@ -24,6 +24,7 @@ from trade_core.corporate_actions.service import (
 from trading_common import ServiceName
 from trading_common.db.models import (
     AuditEvent,
+    DividendSyncRun,
     InstrumentRegistry,
 )
 from trading_common.db.models import (
@@ -80,12 +81,18 @@ class DividendSyncResult:
     from_date: date
     to_date: date
     instruments_processed: int
+    successful_instruments: int
+    failed_instruments: int
     dividends_fetched: int
     dividends_inserted: int
     dividends_updated: int
     existing_unchanged: int
     special_days_created: int
     future_risk_windows_created: int
+    error_count: int
+    errors: tuple[JsonPayload, ...]
+    status: str
+    clean: bool
     source: str = "api_import"
     real_orders_disabled: bool = True
     dry_run: bool = False
@@ -95,13 +102,21 @@ class DividendSyncResult:
         return {
             "from_date": self.from_date.isoformat(),
             "to_date": self.to_date.isoformat(),
+            "status": self.status,
+            "clean": self.clean,
+            "dividend_sync_status": self.status,
+            "dividend_sync_clean": self.clean,
             "instruments_processed": self.instruments_processed,
+            "successful_instruments": self.successful_instruments,
+            "failed_instruments": self.failed_instruments,
             "dividends_fetched": self.dividends_fetched,
             "dividends_inserted": self.dividends_inserted,
             "dividends_updated": self.dividends_updated,
             "existing_unchanged": self.existing_unchanged,
             "special_days_created": self.special_days_created,
             "future_risk_windows_created": self.future_risk_windows_created,
+            "error_count": self.error_count,
+            "errors": list(self.errors),
             "source": self.source,
             "real_orders_disabled": self.real_orders_disabled,
             "dry_run": self.dry_run,
@@ -123,6 +138,7 @@ class DividendSyncService:
         self._corporate_actions = CorporateActionService(session)
 
     async def run(self, config: DividendSyncConfig) -> DividendSyncResult:
+        started_at = datetime.now(tz=UTC)
         from_date, to_date = dividend_sync_window(config)
         instruments = self._resolve_instruments(config.instruments)
         if config.force_rebuild and not config.dry_run:
@@ -173,26 +189,77 @@ class DividendSyncService:
             special_days_created = classification.special_days_created
             future_windows_created = classification.future_risk_windows_created
 
+        status, clean, errors = _sync_status(config=config, instrument_results=instrument_results)
+        failed_instruments = sum(1 for item in instrument_results if item.error_code is not None)
+        successful_instruments = len(instrument_results) - failed_instruments
         result = DividendSyncResult(
             from_date=from_date,
             to_date=to_date,
             instruments_processed=len(instruments),
+            successful_instruments=successful_instruments,
+            failed_instruments=failed_instruments,
             dividends_fetched=sum(item.dividends_fetched for item in instrument_results),
             dividends_inserted=sum(item.dividends_inserted for item in instrument_results),
             dividends_updated=sum(item.dividends_updated for item in instrument_results),
             existing_unchanged=sum(item.existing_unchanged for item in instrument_results),
             special_days_created=special_days_created,
             future_risk_windows_created=future_windows_created,
+            error_count=len(errors),
+            errors=errors,
+            status=status,
+            clean=clean,
             dry_run=config.dry_run,
             instruments=tuple(instrument_results),
         )
+        self._persist_sync_run(
+            result,
+            started_at=started_at,
+            finished_at=datetime.now(tz=UTC),
+        )
         self._write_audit(
-            "dividend_sync_completed",
-            severity="info",
+            _audit_action_for_result(result),
+            severity=_audit_severity_for_result(result),
             payload=result.as_payload(),
         )
         self._session.flush()
         return result
+
+    def _persist_sync_run(
+        self,
+        result: DividendSyncResult,
+        *,
+        started_at: datetime,
+        finished_at: datetime,
+    ) -> None:
+        self._session.add(
+            DividendSyncRun(
+                started_at=started_at,
+                finished_at=finished_at,
+                status=result.status,
+                clean=result.clean,
+                from_date=result.from_date,
+                to_date=result.to_date,
+                instruments={
+                    "values": [item.instrument_id for item in result.instruments],
+                    "tickers": [
+                        item.ticker
+                        for item in result.instruments
+                        if item.ticker is not None
+                    ],
+                },
+                instruments_processed=result.instruments_processed,
+                successful_instruments=result.successful_instruments,
+                failed_instruments=result.failed_instruments,
+                dividends_fetched=result.dividends_fetched,
+                dividends_inserted=result.dividends_inserted,
+                dividends_updated=result.dividends_updated,
+                existing_unchanged=result.existing_unchanged,
+                special_days_created=result.special_days_created,
+                future_risk_windows_created=result.future_risk_windows_created,
+                error_count=result.error_count,
+                result_payload=result.as_payload(),
+            )
+        )
 
     async def _sync_instrument(
         self,
@@ -493,3 +560,60 @@ def _next_weekday(value: date) -> date:
     while cursor.weekday() >= 5:
         cursor += timedelta(days=1)
     return cursor
+
+
+def _sync_status(
+    *,
+    config: DividendSyncConfig,
+    instrument_results: list[DividendSyncInstrumentResult],
+) -> tuple[str, bool, tuple[JsonPayload, ...]]:
+    errors = tuple(
+        {
+            "instrument_id": item.instrument_id,
+            "ticker": item.ticker,
+            "error_code": item.error_code,
+            "error_message": item.error_message,
+        }
+        for item in instrument_results
+        if item.error_code is not None
+    )
+    processed = len(instrument_results)
+    failed = len(errors)
+    if config.dry_run:
+        return "dry_run", processed > 0 and failed == 0, errors
+    if processed == 0:
+        return (
+            "failed",
+            False,
+            (
+                {
+                    "instrument_id": None,
+                    "ticker": None,
+                    "error_code": "no_instruments_processed",
+                    "error_message": "Dividend sync resolved zero instruments.",
+                },
+            ),
+        )
+    if failed == 0:
+        return "completed", True, errors
+    if failed == processed:
+        return "failed", False, errors
+    return "completed_with_errors", False, errors
+
+
+def _audit_action_for_result(result: DividendSyncResult) -> str:
+    if result.status == "completed":
+        return "dividend_sync_completed"
+    if result.status == "completed_with_errors":
+        return "dividend_sync_completed_with_errors"
+    if result.status == "dry_run":
+        return "dividend_sync_dry_run"
+    return "dividend_sync_failed"
+
+
+def _audit_severity_for_result(result: DividendSyncResult) -> str:
+    if result.clean:
+        return "info"
+    if result.status == "failed":
+        return "error"
+    return "warning"

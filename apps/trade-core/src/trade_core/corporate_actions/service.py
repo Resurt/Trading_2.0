@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from trading_common import ServiceName
 from trading_common.db.models import (
     AuditEvent,
+    DividendSyncRun,
     InstrumentRegistry,
     MarketCandle,
     MarketSpecialDay,
@@ -526,6 +527,83 @@ def special_day_classification_exists(
     return session.execute(audit_stmt).first() is not None
 
 
+def latest_dividend_sync_run(session: Session) -> DividendSyncRun | None:
+    """Return the latest persisted dividend sync run, including dry-runs."""
+
+    return (
+        session.execute(
+            select(DividendSyncRun).order_by(DividendSyncRun.finished_at.desc())
+        )
+        .scalars()
+        .first()
+    )
+
+
+def dividend_sync_status_payload(
+    session: Session,
+    *,
+    max_age_hours: int = 24,
+) -> JsonPayload:
+    """Machine-readable latest sync status used by API and readiness gates."""
+
+    row = latest_dividend_sync_run(session)
+    if row is None:
+        return {
+            "source": "api_import",
+            "status": "missing",
+            "clean": False,
+            "finished_at": None,
+            "age_hours": None,
+            "from_date": None,
+            "to_date": None,
+            "instruments": [],
+            "failed_instruments": 0,
+            "successful_instruments": 0,
+            "error_count": 0,
+            "ready_for_shadow": False,
+            "ready_for_production": False,
+            "last_sync_payload": {},
+        }
+
+    now = datetime.now(tz=UTC)
+    finished_at = _ensure_aware_utc(row.finished_at)
+    age_hours = (now - finished_at).total_seconds() / 3600
+    instruments = row.instruments.get("values") if isinstance(row.instruments, dict) else []
+    if not isinstance(instruments, list):
+        instruments = []
+    ready = (
+        row.status == "completed"
+        and row.clean
+        and row.failed_instruments == 0
+        and row.error_count == 0
+        and age_hours <= max_age_hours
+    )
+    return {
+        "source": "api_import",
+        "status": row.status,
+        "clean": row.clean,
+        "finished_at": finished_at.isoformat(),
+        "age_hours": round(age_hours, 4),
+        "max_age_hours": max_age_hours,
+        "from_date": row.from_date.isoformat(),
+        "to_date": row.to_date.isoformat(),
+        "instruments": instruments,
+        "instruments_processed": row.instruments_processed,
+        "successful_instruments": row.successful_instruments,
+        "failed_instruments": row.failed_instruments,
+        "dividends_fetched": row.dividends_fetched,
+        "dividends_inserted": row.dividends_inserted,
+        "dividends_updated": row.dividends_updated,
+        "existing_unchanged": row.existing_unchanged,
+        "special_days_created": row.special_days_created,
+        "future_risk_windows_created": row.future_risk_windows_created,
+        "error_count": row.error_count,
+        "ready_for_shadow": ready,
+        "ready_for_production": ready,
+        "last_sync_payload": dict(row.result_payload),
+    }
+
+
 def _event_from_mapping(
     mapping: dict[str, Any],
     *,
@@ -757,3 +835,9 @@ def _optional_str(value: object) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _ensure_aware_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)

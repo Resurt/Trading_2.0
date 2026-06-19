@@ -190,6 +190,10 @@ dividend/corporate-action дни исключаются из primary calibration
 Primary corporate-action path is T-Bank `GetDividends` via `run_tbank_dividend_sync.py`;
 manual CSV/JSON import is fallback/override only and does not make final calibration clean
 unless the operator explicitly allows manual corporate actions.
+Partial dividend sync is not clean: `completed_with_errors`, `failed`,
+`failed_instruments > 0`, or `error_count > 0` blocks final calibration,
+shadow readiness and production preflight. The latest status is persisted in
+`dividend_sync_run`.
 
 ## Локальный Docker Compose
 

@@ -1,5 +1,12 @@
 # Shadow Mode Runbook
 
+## Strict Dividend Sync Gate
+
+Shadow readiness requires a clean latest `dividend_sync_run`: `status=completed`,
+`clean=true`, `failed_instruments=0`, `error_count=0`, and fresh enough for the
+configured threshold. `completed_with_errors` is rejected even when at least one
+instrument synced successfully.
+
 ## Purpose
 
 Run on live market data without real order submission. Shadow mode must write the same analytics spine as production: candidates, blockers, pseudo-order intents, risk events, reports, and counterfactual results.

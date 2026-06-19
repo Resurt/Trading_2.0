@@ -14,6 +14,8 @@ from trade_core.corporate_actions.service import (
     MarketSpecialDayClassifier,
     MarketSpecialDayResult,
     SpecialDayFlags,
+    dividend_sync_status_payload,
+    latest_dividend_sync_run,
 )
 
 __all__ = [
@@ -27,5 +29,7 @@ __all__ = [
     "MarketSpecialDayClassifier",
     "MarketSpecialDayResult",
     "SpecialDayFlags",
+    "dividend_sync_status_payload",
     "dividend_sync_window",
+    "latest_dividend_sync_run",
 ]

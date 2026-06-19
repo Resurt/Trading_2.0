@@ -13,7 +13,10 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from trade_core.corporate_actions.service import special_day_classification_exists
+from trade_core.corporate_actions.service import (
+    dividend_sync_status_payload,
+    special_day_classification_exists,
+)
 from trade_core.market_data.events import Timeframe, ensure_utc, parse_timeframe
 from trade_core.market_data.historical_backfill import classify_historical_exchange_ts
 from trading_common import ServiceName
@@ -128,7 +131,11 @@ class HistoricalDataQualityReport:
     special_day_distribution: dict[str, int] = field(default_factory=dict)
     corporate_action_classification_status: str = "missing"
     dividend_sync_status: str = "missing"
+    dividend_sync_clean: bool = False
+    dividend_sync_failed_instruments: int = 0
+    dividend_sync_error_count: int = 0
     api_import_dividend_events_count: int = 0
+    manual_dividend_events_count: int = 0
     quality_warnings: tuple[str, ...] = ()
     report_id: str | None = None
 
@@ -170,7 +177,11 @@ class HistoricalDataQualityReport:
                 self.corporate_action_classification_status
             ),
             "dividend_sync_status": self.dividend_sync_status,
+            "dividend_sync_clean": self.dividend_sync_clean,
+            "dividend_sync_failed_instruments": self.dividend_sync_failed_instruments,
+            "dividend_sync_error_count": self.dividend_sync_error_count,
             "api_import_dividend_events_count": self.api_import_dividend_events_count,
+            "manual_dividend_events_count": self.manual_dividend_events_count,
             "quality_warnings": list(self.quality_warnings),
             "quality_warning": self.quality_warnings[0] if self.quality_warnings else None,
             "instrument_timeframes": [item.as_payload() for item in self.instrument_timeframes],
@@ -318,6 +329,10 @@ class HistoricalDataQualityService:
             quality_warnings.append("manual_corporate_actions_only")
         if special_summary["dividend_sync_status"] == "missing":
             quality_warnings.append("dividend_sync_missing")
+        if special_summary["dividend_sync_status"] == "completed_with_errors":
+            quality_warnings.append("dividend_sync_completed_with_errors")
+        if special_summary["dividend_sync_status"] == "failed":
+            quality_warnings.append("dividend_sync_failed")
         report = HistoricalDataQualityReport(
             generated_at=datetime.now(tz=UTC),
             from_date=config.from_date,
@@ -355,9 +370,15 @@ class HistoricalDataQualityService:
                 special_summary["corporate_action_classification_status"]
             ),
             dividend_sync_status=str(special_summary["dividend_sync_status"]),
+            dividend_sync_clean=bool(special_summary["dividend_sync_clean"]),
+            dividend_sync_failed_instruments=int(
+                special_summary["dividend_sync_failed_instruments"]
+            ),
+            dividend_sync_error_count=int(special_summary["dividend_sync_error_count"]),
             api_import_dividend_events_count=int(
                 special_summary["api_import_dividend_events_count"]
             ),
+            manual_dividend_events_count=int(special_summary["manual_dividend_events_count"]),
             quality_warnings=tuple(quality_warnings),
         )
         if config.write_report:
@@ -547,20 +568,15 @@ class HistoricalDataQualityService:
         rows = list(self._session.execute(stmt).scalars())
         api_count = sum(1 for row in rows if row.source == "api_import")
         manual_count = sum(1 for row in rows if row.source != "api_import")
-        if api_count:
-            status = "completed"
-        elif manual_count:
+        latest = dividend_sync_status_payload(self._session)
+        status = str(latest["status"])
+        if status == "missing" and manual_count:
             status = "manual_only"
-        elif _dividend_sync_audit_exists(
-            self._session,
-            from_date=from_date,
-            to_date=to_date,
-        ):
-            status = "no_dividends_found"
-        else:
-            status = "missing"
         return {
             "dividend_sync_status": status,
+            "dividend_sync_clean": latest["clean"],
+            "dividend_sync_failed_instruments": latest["failed_instruments"],
+            "dividend_sync_error_count": latest["error_count"],
             "api_import_dividend_events_count": api_count,
             "manual_dividend_events_count": manual_count,
         }
@@ -672,22 +688,4 @@ def _audit_event(*, report: HistoricalDataQualityReport, report_id: str) -> Audi
         severity="info" if report.passed else "warning",
         correlation_id=report_id,
         audit_payload=report.as_payload(),
-    )
-
-
-def _dividend_sync_audit_exists(
-    session: Session,
-    *,
-    from_date: date,
-    to_date: date,
-) -> bool:
-    return (
-        session.execute(
-            select(AuditEvent.audit_event_id).where(
-                AuditEvent.trading_date >= from_date,
-                AuditEvent.trading_date <= to_date,
-                AuditEvent.action == "dividend_sync_completed",
-            )
-        ).first()
-        is not None
     )

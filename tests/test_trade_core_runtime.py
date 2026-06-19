@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -15,6 +16,7 @@ from trade_core.broker_gateway import (
     BrokerGateway,
     BrokerUnaryResponse,
     CandleRequest,
+    DividendsRequest,
     InstrumentRef,
     InstrumentResolveRequest,
 )
@@ -28,6 +30,7 @@ from trade_core.runtime import (
 )
 from trading_common import LaunchModePolicy, RuntimeMode
 from trading_common.db.models import (
+    AuditEvent,
     BlockerEvent,
     BrokerOrder,
     CandidateStageResult,
@@ -163,6 +166,22 @@ class ResolvingGateway(SafeNoopBrokerGateway):
         self.stream_instruments = instruments
 
 
+class PartialDividendResolvingGateway(ResolvingGateway):
+    async def get_dividends(
+        self,
+        request: DividendsRequest,
+        metadata: object | None = None,
+    ) -> BrokerUnaryResponse:
+        del metadata
+        if request.instrument.ticker == "GAZP":
+            raise RuntimeError("dividend sync failed for GAZP")
+        return BrokerUnaryResponse(
+            method_name="GetDividends",
+            data={"instrument_id": request.instrument.instrument_id, "dividends": []},
+            headers={},
+        )
+
+
 def test_runtime_starts_historical_replay_without_tokens(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -254,6 +273,54 @@ def test_runtime_resolves_default_instruments_for_shadow_streams(
     assert registry["SBER"].instrument_id == "uid-sber"
     assert registry["SBER"].instrument_uid == "uid-sber"
     assert registry["GAZP"].instrument_id == "uid-gazp"
+    asyncio.run(runtime.shutdown())
+
+
+@pytest.mark.parametrize(
+    ("fail_open", "expected_state"),
+    [(False, "degraded"), (True, "running")],
+)
+def test_runtime_marks_dividend_calendar_unavailable_on_partial_sync(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fail_open: bool,
+    expected_state: str,
+) -> None:
+    monkeypatch.setattr("trade_core.runtime.load_tbank_sdk", lambda: object())
+    gateway = PartialDividendResolvingGateway(now=msk(2026, 6, 12, 10))
+    config = replace(
+        runtime_config(tmp_path),
+        dividend_sync_enabled=True,
+        dividend_sync_fail_open=fail_open,
+    )
+    runtime = TradeCoreRuntime(
+        config=config,
+        launch_policy=LaunchModePolicy.from_mode(RuntimeMode.SHADOW),
+        database=DatabaseService(config.database_url or ""),
+        broker_gateway=cast(BrokerGateway, gateway),
+    )
+
+    asyncio.run(runtime.start())
+
+    assert runtime._dividend_calendar_available is False
+    assert runtime.robot_control_state == expected_state
+    session = runtime._session
+    assert session is not None
+    rows = session.execute(
+        select(AuditEvent).where(
+            AuditEvent.action.in_(
+                ("dividend_sync_completed_with_errors", "dividend_sync_failed")
+            )
+        )
+    ).scalars().all()
+    matching_payloads = [
+        row.audit_payload for row in rows if "dividend_sync_clean" in row.audit_payload
+    ]
+    assert matching_payloads
+    latest_payload = matching_payloads[-1]
+    assert latest_payload["dividend_sync_clean"] is False
+    assert latest_payload["failed_instruments"] == 1
+    assert latest_payload["fail_open"] is fail_open
     asyncio.run(runtime.shutdown())
 
 

@@ -295,7 +295,11 @@ export interface HistoricalQualityResponse {
   special_day_distribution: Record<string, number>;
   corporate_action_classification_status: string;
   dividend_sync_status: string;
+  dividend_sync_clean: boolean;
+  dividend_sync_failed_instruments: number;
+  dividend_sync_error_count: number;
   api_import_dividend_events_count: number;
+  manual_dividend_events_count: number;
   quality_warnings: string[];
 }
 
@@ -330,6 +334,12 @@ export interface CalibrationResponse {
   calibration_warnings: string[];
   calibration_data_mode: string;
   dividend_sync_status: string;
+  dividend_sync_clean: boolean;
+  dividend_sync_age_hours: number | null;
+  dividend_sync_failed_instruments: number;
+  dividend_sync_error_count: number;
+  ready_for_shadow: boolean;
+  ready_for_production: boolean;
   api_import_dividend_events_count: number;
   allow_manual_corporate_actions: boolean;
   future_dividend_windows_count: number;
@@ -386,13 +396,24 @@ export interface CorporateActionResponse {
 export interface DividendSyncStatusResponse {
   source: string;
   status: string;
-  from_date: string;
-  to_date: string;
+  clean: boolean;
+  finished_at: string | null;
+  age_hours: number | null;
+  max_age_hours: number;
+  from_date: string | null;
+  to_date: string | null;
   instruments: string[];
+  requested_from_date?: string;
+  requested_to_date?: string;
+  requested_instruments?: string[];
+  instruments_processed: number;
+  successful_instruments: number;
+  failed_instruments: number;
+  error_count: number;
+  ready_for_shadow: boolean;
+  ready_for_production: boolean;
   api_import_dividend_events_count: number;
   manual_dividend_events_count: number;
-  last_sync_action: string | null;
-  last_sync_at: string | null;
   last_sync_payload: JsonPayload;
 }
 

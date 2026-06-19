@@ -11,12 +11,19 @@ import sys
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 FRONTEND = ROOT / "apps" / "frontend"
+for src in (
+    ROOT / "apps" / "trade-core" / "src",
+    ROOT / "packages" / "common" / "src",
+):
+    if str(src) not in sys.path:
+        sys.path.insert(0, str(src))
 OUTPUT_TAIL_CHARS = 5000
 PRODUCTION_CONFIRM = "I_UNDERSTAND_LIVE_ORDERS"
 SANDBOX_ORDER_CONFIRM = "I_UNDERSTAND_SANDBOX_ORDERS"
@@ -94,6 +101,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--allow-manual-corporate-actions", action="store_true")
     parser.add_argument("--max-dividend-sync-age-hours", type=int, default=24)
     parser.add_argument("--skip-dividend-sync-check", action="store_true")
+    parser.add_argument("--allow-dividend-sync-fail-open", action="store_true")
     return parser.parse_args()
 
 
@@ -222,6 +230,7 @@ def run_shadow(args: argparse.Namespace, env: Mapping[str, str]) -> list[GateRes
     results = [
         env_gate("shadow_mode_selected", env.get("TRADING_RUNTIME_MODE") == "shadow"),
         env_gate("shadow_no_real_orders", "TRADING_PRODUCTION_CONFIRM" not in env),
+        run_dividend_sync_status_gate(args, name="shadow_clean_dividend_sync"),
         env_gate(
             "dividend_calendar_fail_open_policy_known",
             env.get("TRADING_DIVIDEND_SYNC_FAIL_OPEN", "false").lower()
@@ -266,8 +275,10 @@ def run_production_preflight(args: argparse.Namespace, env: Mapping[str, str]) -
         env_gate(
             "dividend_sync_fail_closed_default",
             env.get("TRADING_DIVIDEND_SYNC_FAIL_OPEN", "false").lower()
-            in {"0", "false", "no", "off"},
+            in {"0", "false", "no", "off"}
+            or args.allow_dividend_sync_fail_open,
         ),
+        run_dividend_sync_status_gate(args, name="production_clean_dividend_sync"),
         run_cmd(
             "production_safety_tests",
             [
@@ -390,6 +401,8 @@ def run_historical_replay(args: argparse.Namespace) -> list[GateResult]:
                 "--calibration-scope",
                 "primary_normal_days",
                 "--require-special-day-classification",
+                "--max-dividend-sync-age-hours",
+                str(args.max_dividend_sync_age_hours),
                 *(
                     ["--allow-manual-corporate-actions"]
                     if args.allow_manual_corporate_actions
@@ -441,6 +454,8 @@ def run_historical_final_calibration(args: argparse.Namespace) -> list[GateResul
         "--calibration-scope",
         "primary_normal_days",
         "--require-special-day-classification",
+        "--max-dividend-sync-age-hours",
+        str(args.max_dividend_sync_age_hours),
         *manual_args,
         "--json-output",
     ]
@@ -454,6 +469,11 @@ def run_historical_final_calibration(args: argparse.Namespace) -> list[GateResul
         )
     )
     return [
+        run_dividend_sync_status_gate(
+            args,
+            name="historical_final_clean_dividend_sync",
+            allow_skip=True,
+        ),
         run_cmd(
             "special_day_classification_requires_dividend_sync",
             [
@@ -630,6 +650,56 @@ def run_json_cmd_gate(
             "json_expected": dict(expected),
             "json_mismatches": mismatches,
         },
+    )
+
+
+def run_dividend_sync_status_gate(
+    args: argparse.Namespace,
+    *,
+    name: str,
+    allow_skip: bool = False,
+) -> GateResult:
+    if args.skip_dividend_sync_check and allow_skip:
+        return GateResult(
+            name=name,
+            passed=True,
+            command="--skip-dividend-sync-check",
+            details={"status": "skipped_explicitly_for_local_dry_gate"},
+        )
+    try:
+        from trade_core.corporate_actions import dividend_sync_status_payload
+        from trading_common.db.config import build_database_url_from_env
+        from trading_common.db.service import DatabaseService
+
+        database = DatabaseService(build_database_url_from_env())
+        try:
+            with database.session_scope() as session:
+                payload = dividend_sync_status_payload(
+                    session,
+                    max_age_hours=args.max_dividend_sync_age_hours,
+                )
+        finally:
+            database.engine.dispose()
+    except Exception as exc:
+        return GateResult(
+            name=name,
+            passed=False,
+            command="select latest dividend_sync_run",
+            details={"error_code": type(exc).__name__, "error_message": str(exc)},
+        )
+
+    passed = (
+        payload.get("status") == "completed"
+        and payload.get("clean") is True
+        and payload.get("failed_instruments") == 0
+        and payload.get("error_count") == 0
+        and payload.get("ready_for_shadow") is True
+    )
+    return GateResult(
+        name=name,
+        passed=passed,
+        command="select latest dividend_sync_run",
+        details={**payload, "checked_at": datetime.now(tz=UTC).isoformat()},
     )
 
 

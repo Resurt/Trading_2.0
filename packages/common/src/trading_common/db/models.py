@@ -956,6 +956,41 @@ class CorporateActionEvent(Base):
     )
 
 
+class DividendSyncRun(Base):
+    """Read model for the latest T-Bank dividend synchronization outcome."""
+
+    __tablename__ = "dividend_sync_run"
+    __table_args__ = (
+        Index("ix_dividend_sync_run_finished_at", "finished_at"),
+        Index("ix_dividend_sync_run_status", "status"),
+        Index("ix_dividend_sync_run_clean", "clean"),
+    )
+
+    dividend_sync_run_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    clean: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    from_date: Mapped[date] = mapped_column(Date, nullable=False)
+    to_date: Mapped[date] = mapped_column(Date, nullable=False)
+    instruments: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
+    instruments_processed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    successful_instruments: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    failed_instruments: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    dividends_fetched: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    dividends_inserted: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    dividends_updated: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    existing_unchanged: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    special_days_created: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    future_risk_windows_created: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    result_payload: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
+
+
 class MarketSpecialDay(Base):
     """Instrument/date flag for dividend gaps, corporate actions, and excluded days."""
 

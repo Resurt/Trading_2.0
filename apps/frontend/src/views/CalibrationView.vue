@@ -123,6 +123,7 @@ async function refresh() {
       <MetricTile label="clean" :value="report?.calibration_clean ? 'true' : 'false'" />
       <MetricTile label="special days" :value="report?.special_days_count ?? 0" />
       <MetricTile label="dividend sync" :value="report?.dividend_sync_status ?? '-'" />
+      <MetricTile label="sync clean" :value="report?.dividend_sync_clean ? 'true' : 'false'" />
       <MetricTile label="future windows" :value="report?.future_dividend_windows_count ?? 0" />
     </div>
 
@@ -141,6 +142,16 @@ async function refresh() {
           <dd>{{ report.requires_shadow_live_calibration }}</dd>
           <dt>dividend sync</dt>
           <dd>{{ report.dividend_sync_status }}</dd>
+          <dt>sync clean</dt>
+          <dd>{{ report.dividend_sync_clean }}</dd>
+          <dt>sync age hours</dt>
+          <dd>{{ report.dividend_sync_age_hours ?? "-" }}</dd>
+          <dt>sync failed instruments</dt>
+          <dd>{{ report.dividend_sync_failed_instruments }}</dd>
+          <dt>sync errors</dt>
+          <dd>{{ report.dividend_sync_error_count }}</dd>
+          <dt>ready for shadow</dt>
+          <dd>{{ report.ready_for_shadow }}</dd>
           <dt>api dividends</dt>
           <dd>{{ report.api_import_dividend_events_count }}</dd>
           <dt>manual allowed</dt>

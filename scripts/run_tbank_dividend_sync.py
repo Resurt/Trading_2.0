@@ -55,6 +55,7 @@ def main() -> None:
     finally:
         database.engine.dispose()
     print(json.dumps(payload, ensure_ascii=False, indent=2 if args.json_output else None))
+    raise SystemExit(_exit_code(payload, allow_partial=args.allow_partial))
 
 
 def parse_args() -> argparse.Namespace:
@@ -67,6 +68,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--database-url")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--force-rebuild", action="store_true")
+    parser.add_argument("--allow-partial", action="store_true")
     parser.add_argument(
         "--classify-special-days",
         dest="classify_special_days",
@@ -90,6 +92,20 @@ def parse_date(raw: str) -> date:
 
 def split_csv(raw: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in raw.split(",") if item.strip())
+
+
+def _exit_code(payload: dict[str, object], *, allow_partial: bool) -> int:
+    status = str(payload.get("status", payload.get("dividend_sync_status", "")))
+    clean = bool(payload.get("clean", payload.get("dividend_sync_clean", False)))
+    instruments_processed = int(payload.get("instruments_processed", 0) or 0)
+    error_count = int(payload.get("error_count", 0) or 0)
+    if instruments_processed <= 0:
+        return 7
+    if clean and error_count == 0 and status in {"completed", "dry_run"}:
+        return 0
+    if allow_partial and status == "completed_with_errors":
+        return 0
+    return 7
 
 
 if __name__ == "__main__":

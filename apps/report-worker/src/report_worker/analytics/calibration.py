@@ -44,6 +44,7 @@ class CalibrationReportConfig:
     include_abnormal_gap_days: bool = False
     require_special_day_classification: bool = False
     allow_manual_corporate_actions: bool = False
+    max_dividend_sync_age_hours: int = 24
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,8 +177,13 @@ class CalibrationReportService:
         )
         classification_missing = special_context["classification_status"] == "missing"
         dividend_sync_status = str(special_context["dividend_sync_status"])
-        dividend_sync_ok = dividend_sync_status in {"completed", "no_dividends_found"} or (
-            dividend_sync_status == "manual_only" and config.allow_manual_corporate_actions
+        dividend_sync_ok = (
+            bool(special_context["dividend_sync_clean"])
+            and dividend_sync_status == "completed"
+            and bool(special_context["ready_for_shadow"])
+        ) or (
+            dividend_sync_status == "manual_only"
+            and config.allow_manual_corporate_actions
         )
         calibration_clean = (
             not classification_missing
@@ -197,6 +203,23 @@ class CalibrationReportService:
             warnings.append("manual_corporate_actions_only")
         if dividend_sync_status == "missing":
             warnings.append("dividend_sync_missing")
+        if dividend_sync_status == "dry_run":
+            warnings.append("dividend_sync_dry_run_not_final")
+        if dividend_sync_status == "completed_with_errors":
+            warnings.append("dividend_sync_completed_with_errors")
+        if dividend_sync_status == "failed":
+            warnings.append("dividend_sync_failed")
+        if (
+            dividend_sync_status == "completed"
+            and not bool(special_context["dividend_sync_clean"])
+        ):
+            warnings.append("dividend_sync_not_clean")
+        if (
+            dividend_sync_status == "completed"
+            and special_context["dividend_sync_age_hours"] is not None
+            and not special_context["ready_for_shadow"]
+        ):
+            warnings.append("dividend_sync_stale")
         if special_context["future_dividend_windows_count"]:
             warnings.append("future_dividend_window_present")
         if config.calibration_scope != "primary_normal_days":
@@ -216,6 +239,14 @@ class CalibrationReportService:
             "calibration_clean": calibration_clean,
             "calibration_warnings": warnings,
             "dividend_sync_status": dividend_sync_status,
+            "dividend_sync_clean": special_context["dividend_sync_clean"],
+            "dividend_sync_age_hours": special_context["dividend_sync_age_hours"],
+            "dividend_sync_failed_instruments": (
+                special_context["dividend_sync_failed_instruments"]
+            ),
+            "dividend_sync_error_count": special_context["dividend_sync_error_count"],
+            "ready_for_shadow": special_context["ready_for_shadow"],
+            "ready_for_production": special_context["ready_for_production"],
             "api_import_dividend_events_count": (
                 special_context["api_import_dividend_events_count"]
             ),
@@ -552,6 +583,8 @@ def _dividend_sync_context(
     to_date: date,
     instrument_ids: tuple[str, ...],
 ) -> JsonPayload:
+    from trade_core.corporate_actions import dividend_sync_status_payload
+
     stmt = select(CorporateActionEvent).where(
         CorporateActionEvent.action_type == "dividend",
         CorporateActionEvent.ex_date >= from_date,
@@ -562,37 +595,21 @@ def _dividend_sync_context(
     rows = list(session.execute(stmt).scalars())
     api_count = sum(1 for row in rows if row.source == "api_import")
     manual_count = sum(1 for row in rows if row.source != "api_import")
-    if api_count:
-        status = "completed"
-    elif manual_count:
+    latest = dividend_sync_status_payload(session)
+    status = str(latest["status"])
+    if status == "missing" and manual_count:
         status = "manual_only"
-    elif _dividend_sync_audit_exists(session, from_date=from_date, to_date=to_date):
-        status = "no_dividends_found"
-    else:
-        status = "missing"
     return {
         "dividend_sync_status": status,
+        "dividend_sync_clean": bool(latest["clean"]),
+        "dividend_sync_age_hours": latest["age_hours"],
+        "dividend_sync_failed_instruments": int(latest["failed_instruments"]),
+        "dividend_sync_error_count": int(latest["error_count"]),
+        "ready_for_shadow": bool(latest["ready_for_shadow"]),
+        "ready_for_production": bool(latest["ready_for_production"]),
         "api_import_dividend_events_count": api_count,
         "manual_dividend_events_count": manual_count,
     }
-
-
-def _dividend_sync_audit_exists(
-    session: Session,
-    *,
-    from_date: date,
-    to_date: date,
-) -> bool:
-    return (
-        session.execute(
-            select(AuditEvent.audit_event_id).where(
-                AuditEvent.trading_date >= from_date,
-                AuditEvent.trading_date <= to_date,
-                AuditEvent.action == "dividend_sync_completed",
-            )
-        ).first()
-        is not None
-    )
 
 
 def _scope_stats(

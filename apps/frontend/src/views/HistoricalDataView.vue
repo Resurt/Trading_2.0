@@ -279,8 +279,16 @@ async function withLoading(action: () => Promise<void>) {
         <dl class="definition-grid">
           <dt>status</dt>
           <dd>{{ dividendSyncStatus?.status ?? quality?.dividend_sync_status ?? "-" }}</dd>
+          <dt>clean</dt>
+          <dd>{{ dividendSyncStatus?.clean ?? quality?.dividend_sync_clean ?? "-" }}</dd>
           <dt>last sync</dt>
-          <dd>{{ dividendSyncStatus?.last_sync_at ?? "-" }}</dd>
+          <dd>{{ dividendSyncStatus?.finished_at ?? "-" }}</dd>
+          <dt>age hours</dt>
+          <dd>{{ dividendSyncStatus?.age_hours ?? "-" }}</dd>
+          <dt>failed</dt>
+          <dd>{{ dividendSyncStatus?.failed_instruments ?? quality?.dividend_sync_failed_instruments ?? 0 }}</dd>
+          <dt>errors</dt>
+          <dd>{{ dividendSyncStatus?.error_count ?? quality?.dividend_sync_error_count ?? 0 }}</dd>
           <dt>api_import</dt>
           <dd>{{ dividendSyncStatus?.api_import_dividend_events_count ?? 0 }}</dd>
           <dt>manual</dt>
@@ -298,6 +306,18 @@ async function withLoading(action: () => Promise<void>) {
           v-if="quality?.quality_warnings?.includes('manual_corporate_actions_only')"
           title="Manual corporate actions only"
           detail="Manual CSV/JSON is fallback; api_import is the primary path."
+          tone="warn"
+        />
+        <EmptyState
+          v-if="quality?.quality_warnings?.includes('dividend_sync_completed_with_errors')"
+          title="Dividend sync partial"
+          detail="At least one instrument failed; this is not clean for calibration."
+          tone="warn"
+        />
+        <EmptyState
+          v-if="quality?.quality_warnings?.includes('dividend_sync_failed')"
+          title="Dividend sync failed"
+          detail="Clean dividend calendar is required before shadow or production."
           tone="warn"
         />
       </DataPanel>

@@ -1,5 +1,31 @@
 # Corporate Actions Runbook
 
+## Strict Dividend Sync Status
+
+Partial T-Bank dividend sync is not clean.
+
+Accepted clean state:
+
+- latest `dividend_sync_run.status=completed`;
+- `dividend_sync_run.clean=true`;
+- `failed_instruments=0`;
+- `error_count=0`;
+- sync age is within the configured launch threshold.
+
+Rejected states for final calibration, shadow, and production:
+
+- `dry_run`;
+- `completed_with_errors`;
+- `failed`;
+- `clean=false`;
+- `failed_instruments > 0`;
+- `error_count > 0`;
+- stale sync.
+
+Manual CSV/JSON remains fallback/override only. It cannot silently replace a failed
+`api_import` sync unless the operator explicitly uses an override such as
+`--allow-manual-corporate-actions`.
+
 ## Назначение
 
 `corporate_action_event` и `market_special_day` нужны, чтобы historical replay и

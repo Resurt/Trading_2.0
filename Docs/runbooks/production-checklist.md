@@ -1,5 +1,19 @@
 # Production Checklist
 
+## Strict Dividend Sync Gate
+
+Production preflight requires the latest `dividend_sync_run` to be clean:
+
+- `status=completed`;
+- `clean=true`;
+- `failed_instruments=0`;
+- `error_count=0`;
+- age is within `--max-dividend-sync-age-hours`.
+
+`completed_with_errors`, `failed`, stale sync, and unavailable dividend calendar are
+launch blockers. `TRADING_DIVIDEND_SYNC_FAIL_OPEN=true` is rejected by production
+preflight unless an explicit override flag is used.
+
 Production mode is not default. Start only after every item is green.
 
 ## Required Env

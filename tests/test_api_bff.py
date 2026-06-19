@@ -25,6 +25,7 @@ from trading_common.db.models import (
     CandidateStageResult,
     CounterfactualResult,
     DailyReport,
+    DividendSyncRun,
     FillEvent,
     HourlyReport,
     InstrumentRegistry,
@@ -713,6 +714,52 @@ def test_dividend_sync_api_requires_operator_and_returns_status(tmp_path: Path) 
     assert "status" in status_response.json()
     assert dividends_response.status_code == 200
     assert future_response.status_code == 200
+
+
+def test_dividend_sync_status_endpoint_returns_unclean_latest_run(tmp_path: Path) -> None:
+    database = DatabaseService(f"sqlite+pysqlite:///{tmp_path / 'api-dividend-status.db'}")
+    Base.metadata.create_all(database.engine)
+    seed_database(database)
+    now = utc(2026, 6, 18, 12)
+    with database.session_scope() as session:
+        session.add(
+            DividendSyncRun(
+                started_at=now - timedelta(seconds=2),
+                finished_at=now,
+                status="completed_with_errors",
+                clean=False,
+                from_date=date(2026, 1, 1),
+                to_date=date(2027, 1, 1),
+                instruments={"values": ["MOEX:SBER", "MOEX:GAZP"]},
+                instruments_processed=2,
+                successful_instruments=1,
+                failed_instruments=1,
+                dividends_fetched=1,
+                dividends_inserted=1,
+                dividends_updated=0,
+                existing_unchanged=0,
+                special_days_created=1,
+                future_risk_windows_created=0,
+                error_count=1,
+                result_payload={"status": "completed_with_errors", "clean": False},
+            )
+        )
+    app = create_fastapi_app(database=database, report_task_client=FakeReportTaskClient())
+    client = TestClient(app)
+
+    response = client.get(
+        "/corporate-actions/dividends/sync/status",
+        headers={"X-API-Role": "observer"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "completed_with_errors"
+    assert payload["clean"] is False
+    assert payload["failed_instruments"] == 1
+    assert payload["error_count"] == 1
+    assert payload["ready_for_shadow"] is False
+    assert payload["ready_for_production"] is False
 
 
 def test_production_auth_rejects_role_header_without_bearer(

@@ -577,6 +577,7 @@ def create_fastapi_app(
         to_date: Annotated[date | None, Query()] = None,
         lookback_days: Annotated[int, Query(ge=1, le=3660)] = 730,
         instruments: Annotated[str, Query()] = "SBER,GAZP",
+        max_age_hours: Annotated[int, Query(ge=1, le=720)] = 24,
     ) -> dict[str, Any]:
         require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
         window_from, window_to = _historical_window(
@@ -591,6 +592,7 @@ def create_fastapi_app(
                 from_date=window_from,
                 to_date=window_to,
                 instruments=_split_csv(instruments),
+                max_age_hours=max_age_hours,
             )
 
     @app.get("/corporate-actions/dividends", tags=["corporate-actions"])
@@ -1087,11 +1089,12 @@ def _dividend_sync_status_payload(
     from_date: date,
     to_date: date,
     instruments: tuple[str, ...],
+    max_age_hours: int,
 ) -> dict[str, Any]:
-    from sqlalchemy import select
-
-    from trade_core.corporate_actions import CorporateActionService
-    from trading_common.db.models import AuditEvent
+    from trade_core.corporate_actions import (
+        CorporateActionService,
+        dividend_sync_status_payload,
+    )
 
     service = CorporateActionService(session)
     api_events = service.list_events(
@@ -1108,35 +1111,17 @@ def _dividend_sync_status_payload(
         action_type="dividend",
     )
     manual_events = [row for row in dividend_events if row.source != "api_import"]
-    latest_audit = session.execute(
-        select(AuditEvent)
-        .where(AuditEvent.action.in_(("dividend_sync_completed", "dividend_sync_failed")))
-        .order_by(AuditEvent.ts_utc.desc())
-    ).scalars().first()
-    latest_payload = latest_audit.audit_payload if latest_audit is not None else {}
-    status = "completed" if api_events else "missing"
-    if not api_events and manual_events:
-        status = "manual_only"
-    if (
-        not api_events
-        and latest_audit is not None
-        and latest_audit.action == "dividend_sync_completed"
-    ):
-        status = "no_dividends_found"
-    return {
-        "source": "api_import",
-        "status": status,
-        "from_date": from_date.isoformat(),
-        "to_date": to_date.isoformat(),
-        "instruments": list(instruments),
-        "api_import_dividend_events_count": len(api_events),
-        "manual_dividend_events_count": len(manual_events),
-        "last_sync_action": latest_audit.action if latest_audit is not None else None,
-        "last_sync_at": latest_audit.ts_utc.isoformat()
-        if latest_audit is not None
-        else None,
-        "last_sync_payload": latest_payload,
-    }
+    payload = dividend_sync_status_payload(session, max_age_hours=max_age_hours)
+    payload.update(
+        {
+            "requested_from_date": from_date.isoformat(),
+            "requested_to_date": to_date.isoformat(),
+            "requested_instruments": list(instruments),
+            "api_import_dividend_events_count": len(api_events),
+            "manual_dividend_events_count": len(manual_events),
+        }
+    )
+    return payload
 
 
 def _dashboard_payload(app: FastAPI) -> dict[str, object]:

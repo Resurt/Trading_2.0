@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
+import importlib
+import json
+import sys
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -45,6 +49,7 @@ from trading_common.db.models import (
     CalibrationReport,
     CandidateStageResult,
     CounterfactualResult,
+    DividendSyncRun,
     HistoricalDataQualityReport,
     InstrumentRegistry,
     MarketCandle,
@@ -63,12 +68,17 @@ MSK = ZoneInfo("Europe/Moscow")
 
 
 class FakeDividendGateway:
+    def __init__(self, *, fail_tickers: set[str] | None = None) -> None:
+        self.fail_tickers = fail_tickers or set()
+
     async def get_dividends(
         self,
         request: DividendsRequest,
         metadata: object | None = None,
     ) -> BrokerUnaryResponse:
         del metadata
+        if request.instrument.ticker in self.fail_tickers:
+            raise RuntimeError(f"dividend sync failed for {request.instrument.ticker}")
         return BrokerUnaryResponse(
             method_name="GetDividends",
             data={
@@ -226,12 +236,147 @@ def test_tbank_dividend_sync_creates_api_import_events_and_future_windows() -> N
         assert event.ex_date == date(2026, 7, 10)
         assert event.action_payload["ex_date_inference_source"] == "fallback_next_weekday"
         assert first.dividends_inserted == 1
+        assert first.status == "completed"
+        assert first.clean is True
         assert second.existing_unchanged == 1
         special_days = session.execute(select(MarketSpecialDay)).scalars().all()
         assert len(special_days) == 1
         assert special_days[0].special_day_type == "future_dividend_risk_window"
         assert special_days[0].trade_policy == "shadow_only"
     engine.dispose()
+
+
+def test_dividend_sync_marks_partial_and_full_failures_unclean() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        _seed_instrument(session)
+        _seed_instrument(session, ticker="GAZP")
+        config = DividendSyncConfig(
+            instruments=("SBER", "GAZP"),
+            from_date=date(2026, 1, 1),
+            to_date=date(2027, 12, 31),
+            classify_special_days=False,
+        )
+
+        partial = asyncio.run(
+            DividendSyncService(
+                session=session,
+                broker_gateway=cast(
+                    BrokerGateway,
+                    FakeDividendGateway(fail_tickers={"GAZP"}),
+                ),
+            ).run(config)
+        )
+        failed = asyncio.run(
+            DividendSyncService(
+                session=session,
+                broker_gateway=cast(
+                    BrokerGateway,
+                    FakeDividendGateway(fail_tickers={"SBER", "GAZP"}),
+                ),
+            ).run(config)
+        )
+
+        assert partial.status == "completed_with_errors"
+        assert partial.clean is False
+        assert partial.failed_instruments == 1
+        assert partial.error_count == 1
+        assert failed.status == "failed"
+        assert failed.clean is False
+        assert failed.failed_instruments == 2
+        latest = session.execute(
+            select(DividendSyncRun).order_by(DividendSyncRun.finished_at.desc())
+        ).scalars().first()
+        assert latest is not None
+        assert latest.status == "failed"
+        assert latest.clean is False
+    engine.dispose()
+
+
+def test_dividend_sync_cli_rejects_partial_unless_explicitly_allowed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path = tmp_path / "dividend-cli.db"
+    database_url = f"sqlite+pysqlite:///{db_path.as_posix()}"
+    engine = create_engine(database_url)
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        _seed_instrument(session)
+        _seed_instrument(session, ticker="GAZP")
+        session.commit()
+    engine.dispose()
+    dividend_cli = cast(Any, importlib.import_module("scripts.run_tbank_dividend_sync"))
+    monkeypatch.setattr(
+        dividend_cli,
+        "TBankBrokerGateway",
+        lambda: FakeDividendGateway(fail_tickers={"GAZP"}),
+    )
+    base_argv = [
+        "run_tbank_dividend_sync.py",
+        "--database-url",
+        database_url,
+        "--instruments",
+        "SBER,GAZP",
+        "--from-date",
+        "2026-01-01",
+        "--to-date",
+        "2027-12-31",
+        "--json-output",
+    ]
+    monkeypatch.setattr(sys, "argv", base_argv)
+
+    with pytest.raises(SystemExit) as rejected:
+        dividend_cli.main()
+
+    assert rejected.value.code == 7
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "completed_with_errors"
+    assert payload["clean"] is False
+
+    monkeypatch.setattr(sys, "argv", [*base_argv, "--allow-partial"])
+    with pytest.raises(SystemExit) as allowed:
+        dividend_cli.main()
+
+    assert allowed.value.code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "completed_with_errors"
+    assert payload["clean"] is False
+
+
+def test_readiness_dividend_sync_gate_rejects_partial_latest_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "readiness-dividend.db"
+    database_url = f"sqlite+pysqlite:///{db_path.as_posix()}"
+    engine = create_engine(database_url)
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        _seed_dividend_sync_run(
+            session,
+            status="completed_with_errors",
+            clean=False,
+            failed_instruments=1,
+            error_count=1,
+        )
+        session.commit()
+    engine.dispose()
+    monkeypatch.setenv("TRADING_DATABASE_URL", database_url)
+    readiness = cast(Any, importlib.import_module("scripts.run_launch_readiness"))
+    args = argparse.Namespace(
+        skip_dividend_sync_check=False,
+        max_dividend_sync_age_hours=24,
+    )
+
+    result = readiness.run_dividend_sync_status_gate(args, name="partial_sync")
+
+    assert result.passed is False
+    assert result.details["status"] == "completed_with_errors"
+    assert result.details["clean"] is False
+    assert result.details["failed_instruments"] == 1
 
 
 def test_quality_report_requires_special_day_classification_when_final() -> None:
@@ -335,6 +480,7 @@ def test_replay_excludes_and_flags_special_days() -> None:
     with Session(engine) as session:
         _seed_replay_candles(session)
         _seed_dividend_event(session)
+        _seed_dividend_sync_run(session)
         MarketSpecialDayClassifier(session).classify(
             from_date=date(2026, 6, 18),
             to_date=date(2026, 6, 18),
@@ -448,6 +594,7 @@ def test_calibration_primary_scope_excludes_special_days_and_warns_when_missing(
     with Session(engine) as session:
         _seed_replay_candles(session)
         _seed_dividend_event(session)
+        _seed_dividend_sync_run(session)
         MarketSpecialDayClassifier(session).classify(
             from_date=date(2026, 6, 18),
             to_date=date(2026, 6, 18),
@@ -501,6 +648,46 @@ def test_calibration_primary_scope_excludes_special_days_and_warns_when_missing(
         assert special_only.report_payload["calibration_clean"] is False
         assert special_only.report_payload["candidate_count"] >= 1
         assert "non_primary_calibration_scope" in special_only.report_payload[
+            "calibration_warnings"
+        ]
+    engine.dispose()
+
+
+def test_calibration_is_not_clean_on_partial_dividend_sync() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        _seed_replay_candles(session)
+        _seed_dividend_event(session)
+        _seed_dividend_sync_run(
+            session,
+            status="completed_with_errors",
+            clean=False,
+            failed_instruments=1,
+            error_count=1,
+        )
+        MarketSpecialDayClassifier(session).classify(
+            from_date=date(2026, 6, 18),
+            to_date=date(2026, 6, 18),
+            instruments=("SBER",),
+        )
+
+        calibration = CalibrationReportService(session).build(
+            CalibrationReportConfig(
+                from_date=date(2026, 6, 18),
+                to_date=date(2026, 6, 18),
+                strategy_id="baseline",
+                instruments=("SBER",),
+                timeframes=("5m",),
+                group_by=("session_type", "instrument_id", "timeframe", "blocker_code"),
+                require_special_day_classification=True,
+            )
+        )
+
+        assert calibration.report_payload["calibration_clean"] is False
+        assert calibration.report_payload["dividend_sync_status"] == "completed_with_errors"
+        assert calibration.report_payload["dividend_sync_clean"] is False
+        assert "dividend_sync_completed_with_errors" in calibration.report_payload[
             "calibration_warnings"
         ]
     engine.dispose()
@@ -625,15 +812,16 @@ def test_historical_counterfactual_reports_and_calibration() -> None:
     engine.dispose()
 
 
-def _seed_instrument(session: Session) -> None:
+def _seed_instrument(session: Session, *, ticker: str = "SBER") -> None:
+    instrument_id = f"MOEX:{ticker}"
     session.add(
         InstrumentRegistry(
-            instrument_id="MOEX:SBER",
-            ticker="SBER",
+            instrument_id=instrument_id,
+            ticker=ticker,
             class_code="TQBR",
             figi=None,
-            instrument_uid="uid-sber",
-            name="SBER",
+            instrument_uid=f"uid-{ticker.lower()}",
+            name=ticker,
             lot_size=10,
             min_price_increment=Decimal("0.01"),
             currency="RUB",
@@ -712,6 +900,47 @@ def _seed_dividend_event(session: Session, *, source: str = "api_import") -> Non
             source=source,
             confidence="confirmed",
             action_payload={"source": source},
+        )
+    )
+    session.flush()
+
+
+def _seed_dividend_sync_run(
+    session: Session,
+    *,
+    status: str = "completed",
+    clean: bool = True,
+    failed_instruments: int = 0,
+    error_count: int = 0,
+) -> None:
+    now = datetime.now(tz=UTC)
+    session.add(
+        DividendSyncRun(
+            started_at=now - timedelta(seconds=1),
+            finished_at=now,
+            status=status,
+            clean=clean,
+            from_date=date(2026, 1, 1),
+            to_date=date(2027, 12, 31),
+            instruments={"values": ["MOEX:SBER"], "tickers": ["SBER"]},
+            instruments_processed=1,
+            successful_instruments=0 if failed_instruments else 1,
+            failed_instruments=failed_instruments,
+            dividends_fetched=1 if clean else 0,
+            dividends_inserted=1 if clean else 0,
+            dividends_updated=0,
+            existing_unchanged=0,
+            special_days_created=1 if clean else 0,
+            future_risk_windows_created=0,
+            error_count=error_count,
+            result_payload={
+                "status": status,
+                "clean": clean,
+                "dividend_sync_status": status,
+                "dividend_sync_clean": clean,
+                "failed_instruments": failed_instruments,
+                "error_count": error_count,
+            },
         )
     )
     session.flush()
