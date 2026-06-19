@@ -103,6 +103,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-dividend-sync-age-hours", type=int, default=24)
     parser.add_argument("--skip-dividend-sync-check", action="store_true")
     parser.add_argument("--allow-dividend-sync-fail-open", action="store_true")
+    parser.add_argument("--gate-timeout-seconds", type=int, default=600)
     return parser.parse_args()
 
 
@@ -428,6 +429,7 @@ def run_historical_replay(args: argparse.Namespace) -> list[GateResult]:
 
 def run_historical_final_calibration(args: argparse.Namespace) -> list[GateResult]:
     quality_timeframes = f"1m,{args.timeframes}"
+    heavy_timeout_seconds = max(args.gate_timeout_seconds, 900)
     dividend_sync_args = [] if args.skip_dividend_sync_check else ["--require-dividend-sync"]
     manual_args = (
         ["--allow-manual-corporate-actions"] if args.allow_manual_corporate_actions else []
@@ -465,12 +467,17 @@ def run_historical_final_calibration(args: argparse.Namespace) -> list[GateResul
         "--json-output",
     ]
     calibration_gate = (
-        run_cmd("primary_calibration_clean", calibration_command)
+        run_cmd(
+            "primary_calibration_clean",
+            calibration_command,
+            timeout_seconds=heavy_timeout_seconds,
+        )
         if args.skip_dividend_sync_check
         else run_json_cmd_gate(
             "primary_calibration_clean",
             calibration_command,
             expected={"calibration_clean": True},
+            timeout_seconds=heavy_timeout_seconds,
         )
     )
     return [
@@ -495,6 +502,7 @@ def run_historical_final_calibration(args: argparse.Namespace) -> list[GateResul
                 *dividend_sync_args,
                 "--json-output",
             ],
+            timeout_seconds=heavy_timeout_seconds,
         ),
         run_cmd(
             "historical_quality_requires_special_days",
@@ -510,10 +518,12 @@ def run_historical_final_calibration(args: argparse.Namespace) -> list[GateResul
                 "--require-special-day-classification",
                 "--json-output",
             ],
+            timeout_seconds=heavy_timeout_seconds,
         ),
         run_cmd(
             "historical_replay_uses_db_strategy_config",
             [sys.executable, "scripts/run_historical_replay_from_db.py", *common_replay_args],
+            timeout_seconds=heavy_timeout_seconds,
         ),
         run_cmd(
             "historical_counterfactual_present",
@@ -530,6 +540,7 @@ def run_historical_final_calibration(args: argparse.Namespace) -> list[GateResul
                 args.timeframes,
                 "--json-output",
             ],
+            timeout_seconds=heavy_timeout_seconds,
         ),
         calibration_gate,
         GateResult(
@@ -599,6 +610,8 @@ def run_cmd(
             command=format_cmd(argv),
             details={
                 "status": "timeout",
+                "subcommand": subcommand_name(argv),
+                "timeout_seconds": timeout_seconds,
                 "stdout_tail": tail(exc.stdout or ""),
                 "stderr_tail": tail(exc.stderr or ""),
             },
@@ -610,6 +623,8 @@ def run_cmd(
         details={
             "status": "completed",
             "returncode": completed.returncode,
+            "subcommand": subcommand_name(argv),
+            "timeout_seconds": timeout_seconds,
             "stdout_tail": tail(completed.stdout),
             "stderr_tail": tail(completed.stderr),
         },
@@ -640,6 +655,8 @@ def run_json_cmd_gate(
             command=format_cmd(argv),
             details={
                 "status": "timeout",
+                "subcommand": subcommand_name(argv),
+                "timeout_seconds": timeout_seconds,
                 "stdout_tail": tail(exc.stdout or ""),
                 "stderr_tail": tail(exc.stderr or ""),
             },
@@ -652,6 +669,8 @@ def run_json_cmd_gate(
             details={
                 "status": "completed",
                 "returncode": completed.returncode,
+                "subcommand": subcommand_name(argv),
+                "timeout_seconds": timeout_seconds,
                 "stdout_tail": tail(completed.stdout),
                 "stderr_tail": tail(completed.stderr),
             },
@@ -666,6 +685,8 @@ def run_json_cmd_gate(
             details={
                 "status": "json_parse_failed",
                 "returncode": completed.returncode,
+                "subcommand": subcommand_name(argv),
+                "timeout_seconds": timeout_seconds,
                 "stdout_tail": tail(completed.stdout),
                 "stderr_tail": tail(completed.stderr),
                 "error_message": str(exc),
@@ -683,6 +704,8 @@ def run_json_cmd_gate(
         details={
             "status": "completed",
             "returncode": completed.returncode,
+            "subcommand": subcommand_name(argv),
+            "timeout_seconds": timeout_seconds,
             "stdout_tail": tail(completed.stdout),
             "stderr_tail": tail(completed.stderr),
             "json_expected": dict(expected),
@@ -1007,6 +1030,14 @@ def npm_cmd() -> str:
 
 def format_cmd(argv: Sequence[str]) -> str:
     return " ".join(str(part) for part in argv)
+
+
+def subcommand_name(argv: Sequence[str]) -> str:
+    if len(argv) > 1:
+        return Path(str(argv[1])).name
+    if argv:
+        return Path(str(argv[0])).name
+    return ""
 
 
 def tail(value: str | bytes) -> str:
