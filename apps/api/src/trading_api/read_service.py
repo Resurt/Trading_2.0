@@ -10,7 +10,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from trading_api.schemas import (
@@ -72,6 +72,7 @@ from trading_common.db.models import (
 
 TERMINAL_ORDER_STATUSES = frozenset({"filled", "cancelled", "rejected"})
 DEFAULT_ANALYTICS_LIMIT = 50
+DEFAULT_DASHBOARD_UNIVERSE = ("SBER", "GAZP", "LKOH", "YDEX", "TATN", "GMKN", "OZON", "VTBR")
 
 
 @dataclass(slots=True)
@@ -114,8 +115,6 @@ class BffReadService:
 
     def robot_status(self, *, robot_control_state: str) -> RobotStatusResponse:
         current_session = self.current_session()
-        open_orders = self.open_orders()
-        positions = self.positions()
         latest_state = self._latest_strategy_state()
         active_instruments = self._active_instruments()
         active_timeframes = self._active_timeframes()
@@ -139,19 +138,15 @@ class BffReadService:
             session_phase=current_session.session_phase,
             broker_trading_status=current_session.broker_trading_status,
             micro_session_id=current_session.micro_session_id,
-            open_orders_count=len(open_orders),
-            active_positions_count=sum(1 for position in positions if position.qty_lots != 0),
+            open_orders_count=self._open_orders_count(),
+            active_positions_count=self._active_positions_count(),
             degraded_flags=degraded_flags,
             robot_control_state=robot_control_state,
         )
 
     def portfolio_summary(self) -> PortfolioSummaryResponse:
-        snapshots = list(
-            self._session.execute(
-                select(PositionSnapshot).order_by(PositionSnapshot.snapshot_ts.desc())
-            ).scalars()
-        )
-        if not snapshots:
+        latest_snapshot_ts = self._latest_position_snapshot_ts()
+        if latest_snapshot_ts is None:
             return PortfolioSummaryResponse(
                 balance=MoneyBalance(
                     balance_degraded=True,
@@ -160,15 +155,23 @@ class BffReadService:
                 positions_count=0,
                 source="position_snapshot_missing",
             )
+        snapshots = self._position_snapshots_at(latest_snapshot_ts)
+        if not snapshots:
+            return PortfolioSummaryResponse(
+                balance=MoneyBalance(
+                    balance_degraded=True,
+                    balance_degraded_reason_code="position_snapshot_empty",
+                ),
+                positions_count=0,
+                source="position_snapshot_empty",
+            )
         latest = snapshots[0]
         balance_payload = _payload_dict_value(latest.snapshot_payload, "broker_balance")
         if balance_payload:
             balance = _money_balance_from_payload(balance_payload, latest=latest)
             return PortfolioSummaryResponse(
                 balance=balance,
-                positions_count=sum(
-                    1 for item in snapshots if item.snapshot_ts == latest.snapshot_ts
-                ),
+                positions_count=len(snapshots),
                 source=str(balance_payload.get("source", "broker_balance_payload")),
             )
         return PortfolioSummaryResponse(
@@ -194,11 +197,10 @@ class BffReadService:
         )
 
     def positions(self) -> list[PositionResponse]:
-        snapshots = list(
-            self._session.execute(
-                select(PositionSnapshot).order_by(PositionSnapshot.snapshot_ts.desc())
-            ).scalars()
-        )
+        latest_snapshot_ts = self._latest_position_snapshot_ts()
+        if latest_snapshot_ts is None:
+            return []
+        snapshots = self._position_snapshots_at(latest_snapshot_ts)
         latest_by_key: dict[tuple[str, str], PositionSnapshot] = {}
         for snapshot in snapshots:
             key = (snapshot.instrument_id, snapshot.account_id)
@@ -218,12 +220,17 @@ class BffReadService:
             for snapshot in latest_by_key.values()
         ]
 
-    def open_orders(self) -> list[OrderResponse]:
+    def open_orders(self, *, limit: int = 100) -> list[OrderResponse]:
+        since = datetime.now(tz=UTC) - timedelta(days=30)
         broker_orders = list(
             self._session.execute(
                 select(BrokerOrder)
-                .where(BrokerOrder.broker_status.not_in(TERMINAL_ORDER_STATUSES))
+                .where(
+                    BrokerOrder.broker_status.not_in(TERMINAL_ORDER_STATUSES),
+                    BrokerOrder.last_observed_at >= since,
+                )
                 .order_by(BrokerOrder.last_observed_at.desc())
+                .limit(max(1, min(limit, 500)))
             ).scalars()
         )
         responses: list[OrderResponse] = []
@@ -266,38 +273,94 @@ class BffReadService:
         ]
 
     def market_overview(self) -> MarketOverviewResponse:
-        summaries = list(
-            self._session.execute(
-                select(OrderBookSummary).order_by(OrderBookSummary.ts_utc.desc())
-            ).scalars()
-        )
-        latest_by_instrument: dict[str, OrderBookSummary] = {}
-        for summary in summaries:
-            latest_by_instrument.setdefault(summary.instrument_id, summary)
-
-        instruments = [
+        instruments = _dashboard_universe_from_env()
+        overviews = [
             MarketInstrumentOverview(
-                instrument_id=summary.instrument_id,
-                spread=summary.spread_abs,
-                mid_price=summary.mid_price,
-                market_quality=summary.market_quality_score,
-                best_bid=summary.best_bid_price,
-                best_ask=summary.best_ask_price,
-                recent_market_trades=_payload_list(summary.summary_payload, "recent_market_trades"),
-                order_book_summary={
-                    "depth_levels": summary.depth_levels,
-                    "best_bid_qty_lots": _optional_str(summary.best_bid_qty_lots),
-                    "best_ask_qty_lots": _optional_str(summary.best_ask_qty_lots),
-                    "bid_depth_lots": str(summary.bid_depth_lots),
-                    "ask_depth_lots": str(summary.ask_depth_lots),
-                    "book_imbalance": _optional_str(summary.book_imbalance),
-                    "spread_bps": _optional_str(summary.spread_bps),
-                    "ts_utc": summary.ts_utc.isoformat(),
-                },
+                **self._market_instrument_payload(instrument_id)
             )
-            for summary in latest_by_instrument.values()
+            for instrument_id in instruments
         ]
-        return MarketOverviewResponse(generated_at=datetime.now(tz=UTC), instruments=instruments)
+        return MarketOverviewResponse(generated_at=datetime.now(tz=UTC), instruments=overviews)
+
+    def _market_instrument_payload(self, instrument_id: str) -> JsonPayload:
+        summary = self._latest_order_book_summary(instrument_id)
+        candle = self._latest_market_candle(instrument_id)
+        last_price = summary.mid_price if summary and summary.mid_price is not None else None
+        last_price_at = summary.ts_utc if last_price is not None and summary is not None else None
+        last_price_source = "live_order_book" if last_price is not None else None
+        quote_status = "live" if last_price is not None else "unavailable"
+        if last_price is None and candle is not None:
+            last_price = candle.close_price
+            last_price_at = candle.close_ts_utc
+            last_price_source = "last_candle"
+            quote_status = "last_close"
+
+        order_book_summary: JsonPayload = {}
+        recent_market_trades: list[JsonPayload] = []
+        if summary is not None:
+            recent_market_trades = _payload_list(summary.summary_payload, "recent_market_trades")
+            order_book_summary = {
+                "depth_levels": summary.depth_levels,
+                "best_bid_qty_lots": _optional_str(summary.best_bid_qty_lots),
+                "best_ask_qty_lots": _optional_str(summary.best_ask_qty_lots),
+                "bid_depth_lots": str(summary.bid_depth_lots),
+                "ask_depth_lots": str(summary.ask_depth_lots),
+                "book_imbalance": _optional_str(summary.book_imbalance),
+                "spread_bps": _optional_str(summary.spread_bps),
+                "ts_utc": summary.ts_utc.isoformat(),
+            }
+        elif candle is not None:
+            order_book_summary = {
+                "last_candle_open": str(candle.open_price),
+                "last_candle_high": str(candle.high_price),
+                "last_candle_low": str(candle.low_price),
+                "last_candle_close": str(candle.close_price),
+                "last_candle_volume_lots": str(candle.volume_lots),
+                "last_candle_close_ts": candle.close_ts_utc.isoformat(),
+            }
+
+        return {
+            "instrument_id": instrument_id,
+            "last_price": last_price,
+            "last_price_at": last_price_at,
+            "last_price_source": last_price_source,
+            "quote_status": quote_status,
+            "last_candle_timeframe": candle.timeframe if candle is not None else None,
+            "spread": summary.spread_abs if summary is not None else None,
+            "mid_price": summary.mid_price if summary is not None else None,
+            "market_quality": summary.market_quality_score if summary is not None else None,
+            "best_bid": summary.best_bid_price if summary is not None else None,
+            "best_ask": summary.best_ask_price if summary is not None else None,
+            "recent_market_trades": recent_market_trades,
+            "order_book_summary": order_book_summary,
+        }
+
+    def _latest_order_book_summary(self, instrument_id: str) -> OrderBookSummary | None:
+        return self._session.execute(
+            select(OrderBookSummary)
+            .where(OrderBookSummary.instrument_id == instrument_id)
+            .order_by(OrderBookSummary.ts_utc.desc())
+            .limit(1)
+        ).scalars().first()
+
+    def _latest_market_candle(self, instrument_id: str) -> MarketCandle | None:
+        candle = self._session.execute(
+            select(MarketCandle)
+            .where(
+                MarketCandle.instrument_id == instrument_id,
+                MarketCandle.timeframe == "1m",
+            )
+            .order_by(MarketCandle.open_ts_utc.desc())
+            .limit(1)
+        ).scalars().first()
+        if candle is not None:
+            return candle
+        return self._session.execute(
+            select(MarketCandle)
+            .where(MarketCandle.instrument_id == instrument_id)
+            .order_by(MarketCandle.open_ts_utc.desc())
+            .limit(1)
+        ).scalars().first()
 
     def latest_microstructure(
         self,
@@ -1025,22 +1088,55 @@ class BffReadService:
         )
         if instruments:
             return [instrument.instrument_id for instrument in instruments]
-        candle_instruments = self._session.execute(
-            select(MarketCandle.instrument_id).distinct().order_by(MarketCandle.instrument_id)
-        ).scalars()
-        return list(candle_instruments)
+        return _dashboard_universe_from_env()
 
     def _active_timeframes(self) -> list[str]:
-        timeframes = self._session.execute(
-            select(MarketCandle.timeframe).distinct().order_by(MarketCandle.timeframe)
-        ).scalars()
-        return list(timeframes)
+        configured = os.environ.get("TRADING_TIMEFRAMES", "")
+        timeframes = [item.strip() for item in configured.split(",") if item.strip()]
+        return timeframes or ["1m", "5m", "10m", "15m"]
+
+    def _latest_position_snapshot_ts(self) -> datetime | None:
+        return self._session.execute(select(func.max(PositionSnapshot.snapshot_ts))).scalar_one()
+
+    def _position_snapshots_at(self, snapshot_ts: datetime) -> list[PositionSnapshot]:
+        return list(
+            self._session.execute(
+                select(PositionSnapshot)
+                .where(PositionSnapshot.snapshot_ts == snapshot_ts)
+                .order_by(PositionSnapshot.instrument_id, PositionSnapshot.account_id)
+                .limit(500)
+            ).scalars()
+        )
 
     def _latest_strategy_state(self) -> str:
         event = self._session.execute(
-            select(StrategyStateEvent).order_by(StrategyStateEvent.ts_utc.desc())
+            select(StrategyStateEvent).order_by(StrategyStateEvent.ts_utc.desc()).limit(1)
         ).scalars().first()
         return event.new_state if event is not None else "unknown"
+
+    def _open_orders_count(self) -> int:
+        since = datetime.now(tz=UTC) - timedelta(days=30)
+        return int(
+            self._session.execute(
+                select(func.count(BrokerOrder.broker_order_id)).where(
+                    BrokerOrder.broker_status.not_in(TERMINAL_ORDER_STATUSES),
+                    BrokerOrder.last_observed_at >= since,
+                )
+            ).scalar_one()
+        )
+
+    def _active_positions_count(self) -> int:
+        latest_snapshot_ts = self._latest_position_snapshot_ts()
+        if latest_snapshot_ts is None:
+            return 0
+        return int(
+            self._session.execute(
+                select(func.count(PositionSnapshot.position_snapshot_id)).where(
+                    PositionSnapshot.snapshot_ts == latest_snapshot_ts,
+                    PositionSnapshot.qty_lots != 0,
+                )
+            ).scalar_one()
+        )
 
     def _final_blockers(self, candidate_ids: Iterable[UUID]) -> dict[UUID, str]:
         ids = tuple(candidate_ids)
@@ -1510,6 +1606,22 @@ def _payload_list_value(payload: JsonPayload, key: str) -> list[JsonPayload]:
 def _payload_dict_value(payload: JsonPayload, key: str) -> JsonPayload:
     value = payload.get(key)
     return value if isinstance(value, dict) else {}
+
+
+def _dashboard_universe_from_env() -> list[str]:
+    configured = os.environ.get("TRADING_INSTRUMENTS", "")
+    instruments = [item.strip() for item in configured.split(",") if item.strip()]
+    source = instruments or list(DEFAULT_DASHBOARD_UNIVERSE)
+    return [_canonical_moex_instrument(item) for item in source]
+
+
+def _canonical_moex_instrument(instrument_id: str) -> str:
+    value = instrument_id.strip()
+    if not value:
+        return value
+    if ":" in value:
+        return value
+    return f"MOEX:{value}"
 
 
 def _money_balance_from_payload(

@@ -178,6 +178,11 @@ class SignalResponse(BaseModel):
 
 class MarketInstrumentOverview(BaseModel):
     instrument_id: str
+    last_price: Decimal | None = None
+    last_price_at: datetime | None = None
+    last_price_source: str | None = None
+    quote_status: str = "unavailable"
+    last_candle_timeframe: str | None = None
     spread: Decimal | None = None
     mid_price: Decimal | None = None
     market_quality: Decimal | None = None

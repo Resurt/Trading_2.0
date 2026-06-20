@@ -15,23 +15,24 @@ def _sequence(*codepoints: int) -> str:
 
 
 MOJIBAKE_PATTERNS: tuple[str, ...] = (
-    _sequence(0x0420, 0x045C),  # Рќ
-    _sequence(0x0420, 0x045F),  # Рџ
-    _sequence(0x0420, 0x045B),  # Рћ
-    _sequence(0x0420, 0x201D),  # Р”
-    _sequence(0x0420, 0x203A),  # Р›
-    _sequence(0x0420, 0x00B5),  # Рµ
-    _sequence(0x0420, 0x0405),  # РЅ
-    _sequence(0x0420, 0x00B0),  # Р°
-    _sequence(0x0420, 0x0454),  # Рє
-    _sequence(0x0421, 0x0403),  # СЃ
-    _sequence(0x0421, 0x201A),  # С‚
-    _sequence(0x0421, 0x040A),  # СЊ
-    _sequence(0x0421, 0x2039),  # С‹
-    _sequence(0x0421, 0x2021),  # С‡
-    _sequence(0x0421, 0x2030),  # С‰
-    chr(0x00D0),  # Ð
-    chr(0x00D1),  # Ñ
+    _sequence(0x0420, 0x045C),  # "Рќ"
+    _sequence(0x0420, 0x045F),  # "Рџ"
+    _sequence(0x0420, 0x045B),  # "Рћ"
+    _sequence(0x0420, 0x201D),  # "Р”"
+    _sequence(0x0420, 0x203A),  # "Р›"
+    _sequence(0x0420, 0x00B5),  # "Рµ"
+    _sequence(0x0420, 0x0405),  # "РЅ"
+    _sequence(0x0420, 0x0451),  # "Рё"
+    _sequence(0x0420, 0x00B0),  # "Р°"
+    _sequence(0x0420, 0x0454),  # "Рє"
+    _sequence(0x0421, 0x0403),  # "СЃ"
+    _sequence(0x0421, 0x201A),  # "С‚"
+    _sequence(0x0421, 0x040A),  # "СЊ"
+    _sequence(0x0421, 0x2039),  # "С‹"
+    _sequence(0x0421, 0x2021),  # "С‡"
+    _sequence(0x0421, 0x2030),  # "С‰"
+    chr(0x00D0),  # "Ð"
+    chr(0x00D1),  # "Ñ"
 )
 
 

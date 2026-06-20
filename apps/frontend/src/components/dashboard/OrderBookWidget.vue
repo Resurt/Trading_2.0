@@ -43,8 +43,8 @@ const askDepth = computed(() => props.instrument?.order_book_summary.ask_depth_l
   </div>
   <EmptyState
     v-else
-    title="Стакан недоступен"
-    detail="BFF пока не вернул order_book_summary по активным инструментам."
+    title="Стакан пока не получен"
+    detail="Если рынок закрыт, показывается последняя цена из свечей; live стакан появится после запуска data-only сбора."
     tone="warn"
   />
 </template>

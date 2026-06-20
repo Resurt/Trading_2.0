@@ -1483,10 +1483,26 @@ async def _run_session_preflight(
 
     gateway = cast(BrokerGateway, _preflight_broker_gateway())
     refs = _instrument_refs_for_preflight(_database_service(request), instruments)
-    result = await TradingSessionPreflightService(gateway).run(
-        TradingSessionPreflightConfig(instruments=tuple(refs))
-    )
-    return SessionPreflightResponse(**result.as_payload())
+    config = TradingSessionPreflightConfig(instruments=tuple(refs))
+    timeout_seconds = float(os.environ.get("TRADING_SESSION_PREFLIGHT_TIMEOUT_SECONDS", "8"))
+    try:
+        result = await asyncio.wait_for(
+            TradingSessionPreflightService(gateway).run(config),
+            timeout=timeout_seconds,
+        )
+        return SessionPreflightResponse(**result.as_payload())
+    except TimeoutError:
+        fallback_result = await TradingSessionPreflightService(
+            cast(BrokerGateway, _UnavailableReadonlyBrokerGateway())
+        ).run(config)
+    payload = fallback_result.as_payload()
+    warnings = payload.get("warnings")
+    payload["warnings"] = [
+        *(warnings if isinstance(warnings, list) else []),
+        "broker_preflight_timeout",
+    ]
+    payload["source"] = "fallback_preflight_timeout"
+    return SessionPreflightResponse(**payload)
 
 
 async def _run_broker_balance_refresh(
@@ -1519,7 +1535,25 @@ async def _run_broker_balance_refresh(
     database = _database_service(request)
     with database.session_scope() as session:
         service = BrokerBalanceRefreshService(broker_gateway=gateway, session=session)
-        return await service.refresh(account_id=account_id)
+        timeout_seconds = float(os.environ.get("BROKER_BALANCE_REFRESH_TIMEOUT_SECONDS", "15"))
+        try:
+            return await asyncio.wait_for(
+                service.refresh(account_id=account_id),
+                timeout=timeout_seconds,
+            )
+        except TimeoutError:
+            return BrokerBalanceRefreshResult(
+                balance_refreshed=False,
+                account_id_masked=_mask_account_id(account_id),
+                total_portfolio_value_rub=None,
+                available_cash_rub=None,
+                blocked_cash_rub=None,
+                expected_yield_rub=None,
+                free_collateral_rub=None,
+                last_balance_refresh_at=None,
+                balance_degraded=True,
+                balance_degraded_reason_code="broker_balance_timeout",
+            )
 
 
 def _preflight_broker_gateway() -> Any:

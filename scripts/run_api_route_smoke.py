@@ -14,6 +14,7 @@ EXPECTED_ROUTES = (
     "/session/preflight",
     "/portfolio/summary",
     "/portfolio/refresh",
+    "/market/overview",
     "/market/microstructure/latest",
     "/market/microstructure/summary",
     "/runtime/data-shadow/status",

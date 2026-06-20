@@ -60,6 +60,10 @@ type FrontendRuntimeConfig = {
   apiActor?: string;
 };
 
+type ApiRequestInit = RequestInit & {
+  timeoutMs?: number;
+};
+
 type GlobalWithRuntimeConfig = typeof globalThis & {
   __TRADING_FRONTEND_CONFIG__?: FrontendRuntimeConfig;
 };
@@ -112,9 +116,10 @@ function applyAuthHeaders(headers: Headers, role: ApiRole): void {
 
 async function requestJson<T>(
   path: string,
-  init: RequestInit = {},
+  init: ApiRequestInit = {},
   role: ApiRole = "observer",
 ): Promise<T> {
+  const { timeoutMs, ...requestInit } = init;
   const headers = new Headers(init.headers);
   headers.set("Accept", "application/json");
   applyAuthHeaders(headers, role);
@@ -122,7 +127,27 @@ async function requestJson<T>(
     headers.set("Content-Type", "application/json");
   }
 
-  const response = await fetch(`${apiBaseUrl}${path}`, { ...init, headers });
+  const controller = timeoutMs ? new AbortController() : null;
+  const timeoutId = timeoutMs
+    ? window.setTimeout(() => controller?.abort(), timeoutMs)
+    : null;
+  let response: Response;
+  try {
+    response = await fetch(`${apiBaseUrl}${path}`, {
+      ...requestInit,
+      headers,
+      signal: controller?.signal ?? requestInit.signal,
+    });
+  } catch (unknownError) {
+    if (unknownError instanceof DOMException && unknownError.name === "AbortError") {
+      throw new Error("request_timeout");
+    }
+    throw unknownError;
+  } finally {
+    if (timeoutId !== null) {
+      window.clearTimeout(timeoutId);
+    }
+  }
   if (!response.ok) {
     const text = await response.text();
     throw new Error(`${response.status} ${response.statusText}: ${text}`);
@@ -134,21 +159,27 @@ export const apiClient = {
   authStatus: () => requestJson<AuthStatusResponse>("/auth/status"),
   wsTicket: (role: ApiRole = "observer") =>
     requestJson<WebSocketTicketResponse>("/auth/ws-ticket", { method: "POST" }, role),
-  robotStatus: () => requestJson<RobotStatusResponse>("/robot/status"),
-  currentSession: () => requestJson<SessionSnapshotResponse>("/session/current"),
+  robotStatus: () => requestJson<RobotStatusResponse>("/robot/status", { timeoutMs: 10000 }),
+  currentSession: () =>
+    requestJson<SessionSnapshotResponse>("/session/current", { timeoutMs: 8000 }),
   sessionPreflight: (query: Record<string, QueryValue> = {}) =>
-    requestJson<SessionPreflightResponse>(withQuery("/session/preflight", query)),
+    requestJson<SessionPreflightResponse>(withQuery("/session/preflight", query), {
+      timeoutMs: 12000,
+    }),
   positions: () => requestJson<PositionResponse[]>("/positions"),
-  portfolioSummary: () => requestJson<PortfolioSummaryResponse>("/portfolio/summary"),
+  portfolioSummary: () =>
+    requestJson<PortfolioSummaryResponse>("/portfolio/summary", { timeoutMs: 10000 }),
   refreshPortfolio: (payload: Record<string, unknown> = {}) =>
     requestJson<PortfolioSummaryResponse>(
       "/portfolio/refresh",
-      { method: "POST", body: JSON.stringify(payload) },
+      { method: "POST", body: JSON.stringify(payload), timeoutMs: 20000 },
       "operator",
     ),
   openOrders: () => requestJson<OrderResponse[]>("/orders/open"),
-  currentSignals: () => requestJson<SignalResponse[]>("/signals/current"),
-  marketOverview: () => requestJson<MarketOverviewResponse>("/market/overview"),
+  currentSignals: () =>
+    requestJson<SignalResponse[]>("/signals/current", { timeoutMs: 8000 }),
+  marketOverview: () =>
+    requestJson<MarketOverviewResponse>("/market/overview", { timeoutMs: 10000 }),
   latestMicrostructure: (query: Record<string, QueryValue>) =>
     requestJson<MarketMicrostructureSnapshotResponse[]>(
       withQuery("/market/microstructure/latest", query),

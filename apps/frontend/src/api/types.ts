@@ -131,6 +131,11 @@ export interface SignalResponse {
 
 export interface MarketInstrumentOverview {
   instrument_id: string;
+  last_price: string | null;
+  last_price_at: string | null;
+  last_price_source: string | null;
+  quote_status: string;
+  last_candle_timeframe: string | null;
   spread: string | null;
   mid_price: string | null;
   market_quality: string | null;

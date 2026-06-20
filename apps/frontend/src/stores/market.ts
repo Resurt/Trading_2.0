@@ -18,7 +18,7 @@ const EMPTY_OVERVIEW: MarketOverviewResponse = {
 
 const EMPTY_DATA_SHADOW_STATUS: DataShadowStatusResponse = {
   enabled: false,
-  strategy_trading_disabled: false,
+  strategy_trading_disabled: true,
   real_orders_disabled: true,
   stream_alive: false,
   last_message_age_seconds: null,
@@ -40,6 +40,7 @@ export const useMarketStore = defineStore("market", () => {
   const error = ref<string | null>(null);
   const liveConnection = ref<ConnectionState>("idle");
   let marketSocket: WebSocket | null = null;
+  let marketPollTimer: number | null = null;
 
   const currentInstrument = computed<MarketInstrumentOverview | null>(() => {
     if (overview.value.instruments.length === 0) {
@@ -67,6 +68,8 @@ export const useMarketStore = defineStore("market", () => {
   );
 
   const recentTrades = computed<JsonPayload[]>(() => currentInstrument.value?.recent_market_trades ?? []);
+
+  const quoteRows = computed(() => overview.value.instruments);
 
   async function fetchOverview(): Promise<void> {
     loading.value = true;
@@ -123,6 +126,23 @@ export const useMarketStore = defineStore("market", () => {
     };
   }
 
+  function startMarketPolling(intervalMs = 30_000): void {
+    if (marketPollTimer !== null) {
+      return;
+    }
+    marketPollTimer = window.setInterval(() => {
+      void fetchOverview();
+    }, intervalMs);
+  }
+
+  function stopMarketPolling(): void {
+    if (marketPollTimer === null) {
+      return;
+    }
+    window.clearInterval(marketPollTimer);
+    marketPollTimer = null;
+  }
+
   return {
     overview,
     dataShadowStatus,
@@ -131,11 +151,14 @@ export const useMarketStore = defineStore("market", () => {
     error,
     liveConnection,
     currentInstrument,
+    quoteRows,
     topOfBook,
     bookSummaryRows,
     recentTrades,
     fetchOverview,
     fetchDataShadowStatus,
     connectMarketSocket,
+    startMarketPolling,
+    stopMarketPolling,
   };
 });

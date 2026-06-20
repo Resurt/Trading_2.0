@@ -14,6 +14,7 @@ const apiClientMock = vi.hoisted(() => ({
   robotStatus: vi.fn(),
   currentSession: vi.fn(),
   currentSignals: vi.fn(),
+  portfolioSummary: vi.fn(),
   sessionPreflight: vi.fn(),
   startRobot: vi.fn(),
   stopRobot: vi.fn(),
@@ -29,6 +30,7 @@ describe("robot store", () => {
   beforeEach(() => {
     setActivePinia(createPinia());
     Object.values(apiClientMock).forEach((mock) => mock.mockReset());
+    apiClientMock.portfolioSummary.mockResolvedValue(portfolioFixture());
   });
 
   it("preserves robot status and balance when signals snapshot fails", async () => {
@@ -46,7 +48,7 @@ describe("robot store", () => {
     expect(robot.error).not.toContain("robot_status_unavailable");
   });
 
-  it("marks api snapshot unavailable only when robot status fails", async () => {
+  it("keeps portfolio balance when robot status fails but portfolio summary succeeds", async () => {
     apiClientMock.robotStatus.mockRejectedValue(new Error("status down"));
     apiClientMock.currentSession.mockResolvedValue(sessionFixture());
     apiClientMock.currentSignals.mockResolvedValue([]);
@@ -54,8 +56,8 @@ describe("robot store", () => {
 
     await robot.fetchInitialSnapshot();
 
-    expect(robot.status.balance.balance_degraded).toBe(true);
-    expect(robot.status.balance.balance_degraded_reason_code).toBe("api_snapshot_unavailable");
+    expect(robot.status.balance.balance_degraded).toBe(false);
+    expect(robot.status.balance.total_portfolio_value_rub).toBe("250000");
     expect(robot.error).toContain("robot_status_unavailable");
   });
 
@@ -101,6 +103,14 @@ describe("robot store", () => {
     expect(robot.lastCommandMessage).toContain("Остановка запрошена");
   });
 });
+
+function portfolioFixture() {
+  return {
+    balance: statusFixture().balance,
+    positions_count: 0,
+    source: "test",
+  };
+}
 
 function statusFixture(): RobotStatusResponse {
   return {

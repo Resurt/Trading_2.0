@@ -251,6 +251,8 @@ Current Live Dashboard blocks:
 
 - Balance card
 - session type, phase, broker status and micro-session
+- cockpit-style connection chips with human labels, not raw `unknown` / `loading` codes
+- quote grid for the core universe: SBER, GAZP, LKOH, YDEX, TATN, GMKN, OZON, VTBR
 - Data-only Shadow Status
 - market overview and order book summary
 - positions and active orders
@@ -264,8 +266,10 @@ Balance card:
 - shows portfolio value, available cash, blocked cash, expected yield, masked account id
   and freshness;
 - shows masked account id only;
-- shows `Баланс недоступен` and `balance_degraded_reason_code` when broker balance is missing;
-- includes an `Обновить баланс` action that calls readonly `POST /portfolio/refresh`;
+- auto-refreshes broker balance through readonly `POST /portfolio/refresh` while the
+  dashboard is open;
+- shows human-readable degraded reasons when broker balance is missing; raw technical
+  codes are not the primary UI text;
 - remains readonly account state in data-only shadow mode and never implies trading permission.
 
 Start/Stop command feedback:
@@ -275,10 +279,21 @@ Start/Stop command feedback:
   `next_session_at` when present, and does not silently submit a start command.
 - If `market_open=true`, Start submits the data-only start command and shows the
   returned `RobotCommandResponse`.
+- During Start, the button shows an animated progress state and the command strip shows
+  the current phase (`checking_preflight`, `start_requesting`, etc.).
 - Stop always submits controlled stop and shows `Остановка запрошена`,
   `Остановлено` or an error reason in the top command result strip.
 - The latest command state is visible as `lastCommandStatus`, `lastCommandMessage`,
   `lastCommandReasonCode`, `lastCommandAt` and `lastCommandNextSessionAt`.
+
+Quotes:
+
+- `/market/overview` populates `last_price`, `last_price_at`, `last_price_source`,
+  `quote_status` and `last_candle_timeframe`.
+- If live order book is unavailable, the dashboard shows the latest known candle close
+  instead of an empty market panel.
+- Balance, session state and current/last prices must be visible without starting
+  strategy shadow or live trading.
 
 Analytics pages:
 

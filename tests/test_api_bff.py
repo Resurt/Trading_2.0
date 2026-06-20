@@ -32,6 +32,7 @@ from trading_common.db.models import (
     FillEvent,
     HourlyReport,
     InstrumentRegistry,
+    MarketCandle,
     MarketMicrostructureSnapshot,
     OrderBookSummary,
     OrderIntent,
@@ -639,6 +640,9 @@ def test_robot_status_and_market_overview(
     assert status["balance"]["balance_degraded"] is False
     assert "account-1" not in str(status["balance"])
     assert market["instruments"][0]["instrument_id"] == "MOEX:SBER"
+    assert market["instruments"][0]["last_price"] == "100.05000000"
+    assert market["instruments"][0]["last_price_source"] == "live_order_book"
+    assert market["instruments"][0]["quote_status"] == "live"
     assert market["instruments"][0]["mid_price"] == "100.05000000"
     assert latest_microstructure[0]["source"] == "data_only_shadow"
     assert latest_microstructure[0]["spread_bps"] == "9.9950"
@@ -659,6 +663,58 @@ def test_portfolio_summary_degrades_when_balance_missing(tmp_path: Path) -> None
     assert summary["balance"]["balance_degraded"] is True
     assert summary["balance"]["balance_degraded_reason_code"] == "broker_balance_unavailable"
     assert "balance_unavailable" in status["degraded_flags"]
+
+
+def test_market_overview_uses_latest_candle_when_order_book_missing(tmp_path: Path) -> None:
+    database = DatabaseService(f"sqlite+pysqlite:///{tmp_path / 'quotes-fallback.db'}")
+    Base.metadata.create_all(database.engine)
+    now = utc(2026, 6, 20, 18)
+    with database.session_scope() as session:
+        session.add(
+            InstrumentRegistry(
+                instrument_id="MOEX:SBER",
+                ticker="SBER",
+                class_code="TQBR",
+                figi="figi-sber",
+                instrument_uid="uid-sber",
+                name="Sber",
+                lot_size=10,
+                min_price_increment=Decimal("0.01"),
+                currency="RUB",
+                is_enabled=True,
+                source="test",
+                resolution_status="resolved",
+                instrument_payload={},
+            )
+        )
+        session.add(
+            MarketCandle(
+                **session_context(),
+                instrument_id="MOEX:SBER",
+                timeframe="1m",
+                open_ts_utc=now - timedelta(minutes=1),
+                close_ts_utc=now,
+                exchange_open_ts=now - timedelta(minutes=1),
+                exchange_close_ts=now,
+                open_price=Decimal("312.10"),
+                high_price=Decimal("312.50"),
+                low_price=Decimal("312.00"),
+                close_price=Decimal("312.42"),
+                volume_lots=Decimal("1000"),
+                is_closed=True,
+                source="historical",
+                candle_payload={},
+            )
+        )
+    app = create_fastapi_app(database=database, report_task_client=FakeReportTaskClient())
+    client = TestClient(app)
+
+    market = client.get("/market/overview").json()
+
+    assert market["instruments"][0]["instrument_id"] == "MOEX:SBER"
+    assert market["instruments"][0]["last_price"] == "312.42000000"
+    assert market["instruments"][0]["last_price_source"] == "last_candle"
+    assert market["instruments"][0]["quote_status"] == "last_close"
 
 
 def test_portfolio_refresh_masks_account_id_and_updates_summary(

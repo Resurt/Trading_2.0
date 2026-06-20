@@ -68,6 +68,11 @@ function mountWithStores() {
     instruments: [
       {
         instrument_id: "MOEX:SBER",
+        last_price: "100.05",
+        last_price_at: "2026-06-13T07:10:00Z",
+        last_price_source: "live_order_book",
+        quote_status: "live",
+        last_candle_timeframe: "1m",
         spread: "0.1",
         mid_price: "100.05",
         market_quality: "0.92",
@@ -160,12 +165,13 @@ describe("LiveDashboardView", () => {
     expect(wrapper.text()).toContain("MOEX:SBER");
     expect(wrapper.text()).toContain("spread_too_wide");
     expect(wrapper.text()).toContain("spread above configured threshold");
-    expect(wrapper.text()).toContain("weekday_main");
+    expect(wrapper.text()).toContain("Котировки core universe");
+    expect(wrapper.text()).toContain("Сессия MOEX");
     expect(wrapper.text()).toContain("request-1");
-    expect(wrapper.text()).toContain("Stream health / reconnect");
-    expect(wrapper.text()).toContain("Strategy trading disabled: data-only shadow mode");
+    expect(wrapper.text()).toContain("Соединения");
+    expect(wrapper.text()).toContain("отключена; заявки не выставляются");
     expect(wrapper.text()).toContain("acc***001");
-    expect(wrapper.text()).toContain("Обновить баланс");
+    expect(wrapper.text()).toContain("Баланс обновляется автоматически");
   });
 
   it("renders degraded balance state", async () => {
@@ -180,7 +186,7 @@ describe("LiveDashboardView", () => {
     };
     await nextTick();
 
-    expect(wrapper.text()).toContain("Баланс недоступен");
-    expect(wrapper.text()).toContain("broker_balance_unavailable");
+    expect(wrapper.text()).toContain("Счёт не получен");
+    expect(wrapper.text()).toContain("Нет сохранённых данных счёта");
   });
 });

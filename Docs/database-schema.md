@@ -75,10 +75,10 @@ audit_event
 | `signal_candidate` | Потенциальный сигнал до прохождения blocker/risk/execution gates. |
 | `blocker_event` | Причинная цепочка blockers/gates с `reason_code`. |
 | `order_intent` | Идемпотентное внутреннее намерение разместить/отменить/заменить ордер. |
-| `broker_order` | Наблюдаемый broker lifecycle по `request_order_id` и `exchange_order_id`. |
+| `broker_order` | Наблюдаемый broker lifecycle по `request_order_id` и `exchange_order_id`. Includes `ix_broker_order_status_observed` for fast live-dashboard open-order reads. |
 | `fill_event` | Исполнения и частичные исполнения. |
 | `risk_event` | Решения risk engine и нарушения лимитов. |
-| `position_snapshot` | Снимки позиции на границах micro-session и risk events. |
+| `position_snapshot` | Снимки позиции на границах micro-session и risk events. Includes `ix_position_snapshot_snapshot_ts` for fast latest-balance dashboard reads. |
 | `market_candle` | Закрытые свечи и бары с UTC/exchange timestamps. |
 | `market_status_snapshot` | Нормализованные status/info snapshots. |
 | `order_book_summary` | Lightweight агрегаты стакана без хранения полного стакана на каждый тик. |
@@ -153,5 +153,13 @@ This document started as the bootstrap schema description. The current schema ma
 - `calibration_diagnostic_run` for no-trade, health and drift diagnostics.
 - `strategy_config_candidate` for draft/proposal config candidates only.
 - `market_regime_snapshot` for regime and drift snapshots.
+
+Dashboard read-model indexes:
+
+- `ix_position_snapshot_snapshot_ts` keeps latest balance and position reads fast.
+- `ix_broker_order_status_observed` keeps open-order dashboard counts bounded.
+- `ix_session_run_started_at` keeps current-session reads fast.
+- `ix_strategy_state_event_ts` keeps latest strategy-state reads fast.
+- `ix_robot_command_requested_at` keeps operator control-state reads fast.
 
 Current migration source of truth is `packages/common/alembic/versions/` and SQLAlchemy models in `packages/common/src/trading_common/db/models.py`.

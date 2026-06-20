@@ -142,6 +142,7 @@ class SessionRun(Base, SessionContextMixin):
     __table_args__ = (
         UniqueConstraint("micro_session_id", name="uq_session_run_micro_session_id"),
         Index("ix_session_run_trading_date_type", "trading_date", "session_type"),
+        Index("ix_session_run_started_at", "started_at"),
     )
 
     run_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
@@ -464,6 +465,7 @@ class BrokerOrder(Base, SessionContextMixin):
         UniqueConstraint("request_order_id", name="uq_broker_order_request_order_id"),
         Index("ix_broker_order_exchange_order_id", "exchange_order_id", unique=True),
         Index("ix_broker_order_status", "trading_date", "broker_status"),
+        Index("ix_broker_order_status_observed", "broker_status", "last_observed_at"),
         Index("ix_broker_order_candidate", "candidate_id"),
         Index(
             "ix_broker_order_scope",
@@ -641,6 +643,7 @@ class PositionSnapshot(Base, SessionContextMixin):
     __tablename__ = "position_snapshot"
     __table_args__ = (
         Index("ix_position_snapshot_instrument", "trading_date", "instrument_id"),
+        Index("ix_position_snapshot_snapshot_ts", "snapshot_ts"),
         UniqueConstraint(
             "micro_session_id",
             "instrument_id",
@@ -801,6 +804,7 @@ class StrategyStateEvent(Base, SessionContextMixin, EventTimestampMixin):
     __tablename__ = "strategy_state_event"
     __table_args__ = (
         Index("ix_strategy_state_event_strategy", "trading_date", "strategy_id"),
+        Index("ix_strategy_state_event_ts", "ts_utc"),
         {"postgresql_partition_by": "RANGE (trading_date)"},
     )
 
@@ -1367,6 +1371,7 @@ class RobotCommand(Base, TimestampMixin):
         ),
         Index("ix_robot_command_status_requested", "status", "requested_at"),
         Index("ix_robot_command_type_requested", "command_type", "requested_at"),
+        Index("ix_robot_command_requested_at", "requested_at"),
     )
 
     command_id: Mapped[UUID] = mapped_column(

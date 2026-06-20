@@ -303,12 +303,25 @@ the UI shows `blocked_by_preflight` and does not submit a start command. Direct
 `POST /robot/start` calls are also guarded by API preflight and return a rejected
 command response when the market is closed or unavailable.
 
+The Start button must show an animated preflight/start progress state, not a silent
+disabled button. The command strip shows the phase, message, reason code and next
+session time when available.
+
 Broker balance can be refreshed independently of market hours. This is readonly account
 state for operator visibility and never enables trading:
 
 ```powershell
 python scripts/run_broker_balance_refresh.py --json-output
 ```
+
+The Live Dashboard auto-refreshes broker balance through readonly `/portfolio/refresh`
+while the page is open. If T-Invest does not return an account or times out, the card
+shows a human-readable degraded reason instead of using raw `api_snapshot_unavailable`
+as the main operator text.
+
+The Live Dashboard also shows quotes for the core universe. `/market/overview` prefers
+live order-book mid price and falls back to the latest stored `1m` candle close when
+the market is closed or no live book has been collected yet.
 
 Runbook: `Docs/runbooks/data-only-shadow.md`.
 

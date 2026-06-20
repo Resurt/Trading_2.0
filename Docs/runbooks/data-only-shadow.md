@@ -168,6 +168,11 @@ If `market_open=false`, the UI shows `blocked_by_preflight`, the `reason_code` a
 API calls to `POST /robot/start` are also guarded and return a rejected
 `RobotCommandResponse` instead of starting streams.
 
+The Start button must show an animated progress state while preflight/start is in
+flight. A disabled button without command feedback is a UI bug. The command strip
+must show the current phase, operator message, reason code and next session time when
+available.
+
 Stop remains a controlled operator command and shows its result in the command status strip.
 
 ## Broker balance visibility
@@ -182,3 +187,13 @@ The command is readonly: it uses `get_accounts`, `get_portfolio` and `get_positi
 only. It writes masked `broker_balance` payloads for `/portfolio/summary` and
 `/robot/status.balance`. If broker balance is unavailable, the dashboard still shows
 the card with `balance_degraded=true` and `balance_degraded_reason_code`.
+
+The dashboard auto-refreshes balance through readonly `POST /portfolio/refresh` while
+open. The manual CLI remains useful for morning preflight and troubleshooting.
+
+## Dashboard quotes
+
+The Live Dashboard must show the core universe prices even when live collection is not
+running. `/market/overview` uses live order-book mid price when available and falls
+back to the latest stored `1m` candle close when the market is closed or order book
+samples have not been collected yet.

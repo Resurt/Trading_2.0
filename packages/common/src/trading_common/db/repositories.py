@@ -554,7 +554,7 @@ class RobotCommandRepository:
         return self._session.get(RobotCommand, parsed_id)
 
     def latest(self) -> RobotCommand | None:
-        stmt = select(RobotCommand).order_by(RobotCommand.requested_at.desc())
+        stmt = select(RobotCommand).order_by(RobotCommand.requested_at.desc()).limit(1)
         return self._session.execute(stmt).scalars().first()
 
     def list_requested(self, *, limit: int = 20) -> list[RobotCommand]:
