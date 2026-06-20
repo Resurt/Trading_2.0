@@ -70,15 +70,35 @@ onMounted(() => {
           {{ robot.status.micro_session_id ?? "no_micro_session" }}
           <b>{{ countdownFromMicroSession(robot.status.micro_session_id) }}</b>
         </span>
+        <span v-if="robot.lastCommandStatus" class="command-result" data-testid="command-result">
+          <StatusPill :code="robot.lastCommandStatus" compact />
+          <span>{{ robot.lastCommandMessage }}</span>
+          <code v-if="robot.lastCommandReasonCode">{{ robot.lastCommandReasonCode }}</code>
+          <small v-if="robot.lastCommandNextSessionAt">
+            next {{ compactDateTime(robot.lastCommandNextSessionAt) }}
+          </small>
+        </span>
       </div>
 
       <div class="top-actions">
         <span class="last-sync">{{ compactDateTime(robot.lastDashboardMessageAt) }}</span>
-        <button class="icon-button icon-button--good" title="Запросить запуск" @click="robot.startRobot">
+        <button
+          class="icon-button icon-button--good"
+          title="Запросить запуск data-only сбора"
+          type="button"
+          :disabled="robot.commandLoading"
+          @click="robot.startRobot"
+        >
           <CirclePlay :size="18" aria-hidden="true" />
-          <span>Start</span>
+          <span>{{ robot.commandLoading ? "Wait" : "Start" }}</span>
         </button>
-        <button class="icon-button icon-button--danger" title="Controlled stop" @click="robot.stopRobot">
+        <button
+          class="icon-button icon-button--danger"
+          title="Запросить controlled stop"
+          type="button"
+          :disabled="robot.commandLoading"
+          @click="robot.stopRobot"
+        >
           <Square :size="16" aria-hidden="true" />
           <span>Stop</span>
         </button>

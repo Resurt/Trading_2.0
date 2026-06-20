@@ -307,4 +307,13 @@ Portfolio/account visibility uses readonly methods:
 - `get_portfolio`
 - `get_positions`
 
+`scripts/run_broker_balance_refresh.py` and `POST /portfolio/refresh` use only those
+readonly methods. They write a `broker_balance` payload into the portfolio read model
+so `/portfolio/summary` and `/robot/status.balance` can show real account state even
+when the market is closed.
+
 Balance read models must mask account ids and must not log secrets or full account identifiers. If broker balance is unavailable, API returns `balance_degraded=true` with a reason code instead of hiding the Balance card.
+
+Balance refresh must never call `PostOrder`, `CancelOrder`, `post_stop_order` or any
+order-changing method. It is operator visibility only and does not imply permission
+to trade in data-only mode.

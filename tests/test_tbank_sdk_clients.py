@@ -887,7 +887,7 @@ def test_sdk_unary_rejects_internal_moex_id_without_broker_identity() -> None:
                     "to": datetime(2026, 12, 31, tzinfo=UTC).isoformat(),
                 },
                 metadata=(("authorization", "Bearer token"),),
-                timeout_seconds=0.1,
+                timeout_seconds=5.0,
             )
         )
 

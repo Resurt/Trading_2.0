@@ -77,6 +77,7 @@ live WebSocket channels для dashboard/orders/market/reports. В production-li
 python -m pytest
 python -m ruff check .
 python -m mypy
+python scripts/run_frontend_text_encoding_check.py
 cd apps/frontend && npm run build
 cd apps/frontend && npm run typecheck
 cd apps/frontend && npm run test:unit
@@ -288,6 +289,26 @@ Data-only shadow writes `market_microstructure_snapshot` and exposes
 `/market/microstructure/latest`, `/market/microstructure/summary`, and
 `/runtime/data-shadow/status`. It does not create `signal_candidate`, `order_intent`,
 `broker_order`, pseudo-orders, `PostOrder`, or `CancelOrder`.
+
+Before using the dashboard Start button or a live data-only smoke, run session preflight.
+Closed market is reported as `market_closed_expected` with `next_session_at` and is not
+a strategy failure:
+
+```powershell
+python scripts/run_data_only_shadow_smoke.py --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR --minutes 0 --preflight-only --require-dividend-sync --json-output
+```
+
+The dashboard Start action calls `/session/preflight` first. If `market_open=false`,
+the UI shows `blocked_by_preflight` and does not submit a start command. Direct
+`POST /robot/start` calls are also guarded by API preflight and return a rejected
+command response when the market is closed or unavailable.
+
+Broker balance can be refreshed independently of market hours. This is readonly account
+state for operator visibility and never enables trading:
+
+```powershell
+python scripts/run_broker_balance_refresh.py --json-output
+```
 
 Runbook: `Docs/runbooks/data-only-shadow.md`.
 

@@ -56,13 +56,77 @@ class RobotControlService:
                 accepted=True,
                 command_id=row.command_id,
                 command=command,
+                command_type=command.value,
                 requested_by_role=auth.role,
                 requested_by=auth.subject,
                 requested_at=row.requested_at,
                 status=row.status,
                 reason_code=row.reason_code,
                 payload=dict(row.payload),
+                preflight_result=_preflight_payload(payload),
                 message=f"Robot command {command.value} persisted for trade-core",
+            )
+
+    def reject(
+        self,
+        *,
+        command: RobotCommand,
+        auth: AuthContext,
+        reason_code: str,
+        message: str,
+        payload: Mapping[str, object] | None = None,
+    ) -> RobotCommandResponse:
+        requested_at = datetime.now(tz=UTC)
+        result_payload = {
+            "accepted": False,
+            "reason_code": reason_code,
+            "message": message,
+            **dict(payload or {}),
+        }
+        with self._database.session_scope() as session:
+            repository = RobotCommandRepository(session)
+            row = repository.create(
+                command_type=command.value,
+                requested_by=auth.subject,
+                requested_role=auth.role.value,
+                requested_at=requested_at,
+                payload=payload,
+                reason_code=reason_code,
+            )
+            repository.mark_rejected(
+                row,
+                rejected_at=requested_at,
+                reason_code=reason_code,
+                result_payload=result_payload,
+            )
+            session.add(
+                _audit_event(
+                    action=f"robot_command_{command.value}_rejected_preflight",
+                    actor=auth.subject,
+                    command_id=str(row.command_id),
+                    payload={
+                        "command_type": command.value,
+                        "requested_role": auth.role.value,
+                        "auth_mode": auth.auth_mode,
+                        "reason_code": reason_code,
+                        "payload": dict(payload or {}),
+                    },
+                    ts_utc=requested_at,
+                )
+            )
+            return RobotCommandResponse(
+                accepted=False,
+                command_id=row.command_id,
+                command=command,
+                command_type=command.value,
+                requested_by_role=auth.role,
+                requested_by=auth.subject,
+                requested_at=row.requested_at,
+                status=row.status,
+                reason_code=row.reason_code,
+                payload=dict(row.payload),
+                preflight_result=_preflight_payload(payload),
+                message=message,
             )
 
     def start(self, *, auth: AuthContext) -> RobotCommandResponse:
@@ -118,3 +182,10 @@ def _audit_event(
         correlation_id=command_id,
         audit_payload=dict(payload),
     )
+
+
+def _preflight_payload(payload: Mapping[str, object] | None) -> dict[str, object] | None:
+    if payload is None:
+        return None
+    value = dict(payload).get("preflight_result")
+    return value if isinstance(value, dict) else None

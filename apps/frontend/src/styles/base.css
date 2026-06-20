@@ -148,6 +148,32 @@ code {
   font-weight: 700;
 }
 
+.command-result {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  max-width: min(620px, 100%);
+  padding: 6px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  font-size: 12px;
+}
+
+.command-result > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.command-result code,
+.command-result small {
+  flex: none;
+  color: var(--color-text-muted);
+}
+
 .side-nav {
   grid-area: nav;
   display: flex;
@@ -241,6 +267,16 @@ code {
 
 .metric-grid--compact {
   grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.dashboard-command-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  padding: 0 var(--space-1);
+  color: var(--color-text-muted);
+  font-size: 12px;
 }
 
 .metric-tile {
@@ -371,6 +407,11 @@ code {
 
 .icon-button:hover {
   background: var(--color-surface-elevated);
+}
+
+.icon-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
 }
 
 .icon-button--good {

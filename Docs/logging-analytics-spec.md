@@ -1132,6 +1132,8 @@ New structured events/payloads:
 - `market_closed_expected`: closed market by broker/fallback schedule, with `next_session_at`.
 - `data_only_shadow_preflight`: preflight-only smoke result before stream startup.
 - `balance_refresh`: broker account/portfolio read model update; full account id must not be logged.
+- `robot_command_rejected_preflight`: API rejected a Start command because preflight did
+  not return `market_open=true`; payload includes `reason_code` and `preflight_result`.
 - `intraday_analytics_rebuild`: rebuild of `intraday_session_analytics`.
 - `calibration_observatory_run`: diagnostic run for rolling cube, regime and candidate proposals.
 

@@ -20,6 +20,9 @@ REST endpoints:
 
 - `/robot/status`
 - `/session/current`
+- `/session/preflight`
+- `/portfolio/summary`
+- `/portfolio/refresh`
 - `/positions`
 - `/orders/open`
 - `/signals/current`
@@ -205,7 +208,8 @@ UI должен определить tokens:
 
 Pinia stores:
 
-- `robot` - `/robot/status`, `/session/current`, `/signals/current`, `/ws/dashboard`, start/stop commands.
+- `robot` - `/robot/status`, `/session/current`, `/session/preflight`, `/signals/current`,
+  `/portfolio/refresh`, `/ws/dashboard`, start/stop commands and last command result.
 - `market` - `/market/overview`, `/ws/market`, selected instrument и top-of-book read model.
 - `portfolio` - `/positions`, `/orders/open`, `/ws/orders`.
 - `reports` - `/reports/hourly`, `/reports/daily`, `/reports/counterfactual`, `/reports/daily/run`, `/ws/reports`.
@@ -257,10 +261,24 @@ Current Live Dashboard blocks:
 
 Balance card:
 
-- shows portfolio value, available cash, blocked cash, expected yield and freshness;
+- shows portfolio value, available cash, blocked cash, expected yield, masked account id
+  and freshness;
 - shows masked account id only;
-- shows `Balance unavailable` and `balance_degraded_reason_code` when broker balance is missing;
+- shows `Баланс недоступен` and `balance_degraded_reason_code` when broker balance is missing;
+- includes an `Обновить баланс` action that calls readonly `POST /portfolio/refresh`;
 - remains readonly account state in data-only shadow mode and never implies trading permission.
+
+Start/Stop command feedback:
+
+- Start first calls `GET /session/preflight` with the core data-only universe.
+- If `market_open=false`, Start shows `blocked_by_preflight`, `reason_code` and
+  `next_session_at` when present, and does not silently submit a start command.
+- If `market_open=true`, Start submits the data-only start command and shows the
+  returned `RobotCommandResponse`.
+- Stop always submits controlled stop and shows `Остановка запрошена`,
+  `Остановлено` or an error reason in the top command result strip.
+- The latest command state is visible as `lastCommandStatus`, `lastCommandMessage`,
+  `lastCommandReasonCode`, `lastCommandAt` and `lastCommandNextSessionAt`.
 
 Analytics pages:
 

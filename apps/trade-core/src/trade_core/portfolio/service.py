@@ -115,6 +115,7 @@ class PositionService:
         *,
         reason: str,
         now: datetime | None = None,
+        account_payload: Mapping[str, Any] | None = None,
     ) -> PositionRefreshResult:
         """Fetch broker state and write normalized `position_snapshot` rows."""
 
@@ -137,6 +138,7 @@ class PositionService:
             positions_payload=positions_response.data,
             portfolio_payload=portfolio_response.data,
             observed_at=observed_at,
+            account_payload=account_payload,
         )
         snapshots = tuple(
             self._write_position_snapshot(
@@ -464,6 +466,7 @@ def _broker_balance_payload(
     positions_payload: Mapping[str, Any],
     portfolio_payload: Mapping[str, Any],
     observed_at: datetime,
+    account_payload: Mapping[str, Any] | None = None,
 ) -> JsonPayload:
     available_cash, currency = _money_sum(positions_payload.get("money"))
     blocked_cash, blocked_currency = _money_sum(positions_payload.get("blocked"))
@@ -471,6 +474,8 @@ def _broker_balance_payload(
     return {
         "account_id_masked": _mask_account_id(account_id),
         "account_id_present": bool(account_id),
+        "account_type": _string_or_none((account_payload or {}).get("type")),
+        "account_status": _string_or_none((account_payload or {}).get("status")),
         "balance_currency": balance_currency,
         "total_portfolio_value_rub": _decimal_payload(
             _decimal_or_none(portfolio_payload.get("total_amount_portfolio"))
@@ -486,6 +491,13 @@ def _broker_balance_payload(
         "last_balance_refresh_at": observed_at.isoformat(),
         "source": "broker_portfolio_and_positions",
     }
+
+
+def _string_or_none(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _money_sum(value: object) -> tuple[Decimal | None, str | None]:

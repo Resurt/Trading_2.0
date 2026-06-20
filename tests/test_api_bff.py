@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -9,12 +10,14 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
+from trade_core.broker_gateway import BrokerUnaryResponse
 from trading_api import create_fastapi_app
 from trading_api.schemas import (
     DailyReportRunRequest,
     ReportJobResponse,
     ReportJobStatusResponse,
     ReportRebuildRequest,
+    SessionPreflightResponse,
 )
 from trading_common import RuntimeMode
 from trading_common.db.base import Base
@@ -87,6 +90,48 @@ class FakeReportTaskClient:
         )
 
 
+class FakeBalanceGateway:
+    async def get_accounts(self, request: object) -> BrokerUnaryResponse:
+        del request
+        return BrokerUnaryResponse(
+            method_name="GetAccounts",
+            data={
+                "accounts": [
+                    {
+                        "account_id": "account-123456",
+                        "type": "broker",
+                        "status": "open",
+                    }
+                ]
+            },
+        )
+
+    async def get_positions(self, request: object, metadata: object = None) -> BrokerUnaryResponse:
+        del request, metadata
+        return BrokerUnaryResponse(
+            method_name="GetPositions",
+            data={
+                "account_id": "account-123456",
+                "money": [{"currency": "RUB", "units": 125000, "nano": 0}],
+                "blocked": [{"currency": "RUB", "units": 500, "nano": 0}],
+                "positions": [],
+            },
+        )
+
+    async def get_portfolio(self, request: object, metadata: object = None) -> BrokerUnaryResponse:
+        del request, metadata
+        return BrokerUnaryResponse(
+            method_name="GetPortfolio",
+            data={
+                "account_id": "account-123456",
+                "positions": [],
+                "total_amount_portfolio": "220000",
+                "expected_yield": "1234",
+                "available_margin": "75000",
+            },
+        )
+
+
 def make_client(tmp_path: Path) -> TestClient:
     database = DatabaseService(f"sqlite+pysqlite:///{tmp_path / 'api-bff.db'}")
     Base.metadata.create_all(database.engine)
@@ -104,6 +149,29 @@ def session_context() -> dict[str, object]:
         "micro_session_id": "2026-06-12:weekday_main:1000",
         "broker_trading_status": "normal_trading",
     }
+
+
+def preflight_response(*, market_open: bool, reason_code: str) -> SessionPreflightResponse:
+    return SessionPreflightResponse(
+        market_open=market_open,
+        market_closed_expected=not market_open,
+        now_msk=utc(2026, 6, 20, 19),
+        trading_date=date(2026, 6, 20),
+        calendar_date=date(2026, 6, 20),
+        session_type="weekend" if not market_open else "weekday_main",
+        session_phase="closed" if not market_open else "continuous_trading",
+        broker_trading_status="closed" if not market_open else "normal_trading",
+        api_trade_available=market_open,
+        next_session_at=utc(2026, 6, 21, 7) if not market_open else None,
+        next_session_type="weekend" if not market_open else None,
+        current_window_start_at=None,
+        current_window_end_at=None,
+        reason_code=reason_code,
+        source="test_preflight",
+        instruments_checked=["MOEX:SBER"],
+        per_instrument_status={},
+        warnings=[],
+    )
 
 
 def seed_database(database: DatabaseService) -> None:
@@ -593,7 +661,40 @@ def test_portfolio_summary_degrades_when_balance_missing(tmp_path: Path) -> None
     assert "balance_unavailable" in status["degraded_flags"]
 
 
-def test_management_auth_and_daily_report_job(tmp_path: Path) -> None:
+def test_portfolio_refresh_masks_account_id_and_updates_summary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import trade_core.infra.tbank as tbank_module
+
+    monkeypatch.setattr(tbank_module, "TBankBrokerGateway", FakeBalanceGateway)
+    client = make_client(tmp_path)
+
+    refreshed = client.post(
+        "/portfolio/refresh",
+        headers={"X-API-Role": "operator"},
+        json={},
+    ).json()
+    summary = client.get("/portfolio/summary").json()
+
+    assert refreshed["balance"]["balance_degraded"] is False
+    assert refreshed["balance"]["total_portfolio_value_rub"] == "220000"
+    assert refreshed["balance"]["available_cash_rub"] == "125000"
+    assert refreshed["balance"]["account_id_masked"] == "acc***456"
+    assert "account-123456" not in str(refreshed)
+    assert summary["balance"]["account_id_masked"] == "acc***456"
+
+
+def test_management_auth_and_daily_report_job(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    async def open_preflight(*args: object, **kwargs: object) -> SessionPreflightResponse:
+        del args, kwargs
+        return preflight_response(market_open=True, reason_code="market_open")
+
+    app_module = importlib.import_module("trading_api.app")
+    monkeypatch.setattr(app_module, "_run_session_preflight", open_preflight)
     client = make_client(tmp_path)
 
     assert client.post("/robot/start").status_code == 403
@@ -624,6 +725,63 @@ def test_management_auth_and_daily_report_job(tmp_path: Path) -> None:
     assert rebuild["task_name"] == "report_worker.build_hourly_report"
     assert job_status["status"] == "success"
     assert job_status["successful"] is True
+
+
+def test_robot_start_closed_market_is_rejected_by_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    async def closed_preflight(*args: object, **kwargs: object) -> SessionPreflightResponse:
+        del args, kwargs
+        return preflight_response(market_open=False, reason_code="weekend_session_closed")
+
+    app_module = importlib.import_module("trading_api.app")
+    monkeypatch.setattr(app_module, "_run_session_preflight", closed_preflight)
+    database = DatabaseService(f"sqlite+pysqlite:///{tmp_path / 'closed-start.db'}")
+    Base.metadata.create_all(database.engine)
+    seed_database(database)
+    app = create_fastapi_app(database=database, report_task_client=FakeReportTaskClient())
+    client = TestClient(app)
+
+    response = client.post("/robot/start", headers={"X-API-Role": "operator"}).json()
+
+    assert response["accepted"] is False
+    assert response["status"] == "rejected"
+    assert response["reason_code"] == "weekend_session_closed"
+    assert response["preflight_result"]["market_closed_expected"] is True
+    with database.session_scope() as session:
+        command = session.get(RobotCommand, UUID(response["command_id"]))
+        audit = (
+            session.query(AuditEvent)
+            .filter(AuditEvent.entity_id == response["command_id"])
+            .one()
+        )
+        assert command is not None
+        assert command.status == "rejected"
+        assert audit.action == "robot_command_start_rejected_preflight"
+
+
+def test_session_preflight_endpoint_returns_closed_market(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    async def closed_preflight(*args: object, **kwargs: object) -> SessionPreflightResponse:
+        del args, kwargs
+        return preflight_response(market_open=False, reason_code="market_closed_expected")
+
+    app_module = importlib.import_module("trading_api.app")
+    monkeypatch.setattr(app_module, "_run_session_preflight", closed_preflight)
+    client = make_client(tmp_path)
+
+    response = client.get(
+        "/session/preflight",
+        headers={"X-API-Role": "observer"},
+        params={"instruments": "SBER,GAZP"},
+    ).json()
+
+    assert response["market_open"] is False
+    assert response["market_closed_expected"] is True
+    assert response["reason_code"] == "market_closed_expected"
 
 
 def test_intraday_and_calibration_observatory_api_roles(tmp_path: Path) -> None:

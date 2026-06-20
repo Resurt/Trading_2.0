@@ -36,12 +36,14 @@ class RobotCommandResponse(BaseModel):
     accepted: bool
     command_id: UUID | None = None
     command: RobotCommand
+    command_type: str | None = None
     requested_by_role: ApiRole
     requested_by: str = "unknown"
     requested_at: datetime | None = None
     status: str
     reason_code: str | None = None
     payload: JsonPayload = Field(default_factory=dict)
+    preflight_result: JsonPayload | None = None
     message: str
 
 
@@ -118,6 +120,31 @@ class PortfolioSummaryResponse(BaseModel):
     balance: MoneyBalance
     positions_count: int
     source: str
+
+
+class PortfolioRefreshRequest(BaseModel):
+    account_id: str | None = None
+
+
+class SessionPreflightResponse(BaseModel):
+    market_open: bool
+    market_closed_expected: bool
+    now_msk: datetime
+    trading_date: date
+    calendar_date: date
+    session_type: str
+    session_phase: str
+    broker_trading_status: str
+    api_trade_available: bool
+    next_session_at: datetime | None = None
+    next_session_type: str | None = None
+    current_window_start_at: datetime | None = None
+    current_window_end_at: datetime | None = None
+    reason_code: str
+    source: str
+    instruments_checked: list[str]
+    per_instrument_status: JsonPayload = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class OrderResponse(BaseModel):

@@ -26,12 +26,15 @@ import type {
   MarketSpecialDayClassificationResponse,
   MarketSpecialDayResponse,
   OrderResponse,
+  PortfolioSummaryResponse,
   PositionResponse,
   ReportJobResponse,
   ReportJobStatusResponse,
   ReportRebuildRequest,
+  RobotCommandResponse,
   RobotStatusResponse,
   RollingPerformanceCubeResponse,
+  SessionPreflightResponse,
   SessionSnapshotResponse,
   SignalResponse,
   StrategyConfigCandidateRejectRequest,
@@ -133,7 +136,16 @@ export const apiClient = {
     requestJson<WebSocketTicketResponse>("/auth/ws-ticket", { method: "POST" }, role),
   robotStatus: () => requestJson<RobotStatusResponse>("/robot/status"),
   currentSession: () => requestJson<SessionSnapshotResponse>("/session/current"),
+  sessionPreflight: (query: Record<string, QueryValue> = {}) =>
+    requestJson<SessionPreflightResponse>(withQuery("/session/preflight", query)),
   positions: () => requestJson<PositionResponse[]>("/positions"),
+  portfolioSummary: () => requestJson<PortfolioSummaryResponse>("/portfolio/summary"),
+  refreshPortfolio: (payload: Record<string, unknown> = {}) =>
+    requestJson<PortfolioSummaryResponse>(
+      "/portfolio/refresh",
+      { method: "POST", body: JSON.stringify(payload) },
+      "operator",
+    ),
   openOrders: () => requestJson<OrderResponse[]>("/orders/open"),
   currentSignals: () => requestJson<SignalResponse[]>("/signals/current"),
   marketOverview: () => requestJson<MarketOverviewResponse>("/market/overview"),
@@ -297,8 +309,14 @@ export const apiClient = {
       { method: "PUT", body: JSON.stringify(payload) },
       "operator",
     ),
-  startRobot: () => requestJson("/robot/start", { method: "POST" }, "operator"),
-  stopRobot: () => requestJson("/robot/stop", { method: "POST" }, "operator"),
+  startRobot: (payload: Record<string, unknown> = {}) =>
+    requestJson<RobotCommandResponse>(
+      "/robot/start",
+      { method: "POST", body: JSON.stringify(payload) },
+      "operator",
+    ),
+  stopRobot: () =>
+    requestJson<RobotCommandResponse>("/robot/stop", { method: "POST" }, "operator"),
   rebuildDailyReport: (payload: DailyReportRunRequest) =>
     requestJson<ReportJobResponse>(
       "/reports/daily/run",

@@ -13,7 +13,7 @@ CLASS_CODE ?= TQBR
 DATA_SHADOW_MINUTES ?= 10
 DATA_SHADOW_LOOKBACK_HOURS ?= 6
 
-.PHONY: lint test up down logs frontend-build migrate migrate-down replay-smoke sandbox-smoke historical-backfill-dry-run historical-quality historical-replay historical-counterfactual historical-report-rebuild calibration-report corporate-actions-import instrument-resolve instrument-resolution-check dividend-sync dividend-sync-730d market-special-days market-special-days-future calibration-primary calibration-special-days historical-replay-clean data-shadow-smoke data-shadow-report data-shadow-readiness api-route-smoke docs-check analytics-smoke report-rebuild replay-day controlled-launch-acceptance launch-readiness observability-up report-worker-smoke celery-inspect
+.PHONY: lint test up down logs frontend-build frontend-encoding-check migrate migrate-down replay-smoke sandbox-smoke historical-backfill-dry-run historical-quality historical-replay historical-counterfactual historical-report-rebuild calibration-report corporate-actions-import instrument-resolve instrument-resolution-check dividend-sync dividend-sync-730d market-special-days market-special-days-future calibration-primary calibration-special-days historical-replay-clean data-shadow-smoke data-shadow-report data-shadow-readiness api-route-smoke docs-check analytics-smoke report-rebuild replay-day controlled-launch-acceptance launch-readiness observability-up report-worker-smoke celery-inspect
 
 lint:
 	$(PYTHON) -m ruff check .
@@ -24,6 +24,9 @@ test:
 
 frontend-build:
 	cd apps/frontend && $(NPM) run build
+
+frontend-encoding-check:
+	$(PYTHON) scripts/run_frontend_text_encoding_check.py
 
 up:
 	docker compose up -d --build

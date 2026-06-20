@@ -21,6 +21,48 @@ export interface MoneyBalance {
   balance_degraded_reason_code: string | null;
 }
 
+export interface PortfolioSummaryResponse {
+  balance: MoneyBalance;
+  positions_count: number;
+  source: string;
+}
+
+export interface SessionPreflightResponse {
+  market_open: boolean;
+  market_closed_expected: boolean;
+  now_msk: string;
+  trading_date: string;
+  calendar_date: string;
+  session_type: string;
+  session_phase: string;
+  broker_trading_status: string;
+  api_trade_available: boolean;
+  next_session_at: string | null;
+  next_session_type: string | null;
+  current_window_start_at: string | null;
+  current_window_end_at: string | null;
+  reason_code: string;
+  source: string;
+  instruments_checked: string[];
+  per_instrument_status: JsonPayload;
+  warnings: string[];
+}
+
+export interface RobotCommandResponse {
+  accepted: boolean;
+  command_id: string | null;
+  command: string;
+  command_type: string | null;
+  requested_by_role: string;
+  requested_by: string;
+  requested_at: string | null;
+  status: string;
+  reason_code: string | null;
+  payload: JsonPayload;
+  preflight_result: SessionPreflightResponse | JsonPayload | null;
+  message: string;
+}
+
 export interface RobotStatusResponse {
   balance: MoneyBalance;
   active_instruments: string[];

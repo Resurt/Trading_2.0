@@ -165,6 +165,7 @@ describe("LiveDashboardView", () => {
     expect(wrapper.text()).toContain("Stream health / reconnect");
     expect(wrapper.text()).toContain("Strategy trading disabled: data-only shadow mode");
     expect(wrapper.text()).toContain("acc***001");
+    expect(wrapper.text()).toContain("Обновить баланс");
   });
 
   it("renders degraded balance state", async () => {
@@ -179,7 +180,7 @@ describe("LiveDashboardView", () => {
     };
     await nextTick();
 
-    expect(wrapper.text()).toContain("Balance unavailable");
+    expect(wrapper.text()).toContain("Баланс недоступен");
     expect(wrapper.text()).toContain("broker_balance_unavailable");
   });
 });

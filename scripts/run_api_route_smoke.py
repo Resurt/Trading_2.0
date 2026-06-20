@@ -10,10 +10,13 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 EXPECTED_ROUTES = (
+    "/robot/status",
+    "/session/preflight",
+    "/portfolio/summary",
+    "/portfolio/refresh",
     "/market/microstructure/latest",
     "/market/microstructure/summary",
     "/runtime/data-shadow/status",
-    "/portfolio/summary",
     "/analytics/intraday/today",
     "/analytics/intraday",
     "/calibration/observatory/status",
@@ -66,6 +69,7 @@ def run_smoke(args: argparse.Namespace) -> dict[str, object]:
         "frontend_ok": frontend["ok"],
         "openapi_ok": openapi["ok"],
         "missing_routes": missing_routes,
+        "error_code": "docker_rebuild_required" if missing_routes else None,
         "expected_routes": list(EXPECTED_ROUTES),
         "rebuild_hint": REBUILD_HINT if missing_routes else None,
     }

@@ -68,6 +68,8 @@ $env:TRADING_AUTH_MODE = "static_bearer"
 - `min_edge_after_total_costs_bps` is non-negative and documented for the
   active strategy version.
 - Session manager shows the correct `session_type`, `session_phase`, `trading_date`, `calendar_date`.
+- Dashboard shows broker balance or a visible degraded reason from `/robot/status.balance`
+  before any live mode is considered. A hidden/missing balance tile is a launch blocker.
 - Alerts for stream freshness, rejected orders, report backlog and health are active.
 - Operator stop path through `POST /robot/stop` is tested.
 - `emergency_stop` cancellation path is tested: working/submitted/partially-filled orders receive `cancel_reason_code=manual_operator_emergency_stop`; failures put runtime into `degraded`.

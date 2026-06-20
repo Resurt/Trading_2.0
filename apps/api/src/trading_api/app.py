@@ -54,16 +54,20 @@ from trading_api.schemas import (
     MarketMicrostructureSummaryResponse,
     MarketOverviewResponse,
     MarketRegimeSnapshotResponse,
+    MoneyBalance,
     OrderResponse,
+    PortfolioRefreshRequest,
     PortfolioSummaryResponse,
     PositionResponse,
     ReportJobResponse,
     ReportJobStatusResponse,
     ReportRebuildRequest,
     ReportScope,
+    RobotCommand,
     RobotCommandResponse,
     RobotStatusResponse,
     RollingPerformanceCubeResponse,
+    SessionPreflightResponse,
     SessionSnapshotResponse,
     SignalResponse,
     StrategyConfigCandidateRejectRequest,
@@ -180,10 +184,38 @@ def create_fastapi_app(
         )
 
     @app.post("/robot/start", response_model=RobotCommandResponse, tags=["robot"])
-    def robot_start(request: Request, auth: AuthDep) -> RobotCommandResponse:
+    async def robot_start(
+        request: Request,
+        auth: AuthDep,
+        payload: Annotated[dict[str, Any] | None, Body()] = None,
+    ) -> RobotCommandResponse:
         allowed_auth = require_role(auth, (ApiRole.OPERATOR, ApiRole.ADMIN))
         control = _robot_control(request)
-        return control.start(auth=allowed_auth)
+        instruments = _default_preflight_instruments()
+        preflight = await _run_session_preflight(request, instruments=instruments)
+        preflight_payload = preflight.model_dump(mode="json")
+        command_payload: dict[str, object] = {
+            **dict(payload or {}),
+            "preflight_result": preflight_payload,
+            "mode": "data_shadow",
+            "trading_disabled": True,
+        }
+        if not preflight.market_open:
+            return control.reject(
+                command=RobotCommand.START,
+                auth=allowed_auth,
+                reason_code=preflight.reason_code,
+                message=(
+                    "Start rejected by session preflight: "
+                    f"{preflight.reason_code}. Trading remains disabled."
+                ),
+                payload=command_payload,
+            )
+        return control.request(
+            command=RobotCommand.START,
+            auth=allowed_auth,
+            payload=command_payload,
+        )
 
     @app.post("/robot/stop", response_model=RobotCommandResponse, tags=["robot"])
     def robot_stop(request: Request, auth: AuthDep) -> RobotCommandResponse:
@@ -217,6 +249,17 @@ def create_fastapi_app(
     def current_session(service: ReadServiceDep) -> SessionSnapshotResponse:
         return service.current_session()
 
+    @app.get("/session/preflight", response_model=SessionPreflightResponse, tags=["session"])
+    async def session_preflight(
+        request: Request,
+        auth: AuthDep,
+        instruments: Annotated[str | None, Query()] = None,
+        mode: Annotated[str, Query()] = "data_shadow",
+    ) -> SessionPreflightResponse:
+        del mode
+        require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
+        return await _run_session_preflight(request, instruments=instruments)
+
     @app.get("/positions", response_model=list[PositionResponse], tags=["portfolio"])
     def positions(service: ReadServiceDep) -> list[PositionResponse]:
         return service.positions()
@@ -224,6 +267,32 @@ def create_fastapi_app(
     @app.get("/portfolio/summary", response_model=PortfolioSummaryResponse, tags=["portfolio"])
     def portfolio_summary(service: ReadServiceDep) -> PortfolioSummaryResponse:
         return service.portfolio_summary()
+
+    @app.post("/portfolio/refresh", response_model=PortfolioSummaryResponse, tags=["portfolio"])
+    async def portfolio_refresh(
+        request: Request,
+        auth: AuthDep,
+        payload: Annotated[PortfolioRefreshRequest | None, Body()] = None,
+    ) -> PortfolioSummaryResponse:
+        require_role(auth, (ApiRole.OPERATOR, ApiRole.ADMIN))
+        result = await _run_broker_balance_refresh(
+            request,
+            account_id=payload.account_id if payload else None,
+        )
+        database = _database_service(request)
+        with database.session_scope() as session:
+            summary = BffReadService(session).portfolio_summary()
+        if result.balance_refreshed or not summary.balance.balance_degraded:
+            return summary
+        return PortfolioSummaryResponse(
+            balance=MoneyBalance(
+                account_id_masked=result.account_id_masked,
+                balance_degraded=True,
+                balance_degraded_reason_code=result.balance_degraded_reason_code,
+            ),
+            positions_count=0,
+            source=result.source,
+        )
 
     @app.get("/orders/open", response_model=list[OrderResponse], tags=["orders"])
     def open_orders(service: ReadServiceDep) -> list[OrderResponse]:
@@ -1399,6 +1468,149 @@ def create_fastapi_app(
         )
 
     return app
+
+
+async def _run_session_preflight(
+    request: Request,
+    *,
+    instruments: str | None,
+) -> SessionPreflightResponse:
+    from trade_core.broker_gateway import BrokerGateway
+    from trade_core.session import (
+        TradingSessionPreflightConfig,
+        TradingSessionPreflightService,
+    )
+
+    gateway = cast(BrokerGateway, _preflight_broker_gateway())
+    refs = _instrument_refs_for_preflight(_database_service(request), instruments)
+    result = await TradingSessionPreflightService(gateway).run(
+        TradingSessionPreflightConfig(instruments=tuple(refs))
+    )
+    return SessionPreflightResponse(**result.as_payload())
+
+
+async def _run_broker_balance_refresh(
+    request: Request,
+    *,
+    account_id: str | None,
+) -> Any:
+    from trade_core.portfolio import BrokerBalanceRefreshResult, BrokerBalanceRefreshService
+
+    try:
+        from trade_core.infra.tbank import TBankBrokerGateway
+
+        gateway = TBankBrokerGateway()
+    except Exception as exc:
+        return BrokerBalanceRefreshResult(
+            balance_refreshed=False,
+            account_id_masked=_mask_account_id(account_id),
+            total_portfolio_value_rub=None,
+            available_cash_rub=None,
+            blocked_cash_rub=None,
+            expected_yield_rub=None,
+            free_collateral_rub=None,
+            last_balance_refresh_at=None,
+            balance_degraded=True,
+            balance_degraded_reason_code=_reason_from_exception(
+                exc,
+                default="broker_gateway_unavailable",
+            ),
+        )
+    database = _database_service(request)
+    with database.session_scope() as session:
+        service = BrokerBalanceRefreshService(broker_gateway=gateway, session=session)
+        return await service.refresh(account_id=account_id)
+
+
+def _preflight_broker_gateway() -> Any:
+    try:
+        from trade_core.infra.tbank import TBankBrokerGateway
+
+        return TBankBrokerGateway()
+    except Exception:
+        return _UnavailableReadonlyBrokerGateway()
+
+
+class _UnavailableReadonlyBrokerGateway:
+    async def trading_schedules(self, *args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise RuntimeError("broker_schedule_unavailable")
+
+    async def get_trading_status(self, *args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise RuntimeError("broker_status_unavailable")
+
+
+def _instrument_refs_for_preflight(
+    database: DatabaseService,
+    instruments: str | None,
+) -> list[Any]:
+    from sqlalchemy import select
+
+    from trade_core.broker_gateway import InstrumentRef
+    from trading_common.db.models import InstrumentRegistry
+
+    raw_values = [
+        item.strip().upper()
+        for item in (instruments or "").split(",")
+        if item.strip()
+    ]
+    refs: list[Any] = []
+    with database.session_scope() as session:
+        if not raw_values:
+            rows = session.execute(
+                select(InstrumentRegistry)
+                .where(InstrumentRegistry.is_enabled.is_(True))
+                .order_by(InstrumentRegistry.ticker)
+            ).scalars()
+            return [
+                InstrumentRef(
+                    instrument_id=row.instrument_id,
+                    instrument_uid=row.instrument_uid,
+                    figi=row.figi,
+                    class_code=row.class_code,
+                    ticker=row.ticker,
+                )
+                for row in rows
+            ]
+        for raw in raw_values:
+            row = session.get(InstrumentRegistry, raw)
+            if row is None:
+                row = session.execute(
+                    select(InstrumentRegistry).where(InstrumentRegistry.ticker == raw)
+                ).scalars().first()
+            if row is None:
+                refs.append(InstrumentRef(instrument_id=raw, ticker=raw, class_code="TQBR"))
+                continue
+            refs.append(
+                InstrumentRef(
+                    instrument_id=row.instrument_id,
+                    instrument_uid=row.instrument_uid,
+                    figi=row.figi,
+                    class_code=row.class_code,
+                    ticker=row.ticker,
+                )
+            )
+    return refs
+
+
+def _default_preflight_instruments() -> str:
+    return os.getenv("TRADING_INSTRUMENTS", "SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR")
+
+
+def _mask_account_id(account_id: str | None) -> str | None:
+    if not account_id:
+        return None
+    if len(account_id) <= 6:
+        return f"{account_id[:2]}***"
+    return f"{account_id[:3]}***{account_id[-3:]}"
+
+
+def _reason_from_exception(exc: Exception, *, default: str) -> str:
+    text = str(exc).strip()
+    if text and " " not in text and len(text) <= 96:
+        return text
+    return default
 
 
 def _read_service(request: Request) -> Iterator[BffReadService]:

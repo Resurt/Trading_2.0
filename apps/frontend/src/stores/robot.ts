@@ -5,11 +5,16 @@ import { apiClient, openAuthenticatedWebSocket } from "../api/client";
 import type {
   ConnectionState,
   DashboardSnapshotPayload,
+  PortfolioSummaryResponse,
+  RobotCommandResponse,
   RobotStatusResponse,
+  SessionPreflightResponse,
   SessionSnapshotResponse,
   SignalResponse,
   WebSocketEnvelope,
 } from "../api/types";
+
+const CORE_UNIVERSE = "SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR";
 
 const EMPTY_STATUS: RobotStatusResponse = {
   balance: {
@@ -59,8 +64,16 @@ export const useRobotStore = defineStore("robot", () => {
   const signals = ref<SignalResponse[]>([]);
   const loading = ref(false);
   const error = ref<string | null>(null);
+  const snapshotWarnings = ref<string[]>([]);
   const liveConnection = ref<ConnectionState>("idle");
   const lastDashboardMessageAt = ref<string | null>(null);
+  const lastCommandStatus = ref<string | null>(null);
+  const lastCommandMessage = ref<string | null>(null);
+  const lastCommandReasonCode = ref<string | null>(null);
+  const lastCommandAt = ref<string | null>(null);
+  const lastCommandNextSessionAt = ref<string | null>(null);
+  const commandLoading = ref(false);
+  const balanceRefreshLoading = ref(false);
   let dashboardSocket: WebSocket | null = null;
 
   const currentSignal = computed(() => signals.value[0] ?? null);
@@ -70,26 +83,46 @@ export const useRobotStore = defineStore("robot", () => {
   async function fetchInitialSnapshot(): Promise<void> {
     loading.value = true;
     error.value = null;
-    try {
-      const [nextStatus, nextSession, nextSignals] = await Promise.all([
-        apiClient.robotStatus(),
-        apiClient.currentSession(),
-        apiClient.currentSignals(),
-      ]);
-      status.value = nextStatus;
-      session.value = nextSession;
-      signals.value = nextSignals;
-    } catch (unknownError) {
-      error.value = unknownError instanceof Error ? unknownError.message : "API snapshot failed";
+    snapshotWarnings.value = [];
+    const [statusResult, sessionResult, signalsResult] = await Promise.allSettled([
+      apiClient.robotStatus(),
+      apiClient.currentSession(),
+      apiClient.currentSignals(),
+    ]);
+
+    if (statusResult.status === "fulfilled") {
+      status.value = statusResult.value;
+    } else {
+      snapshotWarnings.value.push(`robot_status_unavailable: ${errorMessage(statusResult.reason)}`);
       status.value = {
         ...EMPTY_STATUS,
+        balance: {
+          ...EMPTY_STATUS.balance,
+          balance_degraded: true,
+          balance_degraded_reason_code: "api_snapshot_unavailable",
+        },
         degraded_flags: ["api_snapshot_unavailable"],
       };
-      session.value = EMPTY_SESSION;
-      signals.value = [];
-    } finally {
-      loading.value = false;
     }
+
+    if (sessionResult.status === "fulfilled") {
+      session.value = sessionResult.value;
+    } else {
+      snapshotWarnings.value.push(`session_snapshot_unavailable: ${errorMessage(sessionResult.reason)}`);
+      if (statusResult.status !== "fulfilled") {
+        session.value = EMPTY_SESSION;
+      }
+    }
+
+    if (signalsResult.status === "fulfilled") {
+      signals.value = signalsResult.value;
+    } else {
+      snapshotWarnings.value.push(`signals_unavailable: ${errorMessage(signalsResult.reason)}`);
+      signals.value = [];
+    }
+
+    error.value = snapshotWarnings.value.length ? snapshotWarnings.value.join("; ") : null;
+    loading.value = false;
   }
 
   async function connectDashboardSocket(): Promise<void> {
@@ -139,13 +172,123 @@ export const useRobotStore = defineStore("robot", () => {
   }
 
   async function startRobot(): Promise<void> {
-    await apiClient.startRobot();
-    await fetchInitialSnapshot();
+    commandLoading.value = true;
+    try {
+      const preflight = await apiClient.sessionPreflight({
+        instruments: CORE_UNIVERSE,
+        mode: "data_shadow",
+      });
+      if (!preflight.market_open) {
+        setCommandFromPreflight(preflight);
+        return;
+      }
+      const response = await apiClient.startRobot({ preflight_result: preflight });
+      setCommandFromResponse(response);
+    } catch (unknownError) {
+      setCommandState({
+        status: "preflight_failed",
+        message: `Preflight failed: ${errorMessage(unknownError)}`,
+        reasonCode: "session_preflight_unavailable",
+      });
+    } finally {
+      commandLoading.value = false;
+      await fetchInitialSnapshot();
+    }
   }
 
   async function stopRobot(): Promise<void> {
-    await apiClient.stopRobot();
-    await fetchInitialSnapshot();
+    commandLoading.value = true;
+    try {
+      const response = await apiClient.stopRobot();
+      setCommandFromResponse({
+        ...response,
+        message: response.message || "Остановка запрошена",
+      });
+    } catch (unknownError) {
+      setCommandState({
+        status: "stop_failed",
+        message: `Ошибка остановки: ${errorMessage(unknownError)}`,
+        reasonCode: "stop_command_failed",
+      });
+    } finally {
+      commandLoading.value = false;
+      await fetchInitialSnapshot();
+    }
+  }
+
+  async function refreshBalance(): Promise<void> {
+    balanceRefreshLoading.value = true;
+    try {
+      const summary = await apiClient.refreshPortfolio();
+      applyPortfolioSummary(summary);
+      setCommandState({
+        status: summary.balance.balance_degraded ? "balance_refresh_degraded" : "balance_refresh_completed",
+        message: summary.balance.balance_degraded
+          ? `Баланс недоступен: ${summary.balance.balance_degraded_reason_code ?? "broker_balance_unavailable"}`
+          : "Баланс обновлен",
+        reasonCode: summary.balance.balance_degraded
+          ? summary.balance.balance_degraded_reason_code
+          : "balance_refresh_completed",
+      });
+    } catch (unknownError) {
+      setCommandState({
+        status: "balance_refresh_failed",
+        message: `Баланс недоступен: ${errorMessage(unknownError)}`,
+        reasonCode: "broker_balance_refresh_failed",
+      });
+    } finally {
+      balanceRefreshLoading.value = false;
+    }
+  }
+
+  function applyPortfolioSummary(summary: PortfolioSummaryResponse): void {
+    status.value = {
+      ...status.value,
+      balance: summary.balance,
+      degraded_flags: summary.balance.balance_degraded
+        ? Array.from(new Set([...status.value.degraded_flags, "balance_unavailable"]))
+        : status.value.degraded_flags.filter((flag) => flag !== "balance_unavailable"),
+    };
+  }
+
+  function setCommandFromPreflight(preflight: SessionPreflightResponse): void {
+    const nextSession = preflight.next_session_at ? ` Следующая сессия: ${preflight.next_session_at}.` : "";
+    const prefix = preflight.market_closed_expected
+      ? `Рынок закрыт. Сессия: ${preflight.session_type}.`
+      : `Preflight не разрешил старт. Сессия: ${preflight.session_type}.`;
+    setCommandState({
+      status: "blocked_by_preflight",
+      message: `${prefix} Причина: ${preflight.reason_code}.${nextSession}`,
+      reasonCode: preflight.reason_code,
+      nextSessionAt: preflight.next_session_at,
+    });
+  }
+
+  function setCommandFromResponse(response: RobotCommandResponse): void {
+    const preflight = response.preflight_result as Partial<SessionPreflightResponse> | null;
+    setCommandState({
+      status: response.status,
+      message: response.message || (response.accepted ? "Команда принята" : "Команда отклонена"),
+      reasonCode: response.reason_code,
+      nextSessionAt: preflight?.next_session_at ?? null,
+    });
+  }
+
+  function setCommandState(payload: {
+    status: string;
+    message: string;
+    reasonCode?: string | null;
+    nextSessionAt?: string | null;
+  }): void {
+    lastCommandStatus.value = payload.status;
+    lastCommandMessage.value = payload.message;
+    lastCommandReasonCode.value = payload.reasonCode ?? null;
+    lastCommandNextSessionAt.value = payload.nextSessionAt ?? null;
+    lastCommandAt.value = new Date().toISOString();
+  }
+
+  function errorMessage(value: unknown): string {
+    return value instanceof Error ? value.message : String(value);
   }
 
   return {
@@ -154,8 +297,16 @@ export const useRobotStore = defineStore("robot", () => {
     signals,
     loading,
     error,
+    snapshotWarnings,
     liveConnection,
     lastDashboardMessageAt,
+    lastCommandStatus,
+    lastCommandMessage,
+    lastCommandReasonCode,
+    lastCommandAt,
+    lastCommandNextSessionAt,
+    commandLoading,
+    balanceRefreshLoading,
     currentSignal,
     currentBlockerCode,
     degraded,
@@ -164,5 +315,6 @@ export const useRobotStore = defineStore("robot", () => {
     applyDashboardSnapshot,
     startRobot,
     stopRobot,
+    refreshBalance,
   };
 });

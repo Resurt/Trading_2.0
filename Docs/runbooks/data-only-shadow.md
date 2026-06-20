@@ -154,3 +154,31 @@ If the market is open, it runs the bounded data-only smoke.
 
 For large universes, use stream batching flags on smoke. `RESOURCE_EXHAUSTED` is a broker resource
 warning; do not retry aggressively, reduce the universe or stream batch size.
+
+## Operator dashboard Start/Stop
+
+The dashboard Start button is not a blind start command. It first calls:
+
+```text
+GET /session/preflight?instruments=SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR&mode=data_shadow
+```
+
+If `market_open=false`, the UI shows `blocked_by_preflight`, the `reason_code` and
+`next_session_at` when available. It does not submit Start automatically. Direct
+API calls to `POST /robot/start` are also guarded and return a rejected
+`RobotCommandResponse` instead of starting streams.
+
+Stop remains a controlled operator command and shows its result in the command status strip.
+
+## Broker balance visibility
+
+Refresh broker account state before live data-only checks:
+
+```bash
+python scripts/run_broker_balance_refresh.py --json-output
+```
+
+The command is readonly: it uses `get_accounts`, `get_portfolio` and `get_positions`
+only. It writes masked `broker_balance` payloads for `/portfolio/summary` and
+`/robot/status.balance`. If broker balance is unavailable, the dashboard still shows
+the card with `balance_degraded=true` and `balance_degraded_reason_code`.
