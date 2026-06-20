@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from time import monotonic
 from typing import Any
 
 from sqlalchemy import delete, func, select
@@ -48,14 +50,24 @@ class HistoricalReportRebuildConfig:
     session_type: str | None = None
     include_counterfactual: bool = False
     force_rebuild: bool = True
+    skip_existing: bool = False
+    chunk_days: int = 30
+    progress_every: int = 0
+    max_days: int | None = None
     dry_run: bool = False
+    progress_callback: Callable[[JsonPayload], None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class HistoricalReportRebuildResult:
+    status: str
     hourly_reports_built: int
     daily_reports_built: int
     counterfactual_results_built: int
+    days_processed: int
+    skipped_existing: int
+    failed_days: tuple[str, ...]
+    elapsed_seconds: Decimal
     trading_dates: tuple[str, ...]
     session_types: tuple[str, ...]
     instruments: tuple[str, ...]
@@ -64,9 +76,14 @@ class HistoricalReportRebuildResult:
 
     def as_payload(self) -> JsonPayload:
         return {
+            "status": self.status,
             "hourly_reports_built": self.hourly_reports_built,
             "daily_reports_built": self.daily_reports_built,
             "counterfactual_results_built": self.counterfactual_results_built,
+            "days_processed": self.days_processed,
+            "skipped_existing": self.skipped_existing,
+            "failed_days": list(self.failed_days),
+            "elapsed_seconds": str(self.elapsed_seconds),
             "trading_dates": list(self.trading_dates),
             "session_types": list(self.session_types),
             "instruments": list(self.instruments),
@@ -83,6 +100,7 @@ class HistoricalReportRebuildService:
         self._session = session
 
     def rebuild(self, config: HistoricalReportRebuildConfig) -> HistoricalReportRebuildResult:
+        started_at = monotonic()
         counterfactual_count = 0
         if config.include_counterfactual:
             counterfactual_count = HistoricalCounterfactualService(self._session).rebuild(
@@ -98,12 +116,27 @@ class HistoricalReportRebuildService:
             ).results_created
         candidates = self._load_candidates(config)
         dates = tuple(sorted({candidate.trading_date for candidate in candidates}))
-        micro_sessions = tuple(sorted({candidate.micro_session_id for candidate in candidates}))
+        selected_dates = dates[: config.max_days] if config.max_days else dates
+        selected_date_set = set(selected_dates)
+        candidates = [
+            candidate for candidate in candidates if candidate.trading_date in selected_date_set
+        ]
+        candidates_by_micro_session: dict[str, list[SignalCandidate]] = defaultdict(list)
+        candidates_by_date: dict[date, list[SignalCandidate]] = defaultdict(list)
+        for candidate in candidates:
+            candidates_by_micro_session[candidate.micro_session_id].append(candidate)
+            candidates_by_date[candidate.trading_date].append(candidate)
+        micro_sessions = tuple(sorted(candidates_by_micro_session))
         if config.dry_run:
             return HistoricalReportRebuildResult(
+                status="completed",
                 hourly_reports_built=len(micro_sessions),
-                daily_reports_built=len(dates),
+                daily_reports_built=len(selected_dates),
                 counterfactual_results_built=counterfactual_count,
+                days_processed=len(selected_dates),
+                skipped_existing=0,
+                failed_days=(),
+                elapsed_seconds=_elapsed(started_at),
                 trading_dates=tuple(day.isoformat() for day in dates),
                 session_types=tuple(sorted({candidate.session_type for candidate in candidates})),
                 instruments=tuple(sorted({candidate.instrument_id for candidate in candidates})),
@@ -111,17 +144,72 @@ class HistoricalReportRebuildService:
                 dry_run=True,
             )
         hourly_count = 0
-        for micro_session_id in micro_sessions:
-            self._build_hourly_report(config, micro_session_id)
+        skipped_existing = 0
+        failed_days: list[str] = []
+        for index, micro_session_id in enumerate(micro_sessions, start=1):
+            if config.skip_existing and not config.force_rebuild and self._hourly_exists(
+                config,
+                micro_session_id,
+            ):
+                skipped_existing += 1
+                continue
+            self._build_hourly_report(
+                config,
+                micro_session_id,
+                candidates_by_micro_session[micro_session_id],
+            )
             hourly_count += 1
+            if config.progress_every > 0 and index % config.progress_every == 0:
+                _emit_progress(
+                    config,
+                    {
+                        "stage": "hourly",
+                        "items_processed": index,
+                        "hourly_reports_built": hourly_count,
+                        "skipped_existing": skipped_existing,
+                    },
+                )
         daily_count = 0
-        for trading_date in dates:
-            self._build_daily_report(config, trading_date)
-            daily_count += 1
+        chunk_size = max(1, config.chunk_days)
+        for chunk_start in range(0, len(selected_dates), chunk_size):
+            chunk = selected_dates[chunk_start : chunk_start + chunk_size]
+            for trading_date in chunk:
+                if config.skip_existing and not config.force_rebuild and self._daily_exists(
+                    config,
+                    trading_date,
+                ):
+                    skipped_existing += 1
+                    continue
+                try:
+                    self._build_daily_report(
+                        config,
+                        trading_date,
+                        candidates_by_date.get(trading_date, []),
+                    )
+                    daily_count += 1
+                except Exception as exc:  # noqa: BLE001 - keep partial rebuild moving.
+                    failed_days.append(f"{trading_date.isoformat()}:{type(exc).__name__}:{exc}")
+            if config.progress_every > 0:
+                _emit_progress(
+                    config,
+                    {
+                        "stage": "daily",
+                        "days_processed": min(chunk_start + len(chunk), len(selected_dates)),
+                        "daily_reports_built": daily_count,
+                        "failed_days": len(failed_days),
+                        "skipped_existing": skipped_existing,
+                    },
+                )
+        status = "completed" if not failed_days else "partial"
         return HistoricalReportRebuildResult(
+            status=status,
             hourly_reports_built=hourly_count,
             daily_reports_built=daily_count,
             counterfactual_results_built=counterfactual_count,
+            days_processed=len(selected_dates),
+            skipped_existing=skipped_existing,
+            failed_days=tuple(failed_days),
+            elapsed_seconds=_elapsed(started_at),
             trading_dates=tuple(day.isoformat() for day in dates),
             session_types=tuple(sorted({candidate.session_type for candidate in candidates})),
             instruments=tuple(sorted({candidate.instrument_id for candidate in candidates})),
@@ -133,12 +221,8 @@ class HistoricalReportRebuildService:
         self,
         config: HistoricalReportRebuildConfig,
         micro_session_id: str,
+        candidates: list[SignalCandidate],
     ) -> HourlyReport:
-        candidates = [
-            candidate
-            for candidate in self._load_candidates(config)
-            if candidate.micro_session_id == micro_session_id
-        ]
         if not candidates:
             msg = f"No candidates for micro_session_id={micro_session_id}"
             raise LookupError(msg)
@@ -212,12 +296,8 @@ class HistoricalReportRebuildService:
         self,
         config: HistoricalReportRebuildConfig,
         trading_date: date,
+        candidates: list[SignalCandidate],
     ) -> DailyReport:
-        candidates = [
-            candidate
-            for candidate in self._load_candidates(config)
-            if candidate.trading_date == trading_date
-        ]
         blockers = self._load_blockers(config, trading_date=trading_date)
         intents = self._load_intents(config, trading_date=trading_date)
         orders = self._load_broker_orders(config, trading_date=trading_date)
@@ -303,6 +383,37 @@ class HistoricalReportRebuildService:
         if config.session_type:
             stmt = stmt.where(SignalCandidate.session_type == config.session_type)
         return list(self._session.execute(stmt).scalars())
+
+    def _hourly_exists(
+        self,
+        config: HistoricalReportRebuildConfig,
+        micro_session_id: str,
+    ) -> bool:
+        return bool(
+            self._session.execute(
+                select(HourlyReport.hourly_report_id).where(
+                    HourlyReport.micro_session_id == micro_session_id,
+                    HourlyReport.strategy_id == config.strategy_id,
+                )
+            ).first()
+        )
+
+    def _daily_exists(
+        self,
+        config: HistoricalReportRebuildConfig,
+        trading_date: date,
+    ) -> bool:
+        return bool(
+            self._session.execute(
+                select(DailyReport.daily_report_id).where(
+                    DailyReport.trading_date == trading_date,
+                    DailyReport.strategy_id == config.strategy_id,
+                    DailyReport.instrument_id.is_(None),
+                    DailyReport.timeframe.is_(None),
+                    DailyReport.session_type.is_(None),
+                )
+            ).first()
+        )
 
     def _load_blockers(
         self,
@@ -463,3 +574,15 @@ def _negative_sum(values: Any) -> Decimal:
     return sum((value for value in values if value is not None and value < ZERO), ZERO).quantize(
         Decimal("0.0001")
     )
+
+
+def _elapsed(started_at: float) -> Decimal:
+    return Decimal(str(round(monotonic() - started_at, 4)))
+
+
+def _emit_progress(
+    config: HistoricalReportRebuildConfig,
+    payload: JsonPayload,
+) -> None:
+    if config.progress_callback is not None:
+        config.progress_callback({**payload, "source": "historical_report_rebuild_progress"})

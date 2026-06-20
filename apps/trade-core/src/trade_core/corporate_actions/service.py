@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -104,6 +105,10 @@ class MarketSpecialDayResult:
     from_date: date
     to_date: date
     classification_status: str = "completed"
+    skipped_existing: int = 0
+    dates_processed: int = 0
+    chunks_processed: int = 0
+    classification_warning: str | None = None
 
     def as_payload(self) -> JsonPayload:
         return {
@@ -116,6 +121,10 @@ class MarketSpecialDayResult:
             "from_date": self.from_date.isoformat(),
             "to_date": self.to_date.isoformat(),
             "classification_status": self.classification_status,
+            "skipped_existing": self.skipped_existing,
+            "dates_processed": self.dates_processed,
+            "chunks_processed": self.chunks_processed,
+            "classification_warning": self.classification_warning,
             "source": "market_special_day_classification",
         }
 
@@ -322,9 +331,37 @@ class MarketSpecialDayClassifier:
         force_rebuild: bool = False,
         include_future: bool = False,
         lookahead_days: int = 365,
+        skip_existing: bool = False,
+        chunk_days: int = 30,
+        progress_every: int = 0,
+        progress_callback: Callable[[JsonPayload], None] | None = None,
     ) -> MarketSpecialDayResult:
         instrument_ids = self._corporate_actions.resolve_instrument_ids(instruments)
         effective_to_date = to_date + timedelta(days=lookahead_days) if include_future else to_date
+        if skip_existing and not force_rebuild and special_day_classification_exists(
+            self._session,
+            from_date=from_date,
+            to_date=effective_to_date,
+            instruments=instrument_ids,
+        ):
+            result = _existing_special_day_result(
+                self._session,
+                from_date=from_date,
+                to_date=effective_to_date,
+                instruments=instrument_ids,
+            )
+            self._emit_progress(
+                progress_callback,
+                {
+                    "status": result.classification_status,
+                    "instruments_processed": len(instrument_ids),
+                    "dates_processed": result.dates_processed,
+                    "special_days_created": result.special_days_created,
+                    "skipped_existing": result.skipped_existing,
+                },
+            )
+            return result
+
         if force_rebuild:
             stmt = delete(MarketSpecialDay).where(
                 MarketSpecialDay.trading_date >= from_date,
@@ -339,6 +376,14 @@ class MarketSpecialDayClassifier:
         abnormal_days = 0
         future_windows = 0
         excluded = 0
+        chunks_processed = 0
+        dates_processed = 0
+        gap_cache = _open_gap_cache_for(
+            self._session,
+            instrument_ids=instrument_ids,
+            from_date=from_date,
+            to_date=to_date,
+        )
 
         actions = self._corporate_actions.list_events(
             from_date=from_date,
@@ -348,7 +393,12 @@ class MarketSpecialDayClassifier:
         for action in actions:
             if action.ex_date is None:
                 continue
-            gap = _open_gap_for(self._session, action.instrument_id, action.ex_date)
+            gap = gap_cache.get((action.instrument_id, action.ex_date)) or _OpenGap(
+                None,
+                None,
+                None,
+                None,
+            )
             expected_dividend_bps = _expected_dividend_bps(
                 amount=action.amount_per_share,
                 previous_close=gap.previous_close,
@@ -393,35 +443,57 @@ class MarketSpecialDayClassifier:
             future_windows += int(row.special_day_type == "future_dividend_risk_window")
             excluded += int(row.exclude_from_primary_calibration)
 
-        for instrument_id in instrument_ids:
-            for trading_day in _dates(from_date, to_date):
-                gap = _open_gap_for(self._session, instrument_id, trading_day)
-                if gap.open_gap_bps is None or abs(gap.open_gap_bps) < gap_threshold_bps:
-                    continue
-                row, was_created = _upsert_special_day(
-                    self._session,
-                    trading_date=trading_day,
-                    calendar_date=trading_day,
-                    instrument_id=instrument_id,
-                    ticker=_ticker_for(self._session, instrument_id),
-                    special_day_type="abnormal_gap_day",
-                    session_type=gap.session_type,
-                    reason_code="abnormal_open_gap",
-                    source="historical_gap_detector",
-                    linked_corporate_action_id=None,
-                    open_gap_bps=gap.open_gap_bps,
-                    previous_close=gap.previous_close,
-                    session_open_price=gap.session_open_price,
-                    expected_dividend_bps=None,
-                    detected_gap_bps=gap.open_gap_bps,
-                    severity="warning",
-                    exclude_from_primary_calibration=True,
-                    trade_policy=DEFAULT_SPECIAL_DAY_POLICY,
-                    payload={"gap_threshold_bps": str(gap_threshold_bps)},
+        all_dates = _dates(from_date, to_date)
+        chunk_size = max(1, chunk_days)
+        for chunk_start in range(0, len(all_dates), chunk_size):
+            chunk = all_dates[chunk_start : chunk_start + chunk_size]
+            chunks_processed += 1
+            for instrument_id in instrument_ids:
+                for trading_day in chunk:
+                    dates_processed += 1
+                    gap = gap_cache.get((instrument_id, trading_day)) or _OpenGap(
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    if gap.open_gap_bps is None or abs(gap.open_gap_bps) < gap_threshold_bps:
+                        continue
+                    row, was_created = _upsert_special_day(
+                        self._session,
+                        trading_date=trading_day,
+                        calendar_date=trading_day,
+                        instrument_id=instrument_id,
+                        ticker=_ticker_for(self._session, instrument_id),
+                        special_day_type="abnormal_gap_day",
+                        session_type=gap.session_type,
+                        reason_code="abnormal_open_gap",
+                        source="historical_gap_detector",
+                        linked_corporate_action_id=None,
+                        open_gap_bps=gap.open_gap_bps,
+                        previous_close=gap.previous_close,
+                        session_open_price=gap.session_open_price,
+                        expected_dividend_bps=None,
+                        detected_gap_bps=gap.open_gap_bps,
+                        severity="warning",
+                        exclude_from_primary_calibration=True,
+                        trade_policy=DEFAULT_SPECIAL_DAY_POLICY,
+                        payload={"gap_threshold_bps": str(gap_threshold_bps)},
+                    )
+                    created += int(was_created)
+                    abnormal_days += 1
+                    excluded += int(row.exclude_from_primary_calibration)
+            if progress_every > 0 and chunks_processed % progress_every == 0:
+                self._emit_progress(
+                    progress_callback,
+                    {
+                        "status": "running",
+                        "chunks_processed": chunks_processed,
+                        "dates_processed": dates_processed,
+                        "special_days_created": created,
+                        "instruments_processed": len(instrument_ids),
+                    },
                 )
-                created += int(was_created)
-                abnormal_days += 1
-                excluded += int(row.exclude_from_primary_calibration)
 
         result = MarketSpecialDayResult(
             special_days_created=created,
@@ -432,10 +504,20 @@ class MarketSpecialDayClassifier:
             instruments=instrument_ids,
             from_date=from_date,
             to_date=effective_to_date,
+            dates_processed=dates_processed,
+            chunks_processed=chunks_processed,
         )
         self._session.add(_classification_audit_event(result))
         self._session.flush()
         return result
+
+    @staticmethod
+    def _emit_progress(
+        progress_callback: Callable[[JsonPayload], None] | None,
+        payload: JsonPayload,
+    ) -> None:
+        if progress_callback is not None:
+            progress_callback(payload)
 
 
 @dataclass(frozen=True, slots=True)
@@ -444,6 +526,114 @@ class _OpenGap:
     session_open_price: Decimal | None
     open_gap_bps: Decimal | None
     session_type: str | None
+
+
+def _existing_special_day_result(
+    session: Session,
+    *,
+    from_date: date,
+    to_date: date,
+    instruments: tuple[str, ...],
+) -> MarketSpecialDayResult:
+    stmt = select(MarketSpecialDay).where(
+        MarketSpecialDay.trading_date >= from_date,
+        MarketSpecialDay.trading_date <= to_date,
+    )
+    if instruments:
+        stmt = stmt.where(MarketSpecialDay.instrument_id.in_(instruments))
+    rows = list(session.execute(stmt).scalars())
+    return MarketSpecialDayResult(
+        special_days_created=0,
+        dividend_gap_days=sum(1 for row in rows if row.special_day_type == "dividend_gap_day"),
+        abnormal_gap_days=sum(1 for row in rows if row.special_day_type == "abnormal_gap_day"),
+        future_risk_windows_created=sum(
+            1 for row in rows if row.special_day_type == "future_dividend_risk_window"
+        ),
+        excluded_from_primary_calibration=sum(
+            1 for row in rows if row.exclude_from_primary_calibration
+        ),
+        instruments=instruments,
+        from_date=from_date,
+        to_date=to_date,
+        classification_status="skipped_existing",
+        skipped_existing=len(rows),
+        dates_processed=0,
+        chunks_processed=0,
+    )
+
+
+def _open_gap_cache_for(
+    session: Session,
+    *,
+    instrument_ids: tuple[str, ...],
+    from_date: date,
+    to_date: date,
+) -> dict[tuple[str, date], _OpenGap]:
+    if not instrument_ids:
+        return {}
+    warmup_from = from_date - timedelta(days=30)
+    rows = list(
+        session.execute(
+            select(
+                MarketCandle.instrument_id,
+                MarketCandle.trading_date,
+                MarketCandle.session_type,
+                MarketCandle.open_ts_utc,
+                MarketCandle.close_ts_utc,
+                MarketCandle.open_price,
+                MarketCandle.close_price,
+            )
+            .where(
+                MarketCandle.instrument_id.in_(instrument_ids),
+                MarketCandle.trading_date >= warmup_from,
+                MarketCandle.trading_date <= to_date,
+                MarketCandle.is_closed.is_(True),
+            )
+            .order_by(
+                MarketCandle.instrument_id,
+                MarketCandle.trading_date,
+                MarketCandle.open_ts_utc,
+                MarketCandle.close_ts_utc,
+            )
+        )
+    )
+    first_by_day: dict[tuple[str, date], Any] = {}
+    last_by_day: dict[tuple[str, date], Any] = {}
+    for row in rows:
+        key = (row.instrument_id, row.trading_date)
+        first_by_day.setdefault(key, row)
+        last_by_day[key] = row
+
+    gaps: dict[tuple[str, date], _OpenGap] = {}
+    for instrument_id in instrument_ids:
+        previous_close: Decimal | None = None
+        for trading_day in sorted(
+            day for inst, day in first_by_day if inst == instrument_id
+        ):
+            first = first_by_day[(instrument_id, trading_day)]
+            last = last_by_day[(instrument_id, trading_day)]
+            if trading_day >= from_date:
+                if previous_close is None or previous_close == Decimal("0"):
+                    gaps[(instrument_id, trading_day)] = _OpenGap(
+                        None,
+                        first.open_price,
+                        None,
+                        first.session_type,
+                    )
+                else:
+                    gap = (
+                        (first.open_price - previous_close)
+                        / previous_close
+                        * Decimal("10000")
+                    )
+                    gaps[(instrument_id, trading_day)] = _OpenGap(
+                        previous_close=previous_close,
+                        session_open_price=first.open_price,
+                        open_gap_bps=gap.quantize(Decimal("0.0001")),
+                        session_type=first.session_type,
+                    )
+            previous_close = last.close_price
+    return gaps
 
 
 def flags_from_rows(rows: list[MarketSpecialDay]) -> SpecialDayFlags:

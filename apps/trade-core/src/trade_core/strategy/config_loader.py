@@ -9,9 +9,11 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from trade_core.market_data import Timeframe
 from trade_core.strategy.models import (
     ConfigDrivenStrategyConfig,
     RiskLimits,
+    TimeframeStrategyRule,
 )
 from trading_common.db.models import StrategyConfig
 from trading_common.db.repositories import StrategyConfigRepository
@@ -71,10 +73,16 @@ class StrategyConfigLoader:
         risk_payload = dict(row.risk_limits or {})
         template = _session_type(row.session_template)
         templates = dict(fallback.session_templates)
+        templates = _templates_from_payload(payload, fallback_templates=templates)
         if template is not None and template in templates:
+            base_template = templates[template]
             templates[template] = replace(
-                templates[template],
-                enabled=_bool_value(payload, "enabled", default=templates[template].enabled),
+                base_template,
+                enabled=_bool_value(payload, "enabled", default=base_template.enabled),
+                rules_by_timeframe=_rules_from_payload(
+                    payload,
+                    fallback_rules=base_template.rules_by_timeframe,
+                ),
                 session_template=row.session_template,
             )
         return replace(
@@ -231,6 +239,82 @@ class StrategyConfigLoader:
 def _session_type(value: str) -> SessionType | None:
     try:
         return SessionType(value)
+    except ValueError:
+        return None
+
+
+def _templates_from_payload(
+    payload: Mapping[str, Any],
+    *,
+    fallback_templates: Mapping[SessionType, Any],
+) -> dict[SessionType, Any]:
+    templates = dict(fallback_templates)
+    raw_templates = payload.get("session_templates")
+    if not isinstance(raw_templates, Mapping):
+        return templates
+    for raw_session_type, raw_template in raw_templates.items():
+        session_type = _session_type(str(raw_session_type))
+        if (
+            session_type is None
+            or session_type not in templates
+            or not isinstance(raw_template, Mapping)
+        ):
+            continue
+        base = templates[session_type]
+        templates[session_type] = replace(
+            base,
+            enabled=_bool_value(raw_template, "enabled", default=base.enabled),
+            rules_by_timeframe=_rules_from_payload(
+                raw_template,
+                fallback_rules=base.rules_by_timeframe,
+            ),
+            session_template=str(raw_template.get("session_template", session_type.value)),
+        )
+    return templates
+
+
+def _rules_from_payload(
+    payload: Mapping[str, Any],
+    *,
+    fallback_rules: Mapping[Timeframe, TimeframeStrategyRule],
+) -> Mapping[Timeframe, TimeframeStrategyRule]:
+    raw_rules = payload.get("rules_by_timeframe") or payload.get("timeframes")
+    if not isinstance(raw_rules, Mapping):
+        return fallback_rules
+    rules = dict(fallback_rules)
+    for raw_timeframe, raw_rule in raw_rules.items():
+        timeframe = _timeframe(str(raw_timeframe))
+        if timeframe is None or timeframe not in rules or not isinstance(raw_rule, Mapping):
+            continue
+        base = rules[timeframe]
+        rules[timeframe] = replace(
+            base,
+            enabled=_bool_value(raw_rule, "enabled", default=base.enabled),
+            min_move_bps=_decimal_value(
+                raw_rule,
+                "min_move_bps",
+                default=base.min_move_bps,
+            ),
+            lot_qty=_int_value(raw_rule, "lot_qty", default=base.lot_qty),
+            order_type=str(raw_rule.get("order_type", base.order_type)),
+            time_in_force=str(raw_rule.get("time_in_force", base.time_in_force)),
+            expected_holding_minutes=_int_value(
+                raw_rule,
+                "expected_holding_minutes",
+                default=base.expected_holding_minutes,
+            ),
+            min_expected_edge_bps=_decimal_value(
+                raw_rule,
+                "min_expected_edge_bps",
+                default=base.min_expected_edge_bps,
+            ),
+        )
+    return rules
+
+
+def _timeframe(value: str) -> Timeframe | None:
+    try:
+        return Timeframe(value)
     except ValueError:
         return None
 

@@ -10,6 +10,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from sys import path
+from time import monotonic
 
 ROOT = Path(__file__).resolve().parents[1]
 for src in (
@@ -35,6 +36,7 @@ def main() -> None:
         lookback_days=args.lookback_days,
     )
     database = DatabaseService(args.database_url or build_database_url_from_env())
+    progress_events: list[dict[str, object]] = []
     try:
         with database.session_scope() as session:
             effective_to_date = (
@@ -69,8 +71,14 @@ def main() -> None:
                 force_rebuild=args.force_rebuild,
                 include_future=args.include_future,
                 lookahead_days=args.lookahead_days,
+                skip_existing=args.skip_existing,
+                chunk_days=args.chunk_days,
+                progress_every=args.progress_every,
+                progress_callback=progress_callback(args.progress_every, progress_events),
             )
             payload = result.as_payload()
+            if progress_events:
+                payload["progress_events"] = progress_events
     finally:
         database.engine.dispose()
     print(json.dumps(payload, ensure_ascii=False, indent=2 if args.json_output else None))
@@ -89,6 +97,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--include-future", action="store_true")
     parser.add_argument("--lookahead-days", type=int, default=365)
     parser.add_argument("--require-dividend-sync", action="store_true")
+    parser.add_argument("--skip-existing", action="store_true")
+    parser.add_argument("--chunk-days", type=int, default=30)
+    parser.add_argument("--progress-every", type=int, default=0)
     parser.add_argument("--json-output", action="store_true")
     return parser.parse_args()
 
@@ -113,6 +124,23 @@ def parse_date(raw: str) -> date:
 
 def split_csv(raw: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in raw.split(",") if item.strip())
+
+
+def progress_callback(progress_every: int, progress_events: list[dict[str, object]]):
+    if progress_every <= 0:
+        return None
+    started_at = monotonic()
+
+    def _emit(payload: dict[str, object]) -> None:
+        progress_events.append(
+            {
+                **payload,
+                "elapsed_seconds": round(monotonic() - started_at, 3),
+                "source": "market_special_day_classification_progress",
+            }
+        )
+
+    return _emit
 
 
 if __name__ == "__main__":
