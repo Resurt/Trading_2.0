@@ -4,6 +4,7 @@ import { defineStore } from "pinia";
 import { apiClient, openAuthenticatedWebSocket } from "../api/client";
 import type {
   ConnectionState,
+  DataShadowStatusResponse,
   JsonPayload,
   MarketInstrumentOverview,
   MarketOverviewResponse,
@@ -15,8 +16,25 @@ const EMPTY_OVERVIEW: MarketOverviewResponse = {
   instruments: [],
 };
 
+const EMPTY_DATA_SHADOW_STATUS: DataShadowStatusResponse = {
+  enabled: false,
+  strategy_trading_disabled: false,
+  real_orders_disabled: true,
+  stream_alive: false,
+  last_message_age_seconds: null,
+  candles_received: null,
+  order_book_snapshots: 0,
+  market_microstructure_snapshots: 0,
+  avg_spread_bps: null,
+  p95_spread_bps: null,
+  avg_market_quality_score: null,
+  current_session: null,
+  warning: null,
+};
+
 export const useMarketStore = defineStore("market", () => {
   const overview = ref<MarketOverviewResponse>(EMPTY_OVERVIEW);
+  const dataShadowStatus = ref<DataShadowStatusResponse>(EMPTY_DATA_SHADOW_STATUS);
   const selectedInstrumentId = ref<string | null>(null);
   const loading = ref(false);
   const error = ref<string | null>(null);
@@ -66,6 +84,15 @@ export const useMarketStore = defineStore("market", () => {
     }
   }
 
+  async function fetchDataShadowStatus(): Promise<void> {
+    try {
+      dataShadowStatus.value = await apiClient.dataShadowStatus();
+    } catch (unknownError) {
+      error.value = unknownError instanceof Error ? unknownError.message : "Data shadow status failed";
+      dataShadowStatus.value = EMPTY_DATA_SHADOW_STATUS;
+    }
+  }
+
   async function connectMarketSocket(): Promise<void> {
     if (marketSocket && marketSocket.readyState < WebSocket.CLOSING) {
       return;
@@ -98,6 +125,7 @@ export const useMarketStore = defineStore("market", () => {
 
   return {
     overview,
+    dataShadowStatus,
     selectedInstrumentId,
     loading,
     error,
@@ -107,6 +135,7 @@ export const useMarketStore = defineStore("market", () => {
     bookSummaryRows,
     recentTrades,
     fetchOverview,
+    fetchDataShadowStatus,
     connectMarketSocket,
   };
 });

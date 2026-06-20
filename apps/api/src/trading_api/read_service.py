@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -21,9 +22,12 @@ from trading_api.schemas import (
     CandidateFunnelStage,
     CounterfactualResponse,
     DailyReportResponse,
+    DataShadowStatusResponse,
     HourlyReportResponse,
     JsonPayload,
     MarketInstrumentOverview,
+    MarketMicrostructureSnapshotResponse,
+    MarketMicrostructureSummaryResponse,
     MarketOverviewResponse,
     MoneyBalance,
     OrderResponse,
@@ -44,6 +48,7 @@ from trading_common.db.models import (
     HourlyReport,
     InstrumentRegistry,
     MarketCandle,
+    MarketMicrostructureSnapshot,
     OrderBookSummary,
     OrderIntent,
     PositionSnapshot,
@@ -247,6 +252,100 @@ class BffReadService:
             for summary in latest_by_instrument.values()
         ]
         return MarketOverviewResponse(generated_at=datetime.now(tz=UTC), instruments=instruments)
+
+    def latest_microstructure(
+        self,
+        *,
+        instrument_id: str | None = None,
+        limit: int = 20,
+    ) -> list[MarketMicrostructureSnapshotResponse]:
+        stmt = select(MarketMicrostructureSnapshot).order_by(
+            MarketMicrostructureSnapshot.ts_utc.desc()
+        )
+        if instrument_id:
+            stmt = stmt.where(MarketMicrostructureSnapshot.instrument_id == instrument_id)
+        rows = self._session.execute(stmt.limit(max(1, min(limit, 200)))).scalars()
+        return [_microstructure_snapshot_response(row) for row in rows]
+
+    def microstructure_summary(
+        self,
+        *,
+        lookback_minutes: int = 60,
+        instrument_id: str | None = None,
+    ) -> MarketMicrostructureSummaryResponse:
+        since = datetime.now(tz=UTC) - timedelta(minutes=max(1, lookback_minutes))
+        stmt = select(MarketMicrostructureSnapshot).where(
+            MarketMicrostructureSnapshot.ts_utc >= since
+        )
+        if instrument_id:
+            stmt = stmt.where(MarketMicrostructureSnapshot.instrument_id == instrument_id)
+        rows = list(self._session.execute(stmt).scalars())
+        spread_values = [row.spread_bps for row in rows if row.spread_bps is not None]
+        bid_depth_values = [
+            row.bid_depth_lots for row in rows if row.bid_depth_lots is not None
+        ]
+        ask_depth_values = [
+            row.ask_depth_lots for row in rows if row.ask_depth_lots is not None
+        ]
+        imbalance_values = [
+            row.book_imbalance for row in rows if row.book_imbalance is not None
+        ]
+        quality_values = [
+            row.market_quality_score
+            for row in rows
+            if row.market_quality_score is not None
+        ]
+        sessions: dict[str, int] = {}
+        for row in rows:
+            sessions[row.session_type] = sessions.get(row.session_type, 0) + 1
+        latest_ts = max((row.ts_utc for row in rows), default=None)
+        return MarketMicrostructureSummaryResponse(
+            generated_at=datetime.now(tz=UTC),
+            lookback_minutes=lookback_minutes,
+            instrument_id=instrument_id,
+            snapshots_count=len(rows),
+            avg_spread_bps=_decimal_avg(spread_values),
+            p95_spread_bps=_decimal_percentile(spread_values, 0.95),
+            avg_bid_depth_lots=_decimal_avg(bid_depth_values),
+            avg_ask_depth_lots=_decimal_avg(ask_depth_values),
+            avg_book_imbalance=_decimal_avg(imbalance_values),
+            avg_market_quality_score=_decimal_avg(quality_values),
+            stale_incidents=sum(1 for row in rows if row.is_stale),
+            latest_ts_utc=latest_ts,
+            sessions=sessions,
+        )
+
+    def data_shadow_status(self) -> DataShadowStatusResponse:
+        summary = self.microstructure_summary(lookback_minutes=60)
+        latest = self.latest_microstructure(limit=1)
+        enabled = _bool_env(os.environ.get("TRADING_DATA_ONLY_SHADOW"))
+        last_message_age_seconds: Decimal | None = None
+        if summary.latest_ts_utc is not None:
+            age_seconds = max(
+                Decimal("0"),
+                Decimal(str((datetime.now(tz=UTC) - summary.latest_ts_utc).total_seconds())),
+            )
+            last_message_age_seconds = age_seconds.quantize(Decimal("0.001"))
+        return DataShadowStatusResponse(
+            enabled=enabled,
+            strategy_trading_disabled=enabled,
+            real_orders_disabled=True,
+            stream_alive=last_message_age_seconds is not None
+            and last_message_age_seconds <= Decimal("30"),
+            last_message_age_seconds=last_message_age_seconds,
+            candles_received=None,
+            order_book_snapshots=summary.snapshots_count,
+            market_microstructure_snapshots=summary.snapshots_count,
+            avg_spread_bps=summary.avg_spread_bps,
+            p95_spread_bps=summary.p95_spread_bps,
+            avg_market_quality_score=summary.avg_market_quality_score,
+            current_session=latest[0].session_type if latest else None,
+            warning=(
+                "Strategy trading disabled: data-only shadow mode"
+                if enabled
+                else "Data-only shadow mode is disabled"
+            ),
+        )
 
     def hourly_reports(
         self,
@@ -1063,6 +1162,53 @@ def _strategy_config_response(config: StrategyConfig) -> StrategyConfigResponse:
         config_payload=config.config_payload,
         risk_limits=config.risk_limits,
     )
+
+
+def _microstructure_snapshot_response(
+    snapshot: MarketMicrostructureSnapshot,
+) -> MarketMicrostructureSnapshotResponse:
+    return MarketMicrostructureSnapshotResponse(
+        snapshot_id=snapshot.snapshot_id,
+        ts_utc=snapshot.ts_utc,
+        exchange_ts=snapshot.exchange_ts,
+        received_ts=snapshot.received_ts,
+        instrument_id=snapshot.instrument_id,
+        session_type=snapshot.session_type,
+        session_phase=snapshot.session_phase,
+        micro_session_id=snapshot.micro_session_id,
+        broker_trading_status=snapshot.broker_trading_status,
+        best_bid=snapshot.best_bid,
+        best_ask=snapshot.best_ask,
+        mid_price=snapshot.mid_price,
+        spread_abs=snapshot.spread_abs,
+        spread_bps=snapshot.spread_bps,
+        bid_depth_lots=snapshot.bid_depth_lots,
+        ask_depth_lots=snapshot.ask_depth_lots,
+        book_imbalance=snapshot.book_imbalance,
+        market_quality_score=snapshot.market_quality_score,
+        feed_freshness_age_ms=snapshot.feed_freshness_age_ms,
+        is_stale=snapshot.is_stale,
+        source=snapshot.source,
+        payload=snapshot.snapshot_payload,
+    )
+
+
+def _decimal_avg(values: list[Decimal]) -> Decimal | None:
+    if not values:
+        return None
+    return (sum(values, Decimal("0")) / Decimal(len(values))).quantize(Decimal("0.0001"))
+
+
+def _decimal_percentile(values: list[Decimal], percentile: float) -> Decimal | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = min(len(ordered) - 1, max(0, int((len(ordered) - 1) * percentile)))
+    return ordered[index].quantize(Decimal("0.0001"))
+
+
+def _bool_env(value: str | None) -> bool:
+    return (value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _optional_str(value: Any) -> str | None:

@@ -20,7 +20,15 @@ from trade_core.broker_gateway import (
     InstrumentRef,
     InstrumentResolveRequest,
 )
-from trade_core.market_data import Candle, OrderBookSnapshot, PriceLevel, Timeframe
+from trade_core.market_data import (
+    Bar,
+    Candle,
+    MarketDataEvent,
+    MarketEventType,
+    OrderBookSnapshot,
+    PriceLevel,
+    Timeframe,
+)
 from trade_core.runtime import (
     DEFAULT_INSTRUMENTS,
     LOCAL_SQLITE_ENV,
@@ -28,6 +36,7 @@ from trade_core.runtime import (
     TradeCoreRuntime,
     TradeCoreRuntimeConfig,
 )
+from trade_core.strategy import ConfigDrivenStrategyEngine
 from trading_common import LaunchModePolicy, RuntimeMode
 from trading_common.db.models import (
     AuditEvent,
@@ -91,6 +100,17 @@ def test_runtime_config_allows_explicit_local_sqlite() -> None:
 
     assert config.database_backend == "sqlite"
     assert config.auto_create_sqlite_schema is True
+
+
+def test_runtime_config_enables_data_only_shadow_from_env() -> None:
+    config = TradeCoreRuntimeConfig.from_env(
+        {
+            LOCAL_SQLITE_ENV: "1",
+            "TRADING_DATA_ONLY_SHADOW": "true",
+        }
+    )
+
+    assert config.data_only_shadow_enabled is True
 
 
 def test_default_runtime_instruments_have_no_placeholder_uid() -> None:
@@ -197,6 +217,65 @@ def test_runtime_starts_historical_replay_without_tokens(
     assert snapshot.session_type == "weekday_main"
     assert snapshot.micro_session_id is not None
     assert runtime.stats.stream_tasks_started > 0
+    asyncio.run(runtime.shutdown())
+
+
+def test_data_only_shadow_closed_bar_does_not_evaluate_strategy(tmp_path: Path) -> None:
+    runtime = TradeCoreRuntime(
+        config=replace(runtime_config(tmp_path), data_only_shadow_enabled=True),
+        launch_policy=LaunchModePolicy.from_mode(RuntimeMode.HISTORICAL_REPLAY),
+        database=DatabaseService(runtime_config(tmp_path).database_url or ""),
+        broker_gateway=cast(BrokerGateway, SafeNoopBrokerGateway(now=msk(2026, 6, 12, 10))),
+    )
+
+    class RaisingStrategyEngine:
+        def evaluate(self, *args: object, **kwargs: object) -> object:
+            raise AssertionError("strategy evaluation must be disabled")
+
+    runtime.strategy_engine = cast(ConfigDrivenStrategyEngine, RaisingStrategyEngine())
+    bar = Bar(
+        instrument_id="MOEX:SBER",
+        timeframe=Timeframe.M5,
+        open_ts_utc=datetime(2026, 6, 12, 7, 0, tzinfo=UTC),
+        close_ts_utc=datetime(2026, 6, 12, 7, 5, tzinfo=UTC),
+        exchange_open_ts=msk(2026, 6, 12, 10, 0),
+        exchange_close_ts=msk(2026, 6, 12, 10, 5),
+        open_price=Decimal("100"),
+        high_price=Decimal("101"),
+        low_price=Decimal("99"),
+        close_price=Decimal("100.5"),
+        volume_lots=Decimal("10"),
+        source_candle_count=5,
+    )
+
+    asyncio.run(
+        runtime._handle_closed_bar(
+            MarketDataEvent(
+                event_type=MarketEventType.BAR_CLOSED,
+                payload=bar,
+                ts_utc=bar.close_ts_utc,
+                instrument_id=bar.instrument_id,
+            )
+        )
+    )
+
+    assert runtime.stats.processed_closed_bars == 0
+    assert runtime.stats.order_intents_created == 0
+
+
+def test_data_only_shadow_runtime_does_not_subscribe_strategy_handler(tmp_path: Path) -> None:
+    runtime = TradeCoreRuntime(
+        config=replace(runtime_config(tmp_path), data_only_shadow_enabled=True),
+        launch_policy=LaunchModePolicy.from_mode(RuntimeMode.HISTORICAL_REPLAY),
+        database=DatabaseService(runtime_config(tmp_path).database_url or ""),
+        broker_gateway=cast(BrokerGateway, SafeNoopBrokerGateway(now=msk(2026, 6, 12, 10))),
+    )
+
+    asyncio.run(runtime.start())
+
+    assert runtime.live_market_data_collector is not None
+    assert runtime.market_event_bus.subscribers_for(MarketEventType.BAR_CLOSED) == 0
+
     asyncio.run(runtime.shutdown())
 
 

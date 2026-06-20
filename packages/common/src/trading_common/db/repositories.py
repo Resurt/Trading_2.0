@@ -21,6 +21,7 @@ from trading_common.db.models import (
     InstrumentRegistry,
     MarketCandle,
     MarketContextSnapshot,
+    MarketMicrostructureSnapshot,
     MarketStatusSnapshot,
     MicroSession,
     OrderBookSummary,
@@ -830,6 +831,14 @@ class MarketDataRepository:
         self._session.add(summary)
         self._session.flush()
         return summary
+
+    def save_microstructure_snapshot(
+        self,
+        snapshot: MarketMicrostructureSnapshot,
+    ) -> MarketMicrostructureSnapshot:
+        self._session.add(snapshot)
+        self._session.flush()
+        return snapshot
 
 
 class MarketContextSnapshotRepository:

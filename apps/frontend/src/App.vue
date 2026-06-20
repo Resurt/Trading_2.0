@@ -38,6 +38,7 @@ onMounted(() => {
   void Promise.allSettled([
     robot.fetchInitialSnapshot(),
     market.fetchOverview(),
+    market.fetchDataShadowStatus(),
     portfolio.fetchSnapshot(),
     reports.fetchReports(),
   ]);

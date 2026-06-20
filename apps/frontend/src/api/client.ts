@@ -7,12 +7,15 @@ import type {
   CorporateActionResponse,
   CounterfactualResponse,
   DailyReportResponse,
+  DataShadowStatusResponse,
   DividendSyncStatusResponse,
   DailyReportRunRequest,
   HistoricalQualityResponse,
   HistoricalRunResponse,
   HourlyReportResponse,
   InstrumentRegistryResponse,
+  MarketMicrostructureSnapshotResponse,
+  MarketMicrostructureSummaryResponse,
   MarketOverviewResponse,
   MarketSpecialDayClassificationResponse,
   MarketSpecialDayResponse,
@@ -125,6 +128,16 @@ export const apiClient = {
   openOrders: () => requestJson<OrderResponse[]>("/orders/open"),
   currentSignals: () => requestJson<SignalResponse[]>("/signals/current"),
   marketOverview: () => requestJson<MarketOverviewResponse>("/market/overview"),
+  latestMicrostructure: (query: Record<string, QueryValue>) =>
+    requestJson<MarketMicrostructureSnapshotResponse[]>(
+      withQuery("/market/microstructure/latest", query),
+    ),
+  microstructureSummary: (query: Record<string, QueryValue>) =>
+    requestJson<MarketMicrostructureSummaryResponse>(
+      withQuery("/market/microstructure/summary", query),
+    ),
+  dataShadowStatus: () =>
+    requestJson<DataShadowStatusResponse>("/runtime/data-shadow/status"),
   hourlyReports: (query: Record<string, QueryValue>) =>
     requestJson<HourlyReportResponse[]>(withQuery("/reports/hourly", query)),
   dailyReports: (query: Record<string, QueryValue>) =>

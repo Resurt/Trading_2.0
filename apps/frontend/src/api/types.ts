@@ -90,6 +90,63 @@ export interface MarketOverviewResponse {
   instruments: MarketInstrumentOverview[];
 }
 
+export interface MarketMicrostructureSnapshotResponse {
+  snapshot_id: string;
+  ts_utc: string;
+  exchange_ts: string | null;
+  received_ts: string;
+  instrument_id: string;
+  session_type: string;
+  session_phase: string;
+  micro_session_id: string;
+  broker_trading_status: string;
+  best_bid: string | null;
+  best_ask: string | null;
+  mid_price: string | null;
+  spread_abs: string | null;
+  spread_bps: string | null;
+  bid_depth_lots: string | null;
+  ask_depth_lots: string | null;
+  book_imbalance: string | null;
+  market_quality_score: string | null;
+  feed_freshness_age_ms: number | null;
+  is_stale: boolean;
+  source: string;
+  payload: JsonPayload;
+}
+
+export interface MarketMicrostructureSummaryResponse {
+  generated_at: string;
+  lookback_minutes: number;
+  instrument_id: string | null;
+  snapshots_count: number;
+  avg_spread_bps: string | null;
+  p95_spread_bps: string | null;
+  avg_bid_depth_lots: string | null;
+  avg_ask_depth_lots: string | null;
+  avg_book_imbalance: string | null;
+  avg_market_quality_score: string | null;
+  stale_incidents: number;
+  latest_ts_utc: string | null;
+  sessions: JsonPayload;
+}
+
+export interface DataShadowStatusResponse {
+  enabled: boolean;
+  strategy_trading_disabled: boolean;
+  real_orders_disabled: boolean;
+  stream_alive: boolean;
+  last_message_age_seconds: string | null;
+  candles_received: number | null;
+  order_book_snapshots: number;
+  market_microstructure_snapshots: number;
+  avg_spread_bps: string | null;
+  p95_spread_bps: string | null;
+  avg_market_quality_score: string | null;
+  current_session: string | null;
+  warning: string | null;
+}
+
 export interface HourlyReportResponse {
   hourly_report_id: string;
   trading_date: string;

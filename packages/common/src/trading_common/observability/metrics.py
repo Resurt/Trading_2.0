@@ -28,6 +28,9 @@ PROMETHEUS_METRIC_NAMES: tuple[str, ...] = (
     "emergency_cancel_failed_total",
     "counterfactual_jobs_total",
     "report_jobs_failed_total",
+    "order_book_snapshots_total",
+    "market_microstructure_snapshots_total",
+    "data_only_shadow_enabled",
     "market_stream_alive",
     "last_stream_message_age_seconds",
     "open_orders",
@@ -169,6 +172,24 @@ class TradingMetrics:
             "report_jobs_failed_total",
             "Report-worker jobs that failed before producing a completed result.",
             ("service", "status"),
+            registry=self.registry,
+        )
+        self.order_book_snapshots_total = Counter(
+            "order_book_snapshots_total",
+            "Order book snapshots observed by data-only collection.",
+            ("service", "instrument", "status"),
+            registry=self.registry,
+        )
+        self.market_microstructure_snapshots_total = Counter(
+            "market_microstructure_snapshots_total",
+            "Market microstructure snapshots persisted by data-only collection.",
+            ("service", "instrument", "status"),
+            registry=self.registry,
+        )
+        self.data_only_shadow_enabled = Gauge(
+            "data_only_shadow_enabled",
+            "Whether trade-core is running in data-only shadow collection mode.",
+            ("service",),
             registry=self.registry,
         )
         self.market_stream_alive = Gauge(
@@ -350,6 +371,35 @@ class TradingMetrics:
     def inc_report_job_failed(self, *, status: str = "error") -> None:
         self.report_jobs_failed_total.labels(**self._base_labels, status=status).inc()
 
+    def inc_order_book_snapshot(
+        self,
+        *,
+        instrument: str | None = None,
+        instrument_id: str | None = None,
+        status: str = "received",
+    ) -> None:
+        self.order_book_snapshots_total.labels(
+            **self._base_labels,
+            instrument=self._instrument_label(instrument=instrument, instrument_id=instrument_id),
+            status=status,
+        ).inc()
+
+    def inc_market_microstructure_snapshot(
+        self,
+        *,
+        instrument: str | None = None,
+        instrument_id: str | None = None,
+        status: str = "written",
+    ) -> None:
+        self.market_microstructure_snapshots_total.labels(
+            **self._base_labels,
+            instrument=self._instrument_label(instrument=instrument, instrument_id=instrument_id),
+            status=status,
+        ).inc()
+
+    def set_data_only_shadow_enabled(self, enabled: bool) -> None:
+        self.data_only_shadow_enabled.labels(**self._base_labels).set(1 if enabled else 0)
+
     def set_open_orders(self, count: int) -> None:
         self.open_orders.labels(**self._base_labels).set(count)
 
@@ -466,6 +516,17 @@ class TradingMetrics:
         self.emergency_cancel_failed_total.labels(**self._base_labels, result="error").inc(0)
         self.counterfactual_jobs_total.labels(**self._base_labels, status="success").inc(0)
         self.report_jobs_failed_total.labels(**self._base_labels, status="error").inc(0)
+        self.order_book_snapshots_total.labels(
+            **self._base_labels,
+            instrument="all",
+            status="received",
+        ).inc(0)
+        self.market_microstructure_snapshots_total.labels(
+            **self._base_labels,
+            instrument="all",
+            status="written",
+        ).inc(0)
+        self.set_data_only_shadow_enabled(False)
         self.set_market_stream_alive(False, stream_type="market_data")
         self.set_last_stream_message_age(0, stream_type="market_data")
         self.set_open_orders(0)

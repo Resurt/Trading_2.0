@@ -30,6 +30,10 @@ from trade_core.market_data.historical_backfill import (
     HistoricalBackfillResult,
     HistoricalCandleBackfillService,
 )
+from trade_core.market_data.live_collector import (
+    LiveMarketDataCollector,
+    LiveMarketDataCollectorStats,
+)
 from trade_core.market_data.pipeline import MarketDataPipeline
 from trade_core.market_data.quality import (
     HistoricalDataQualityConfig,
@@ -78,6 +82,8 @@ __all__ = [
     "InvalidCandleReason",
     "LastPriceTick",
     "LiveOrderBookReadModel",
+    "LiveMarketDataCollector",
+    "LiveMarketDataCollectorStats",
     "MarketDataEvent",
     "MarketDataPipeline",
     "MarketDataSubscriptionConfig",

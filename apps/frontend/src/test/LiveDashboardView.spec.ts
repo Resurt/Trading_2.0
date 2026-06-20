@@ -65,6 +65,21 @@ function mountWithStores() {
       },
     ],
   };
+  market.dataShadowStatus = {
+    enabled: true,
+    strategy_trading_disabled: true,
+    real_orders_disabled: true,
+    stream_alive: true,
+    last_message_age_seconds: "1.2",
+    candles_received: null,
+    order_book_snapshots: 42,
+    market_microstructure_snapshots: 42,
+    avg_spread_bps: "8.5",
+    p95_spread_bps: "12.0",
+    avg_market_quality_score: "0.88",
+    current_session: "weekday_main",
+    warning: "Strategy trading disabled: data-only shadow mode",
+  };
   portfolio.positions = [
     {
       instrument_id: "MOEX:SBER",
@@ -130,5 +145,6 @@ describe("LiveDashboardView", () => {
     expect(wrapper.text()).toContain("weekday_main");
     expect(wrapper.text()).toContain("request-1");
     expect(wrapper.text()).toContain("Stream health / reconnect");
+    expect(wrapper.text()).toContain("Strategy trading disabled: data-only shadow mode");
   });
 });

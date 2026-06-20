@@ -255,6 +255,39 @@ const reports = useReportsStore();
         </DataPanel>
 
         <DataPanel>
+          <template #eyebrow>collector</template>
+          <template #title>Data-only Shadow Status</template>
+          <dl class="definition-grid">
+            <dt>enabled</dt>
+            <dd><StatusPill :code="market.dataShadowStatus.enabled ? 'enabled' : 'disabled'" /></dd>
+            <dt>strategy</dt>
+            <dd>Strategy trading disabled: data-only shadow mode</dd>
+            <dt>stream</dt>
+            <dd><StatusPill :code="market.dataShadowStatus.stream_alive ? 'live' : 'idle'" /></dd>
+            <dt>last age</dt>
+            <dd>{{ market.dataShadowStatus.last_message_age_seconds ?? "no samples" }}</dd>
+            <dt>snapshots</dt>
+            <dd>{{ market.dataShadowStatus.market_microstructure_snapshots }}</dd>
+            <dt>order books</dt>
+            <dd>{{ market.dataShadowStatus.order_book_snapshots }}</dd>
+            <dt>avg spread</dt>
+            <dd>{{ formatDecimal(market.dataShadowStatus.avg_spread_bps, 4) }}</dd>
+            <dt>p95 spread</dt>
+            <dd>{{ formatDecimal(market.dataShadowStatus.p95_spread_bps, 4) }}</dd>
+            <dt>quality</dt>
+            <dd>{{ formatDecimal(market.dataShadowStatus.avg_market_quality_score, 3) }}</dd>
+            <dt>session</dt>
+            <dd>{{ market.dataShadowStatus.current_session ?? "unknown" }}</dd>
+          </dl>
+          <EmptyState
+            v-if="market.dataShadowStatus.warning"
+            title="Collector mode"
+            :detail="market.dataShadowStatus.warning"
+            tone="warn"
+          />
+        </DataPanel>
+
+        <DataPanel>
           <template #eyebrow>streams</template>
           <template #title>Stream health / reconnect</template>
           <dl class="definition-grid">

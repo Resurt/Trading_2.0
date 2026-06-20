@@ -87,6 +87,7 @@ def parse_args() -> argparse.Namespace:
             "historical-replay",
             "historical-final-calibration",
             "instrument-resolution",
+            "data-shadow",
         ),
         default="local",
     )
@@ -124,6 +125,8 @@ def run_mode(args: argparse.Namespace, env: Mapping[str, str]) -> list[GateResul
         return run_historical_final_calibration(args)
     if args.mode == "instrument-resolution":
         return run_instrument_resolution(args)
+    if args.mode == "data-shadow":
+        return run_data_shadow(args, env)
     raise ValueError(args.mode)
 
 
@@ -591,6 +594,67 @@ def run_instrument_resolution(args: argparse.Namespace) -> list[GateResult]:
             passed=True,
             command="readonly instrument resolve",
             details={"post_order": "disabled", "cancel_order": "disabled"},
+        ),
+    ]
+
+
+def run_data_shadow(args: argparse.Namespace, env: Mapping[str, str]) -> list[GateResult]:
+    smoke = [
+        sys.executable,
+        "scripts/run_data_only_shadow_smoke.py",
+        "--instruments",
+        args.instruments,
+        "--minutes",
+        str(max(args.shadow_minutes, 0.2)),
+        "--json-output",
+    ]
+    if args.dry_run:
+        smoke.append("--dry-run")
+    if not args.skip_dividend_sync_check:
+        smoke.append("--require-dividend-sync")
+    return [
+        run_cmd(
+            "tbank_sdk_import_check",
+            [sys.executable, "scripts/run_tbank_sdk_import_check.py"],
+        ),
+        run_instrument_registry_gate(args, allow_empty=args.dry_run),
+        run_dividend_sync_status_gate(
+            args,
+            name="data_shadow_clean_dividend_sync",
+        )
+        if not args.skip_dividend_sync_check
+        else GateResult(
+            name="data_shadow_clean_dividend_sync",
+            passed=True,
+            command="--skip-dividend-sync-check",
+            details={"status": "skipped"},
+        ),
+        env_gate(
+            "data_only_shadow_enabled",
+            env.get("TRADING_DATA_ONLY_SHADOW", "false").lower()
+            in {"1", "true", "yes", "on"},
+        ),
+        env_gate("production_confirmation_absent", "TRADING_PRODUCTION_CONFIRM" not in env),
+        run_json_cmd_gate(
+            "data_only_shadow_smoke",
+            smoke,
+            expected={
+                "data_only_shadow_enabled": True,
+                "real_orders_disabled": True,
+                "post_order_calls": 0,
+                "cancel_order_calls": 0,
+            },
+            timeout_seconds=int(max(args.gate_timeout_seconds, 120)),
+        ),
+        GateResult(
+            name="data_shadow_strategy_pipeline_disabled",
+            passed=True,
+            command="runtime data-only flag",
+            details={
+                "signal_candidate": "disabled",
+                "order_intent": "disabled",
+                "pseudo_order": "disabled",
+            },
         ),
     ]
 

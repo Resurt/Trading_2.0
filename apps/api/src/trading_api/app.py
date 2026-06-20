@@ -43,7 +43,10 @@ from trading_api.schemas import (
     CounterfactualResponse,
     DailyReportResponse,
     DailyReportRunRequest,
+    DataShadowStatusResponse,
     HourlyReportResponse,
+    MarketMicrostructureSnapshotResponse,
+    MarketMicrostructureSummaryResponse,
     MarketOverviewResponse,
     OrderResponse,
     PositionResponse,
@@ -219,6 +222,41 @@ def create_fastapi_app(
     @app.get("/market/overview", response_model=MarketOverviewResponse, tags=["market"])
     def market_overview(service: ReadServiceDep) -> MarketOverviewResponse:
         return service.market_overview()
+
+    @app.get(
+        "/market/microstructure/latest",
+        response_model=list[MarketMicrostructureSnapshotResponse],
+        tags=["market"],
+    )
+    def latest_microstructure(
+        service: ReadServiceDep,
+        instrument_id: str | None = None,
+        limit: int = 20,
+    ) -> list[MarketMicrostructureSnapshotResponse]:
+        return service.latest_microstructure(instrument_id=instrument_id, limit=limit)
+
+    @app.get(
+        "/market/microstructure/summary",
+        response_model=MarketMicrostructureSummaryResponse,
+        tags=["market"],
+    )
+    def microstructure_summary(
+        service: ReadServiceDep,
+        lookback_minutes: int = 60,
+        instrument_id: str | None = None,
+    ) -> MarketMicrostructureSummaryResponse:
+        return service.microstructure_summary(
+            lookback_minutes=lookback_minutes,
+            instrument_id=instrument_id,
+        )
+
+    @app.get(
+        "/runtime/data-shadow/status",
+        response_model=DataShadowStatusResponse,
+        tags=["runtime"],
+    )
+    def data_shadow_status(service: ReadServiceDep) -> DataShadowStatusResponse:
+        return service.data_shadow_status()
 
     @app.get("/reports/hourly", response_model=list[HourlyReportResponse], tags=["reports"])
     def hourly_reports(

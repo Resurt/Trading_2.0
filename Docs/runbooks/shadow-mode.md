@@ -126,3 +126,18 @@ python scripts/run_launch_readiness.py --mode shadow
 Shadow is not ready if any enabled instrument remains `source=seed` /
 `resolution_status=unresolved`, or if `instrument_uid`/`figi` is missing. Internal
 `MOEX:*` ids stay canonical for analytics, but they must not be sent to T-Bank.
+
+## Data-only Shadow Before Strategy Shadow
+
+Candle-only research did not produce a shadow-ready strategy contour. Before strategy shadow,
+run data-only shadow to collect live microstructure without strategy evaluation:
+
+```powershell
+set TRADING_DATA_ONLY_SHADOW=true
+python scripts/run_data_only_shadow_smoke.py --instruments SBER,GAZP --minutes 10 --require-dividend-sync --json-output
+python scripts/run_launch_readiness.py --mode data-shadow --instruments SBER,GAZP
+```
+
+Data-only shadow must not create `signal_candidate`, `order_intent`, `broker_order` or
+pseudo-orders, and must not call `PostOrder` or `CancelOrder`. Its output is
+`market_microstructure_snapshot` plus the dashboard block `Data-only Shadow Status`.

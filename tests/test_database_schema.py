@@ -16,6 +16,7 @@ from trading_common.db.models import (
     BrokerOrder,
     InstrumentRegistry,
     MarketCandle,
+    MarketMicrostructureSnapshot,
     OrderBookSummary,
     OrderIntent,
     ReportJobOutbox,
@@ -95,6 +96,7 @@ def test_metadata_contains_required_tables_and_partitioning() -> None:
         "market_candle",
         "market_status_snapshot",
         "order_book_summary",
+        "market_microstructure_snapshot",
     }
 
     assert required_tables <= set(Base.metadata.tables)
@@ -122,6 +124,7 @@ def test_alembic_upgrade_and_downgrade_on_sqlite(tmp_path: Path) -> None:
         assert "order_intent" in table_names
         assert "counterfactual_result" in table_names
         assert "market_candle" in table_names
+        assert "market_microstructure_snapshot" in table_names
         assert "robot_command" in table_names
         assert list(tickers) == ["GAZP", "LKOH", "SBER"]
 
@@ -401,10 +404,33 @@ def test_repository_crud_and_order_idempotency() -> None:
                 summary_payload={},
             )
         )
+        microstructure = market_data.save_microstructure_snapshot(
+            MarketMicrostructureSnapshot(
+                **context_values(),
+                ts_utc=now,
+                exchange_ts=now,
+                received_ts=now,
+                instrument_id="MOEX:SBER",
+                best_bid=Decimal("300.00"),
+                best_ask=Decimal("300.10"),
+                mid_price=Decimal("300.05"),
+                spread_abs=Decimal("0.10"),
+                spread_bps=Decimal("3.3330"),
+                bid_depth_lots=Decimal("10"),
+                ask_depth_lots=Decimal("8"),
+                book_imbalance=Decimal("0.1111"),
+                market_quality_score=Decimal("0.9000"),
+                feed_freshness_age_ms=120,
+                is_stale=False,
+                source="data_only_shadow",
+                snapshot_payload={"source": "test"},
+            )
+        )
 
         assert duplicate_candle is candle
         assert candle.high_price == Decimal("302.00")
         assert summary.instrument_id == "MOEX:SBER"
+        assert microstructure.spread_bps == Decimal("3.3330")
 
     engine.dispose()
 

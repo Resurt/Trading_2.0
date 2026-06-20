@@ -240,3 +240,23 @@ python scripts/run_launch_readiness.py --mode instrument-resolution
 `MOEX:SBER` and `MOEX:GAZP` remain internal canonical ids for analytics and
 reports. They are not broker ids and must not be sent to `GetDividends`,
 `GetCandles`, streams or order placement in sandbox/shadow/production.
+
+## Data-only Shadow
+
+Data-only shadow is the next step after negative candle-only historical research. It collects
+readonly live microstructure for spread, depth, imbalance, latency and stream-health calibration.
+It is not trading shadow and not strategy shadow.
+
+```powershell
+set TRADING_DATA_ONLY_SHADOW=true
+python scripts/run_data_only_shadow_smoke.py --instruments SBER,GAZP --minutes 10 --require-dividend-sync --json-output
+python scripts/run_data_shadow_summary_report.py --lookback-hours 6 --json-output
+python scripts/run_launch_readiness.py --mode data-shadow --instruments SBER,GAZP --shadow-minutes 10
+```
+
+Data-only shadow writes `market_microstructure_snapshot` and exposes
+`/market/microstructure/latest`, `/market/microstructure/summary`, and
+`/runtime/data-shadow/status`. It does not create `signal_candidate`, `order_intent`,
+`broker_order`, pseudo-orders, `PostOrder`, or `CancelOrder`.
+
+Runbook: `Docs/runbooks/data-only-shadow.md`.

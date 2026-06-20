@@ -759,6 +759,42 @@ class OrderBookSummary(Base, SessionContextMixin, EventTimestampMixin):
     summary_payload: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
 
 
+class MarketMicrostructureSnapshot(Base, SessionContextMixin):
+    """Live market microstructure read model for data-only shadow collection."""
+
+    __tablename__ = "market_microstructure_snapshot"
+    __table_args__ = (
+        Index("ix_market_microstructure_instrument_ts", "instrument_id", "ts_utc"),
+        Index("ix_market_microstructure_date_instrument", "trading_date", "instrument_id"),
+        Index("ix_market_microstructure_session_date", "session_type", "trading_date"),
+        Index("ix_market_microstructure_spread_bps", "spread_bps"),
+        Index("ix_market_microstructure_quality", "market_quality_score"),
+    )
+
+    snapshot_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    ts_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    exchange_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    received_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    instrument_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    best_bid: Mapped[Decimal | None] = mapped_column(PRICE_TYPE)
+    best_ask: Mapped[Decimal | None] = mapped_column(PRICE_TYPE)
+    mid_price: Mapped[Decimal | None] = mapped_column(PRICE_TYPE)
+    spread_abs: Mapped[Decimal | None] = mapped_column(PRICE_TYPE)
+    spread_bps: Mapped[Decimal | None] = mapped_column(BPS_TYPE)
+    bid_depth_lots: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    ask_depth_lots: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    book_imbalance: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    market_quality_score: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    feed_freshness_age_ms: Mapped[int | None] = mapped_column(Integer)
+    is_stale: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    snapshot_payload: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
+
+
 class StrategyStateEvent(Base, SessionContextMixin, EventTimestampMixin):
     """Strategy state transition event for replay and diagnostics."""
 

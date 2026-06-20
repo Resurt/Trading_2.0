@@ -219,3 +219,21 @@ and replay payloads include `special_day_type`, `dividend_gap_day`,
 
 Primary calibration excludes dividend/corporate-action days by default; special days are
 reviewed in a separate calibration scope.
+
+## Data-only Live Microstructure
+
+When `TRADING_DATA_ONLY_SHADOW=true`, `trade-core` still runs session management, market streams,
+`MarketEventBus`, `BarEngine` and market persistence, but closed bars do not enter strategy
+evaluation. `LiveMarketDataCollector` subscribes to market events and writes
+`market_microstructure_snapshot` with top-of-book, spread, depth, imbalance, freshness and market
+quality.
+
+This mode is for data collection only:
+
+- no `signal_candidate`;
+- no `order_intent`;
+- no `broker_order` or pseudo-order;
+- no `PostOrder`;
+- no `CancelOrder`.
+
+Use `scripts/run_data_shadow_summary_report.py` for spread/depth/quality summaries.

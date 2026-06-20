@@ -131,3 +131,18 @@ Fail production if any enabled row in `instrument_registry` is still
 `source=seed`, `source=safe_noop`, `resolution_status!=resolved`, or has no
 `instrument_uid`/`figi`. `MOEX:*` is an internal canonical id and is never a valid
 broker id for real T-Bank calls.
+
+## Data-only Shadow Evidence
+
+Production preflight must not treat candle-only historical research as execution calibration.
+Before any strategy shadow or live attempt, collect data-only shadow evidence for spread, depth,
+imbalance, freshness, stream gaps and latency:
+
+```powershell
+set TRADING_DATA_ONLY_SHADOW=true
+python scripts/run_data_shadow_summary_report.py --lookback-hours 6 --json-output
+python scripts/run_launch_readiness.py --mode data-shadow --instruments SBER,GAZP
+```
+
+Data-only shadow is readonly. It cannot be used to justify live orders by itself; it only supplies
+microstructure inputs required for later spread/depth/slippage calibration.

@@ -27,6 +27,7 @@ from trade_core.market_data import (
     GapRecoveryRequest,
     HistoricalBackfillConfig,
     HistoricalCandleBackfillService,
+    LiveMarketDataCollector,
     MarketDataEvent,
     MarketDataPipeline,
     MarketEventBus,
@@ -43,7 +44,7 @@ from trade_core.market_data.persistence import SqlAlchemyMarketDataStore
 from trade_core.session.models import SessionEventContext
 from trading_common import LaunchModePolicy, RuntimeMode
 from trading_common.db import Base
-from trading_common.db.models import InstrumentRegistry, MarketCandle
+from trading_common.db.models import InstrumentRegistry, MarketCandle, MarketMicrostructureSnapshot
 from trading_common.enums import SessionPhase, SessionType
 
 MSK = ZoneInfo("Europe/Moscow")
@@ -501,6 +502,59 @@ def test_pipeline_updates_live_dashboard_read_models() -> None:
     assert MarketEventType.MARKET_STATE_UPDATED in [
         event.event_type for event in event_bus.published_events
     ]
+
+
+def test_live_market_data_collector_writes_microstructure_snapshot() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    now = utc(2026, 6, 12, 7)
+    event_bus = MarketEventBus()
+
+    with Session(engine) as session:
+        store = SqlAlchemyMarketDataStore(session)
+        pipeline = MarketDataPipeline(
+            event_bus=event_bus,
+            session_context_provider=lambda instrument_id: session_context(instrument_id),
+            store=store,
+        )
+        pipeline.register()
+        collector = LiveMarketDataCollector(
+            event_bus=event_bus,
+            session_context_provider=lambda instrument_id: session_context(instrument_id),
+            store=store,
+        )
+        collector.register()
+
+        async def run() -> None:
+            await event_bus.publish(
+                MarketDataEvent(
+                    event_type=MarketEventType.ORDER_BOOK,
+                    payload=OrderBookSnapshot(
+                        instrument_id="MOEX:SBER",
+                        bids=(PriceLevel(Decimal("100"), Decimal("10")),),
+                        asks=(PriceLevel(Decimal("100.10"), Decimal("8")),),
+                        depth=1,
+                        exchange_ts=now,
+                        received_ts=now,
+                    ),
+                    ts_utc=now,
+                    instrument_id="MOEX:SBER",
+                )
+            )
+
+        asyncio.run(run())
+        session.commit()
+        snapshot = session.execute(select(MarketMicrostructureSnapshot)).scalar_one()
+
+    assert snapshot.instrument_id == "MOEX:SBER"
+    assert snapshot.best_bid == Decimal("100.00000000")
+    assert snapshot.best_ask == Decimal("100.10000000")
+    assert snapshot.bid_depth_lots == Decimal("10.00000000")
+    assert snapshot.ask_depth_lots == Decimal("8.00000000")
+    assert snapshot.book_imbalance == Decimal("0.1111")
+    assert collector.stats.market_state_snapshots_written == 1
+    assert collector.stats.order_books_received == 1
+    engine.dispose()
 
 
 def test_historical_backfill_writes_raw_and_derived_bars_idempotently() -> None:

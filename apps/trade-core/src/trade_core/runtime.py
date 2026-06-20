@@ -63,6 +63,7 @@ from trade_core.market_data import (
     Bar,
     BarEngine,
     Candle,
+    LiveMarketDataCollector,
     MarketDataEvent,
     MarketDataPipeline,
     MarketDataSubscriptionConfig,
@@ -180,6 +181,7 @@ class TradeCoreRuntimeConfig:
     dividend_sync_lookahead_days: int = 365
     dividend_sync_interval_hours: int = 24
     dividend_sync_fail_open: bool = False
+    data_only_shadow_enabled: bool = False
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> TradeCoreRuntimeConfig:
@@ -234,6 +236,10 @@ class TradeCoreRuntimeConfig:
                 env.get("TRADING_DIVIDEND_SYNC_FAIL_OPEN"),
                 default=False,
             ),
+            data_only_shadow_enabled=_bool_env(
+                env.get("TRADING_DATA_ONLY_SHADOW"),
+                default=False,
+            ),
         )
 
     @property
@@ -258,6 +264,7 @@ class TradeCoreRuntimeStats:
     report_requests: list[JsonPayload] = field(default_factory=list)
     last_stream_message_at: datetime | None = None
     open_orders: int = 0
+    data_only_shadow_enabled: bool = False
     active_positions: int = 0
 
 
@@ -558,6 +565,7 @@ class TradeCoreRuntime:
         self.report_job_dispatcher = report_job_dispatcher or _build_report_job_dispatcher()
         if self.config.auto_create_sqlite_schema:
             Base.metadata.create_all(self.database.engine)
+        self.metrics.set_data_only_shadow_enabled(self.config.data_only_shadow_enabled)
 
         self.broker_gateway = broker_gateway or self._build_broker_gateway()
         self.session_manager = SessionManager()
@@ -586,6 +594,7 @@ class TradeCoreRuntime:
         )
         self.runtime_id = uuid4()
         self.stats = TradeCoreRuntimeStats()
+        self.stats.data_only_shadow_enabled = self.config.data_only_shadow_enabled
         self.robot_control_state = "running"
 
         self._session: Session | None = None
@@ -593,6 +602,7 @@ class TradeCoreRuntime:
         self.hourly_micro_session_manager: HourlyMicroSessionManager | None = None
         self.market_data_store: SqlAlchemyMarketDataStore | None = None
         self.market_data_pipeline: MarketDataPipeline | None = None
+        self.live_market_data_collector: LiveMarketDataCollector | None = None
         self.stream_gap_recovery_service: StreamGapRecoveryService | None = None
         self.position_service: PositionService | None = None
         self.execution_engine: DefaultExecutionEngine | None = None
@@ -670,7 +680,31 @@ class TradeCoreRuntime:
             store=self.market_data_store,
         )
         self.market_data_pipeline.register()
-        self.market_event_bus.subscribe(MarketEventType.BAR_CLOSED, self._handle_closed_bar)
+        if self.config.data_only_shadow_enabled:
+            self.live_market_data_collector = LiveMarketDataCollector(
+                event_bus=self.market_event_bus,
+                session_context_provider=self._session_context_for,
+                store=self.market_data_store,
+                metrics=self.metrics,
+            )
+            self.live_market_data_collector.register()
+            self._write_audit_event(
+                action="data_only_shadow_started",
+                payload={
+                    "runtime_id": str(self.runtime_id),
+                    "strategy_trading_disabled": True,
+                    "real_orders_disabled": True,
+                },
+            )
+            self._write_audit_event(
+                action="data_only_shadow_strategy_disabled",
+                payload={
+                    "reason_code": "data_only_shadow_strategy_disabled",
+                    "strategy_id": self.config.strategy_id,
+                },
+            )
+        else:
+            self.market_event_bus.subscribe(MarketEventType.BAR_CLOSED, self._handle_closed_bar)
         self.market_event_bus.subscribe(
             MarketEventType.MARKET_STATE_UPDATED,
             self._handle_market_state_updated,
@@ -732,6 +766,7 @@ class TradeCoreRuntime:
             database_backend=self.config.database_backend,
             database_url_redacted=self.config.database_url_redacted,
             stream_tasks=self.stats.stream_tasks_started,
+            data_only_shadow_enabled=self.config.data_only_shadow_enabled,
         )
 
     async def run_forever(self) -> None:
@@ -773,6 +808,12 @@ class TradeCoreRuntime:
             await asyncio.gather(*self._stream_tasks, return_exceptions=True)
         self._stream_tasks = ()
         self.metrics.set_market_stream_alive(False, stream_type="market_data")
+        self.metrics.set_data_only_shadow_enabled(False)
+        if self.config.data_only_shadow_enabled:
+            self._write_audit_event(
+                action="data_only_shadow_stopped",
+                payload={"runtime_id": str(self.runtime_id)},
+            )
         self._write_audit_event(action="trade_core_runtime_shutdown")
         self.flush_domain_events()
         session = self._session
@@ -793,8 +834,9 @@ class TradeCoreRuntime:
 
         if not self.stats.started:
             await self.start()
-        await self.process_robot_commands_async()
-        self._reload_strategy_config_if_changed()
+        if not self.config.data_only_shadow_enabled:
+            await self.process_robot_commands_async()
+            self._reload_strategy_config_if_changed()
         await self._sync_dividend_calendar_if_due()
         observed_at = _ensure_msk(now or datetime.now(tz=MSK))
         instrument = self.config.instruments[0]
@@ -1649,6 +1691,16 @@ class TradeCoreRuntime:
 
     async def _handle_closed_bar(self, event: MarketDataEvent) -> None:
         if not isinstance(event.payload, Bar):
+            return
+        if self.config.data_only_shadow_enabled:
+            log_event(
+                logger=LOGGER,
+                event_type="data_only_shadow_strategy_disabled",
+                component="runtime",
+                instrument_id=event.payload.instrument_id,
+                timeframe=event.payload.timeframe.value,
+                reason_code="data_only_shadow_strategy_disabled",
+            )
             return
         bar = event.payload
         if not bar.is_closed:

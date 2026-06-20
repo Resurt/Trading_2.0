@@ -10,8 +10,10 @@ INSTRUMENTS ?= SBER,GAZP
 TIMEFRAMES ?= 5m,10m,15m
 CORPORATE_ACTIONS_FILE ?= data/corporate_actions/sample_dividends.csv
 CLASS_CODE ?= TQBR
+DATA_SHADOW_MINUTES ?= 10
+DATA_SHADOW_LOOKBACK_HOURS ?= 6
 
-.PHONY: lint test up down logs frontend-build migrate migrate-down replay-smoke sandbox-smoke historical-backfill-dry-run historical-quality historical-replay historical-counterfactual historical-report-rebuild calibration-report corporate-actions-import instrument-resolve instrument-resolution-check dividend-sync dividend-sync-730d market-special-days market-special-days-future calibration-primary calibration-special-days historical-replay-clean analytics-smoke report-rebuild replay-day controlled-launch-acceptance launch-readiness observability-up report-worker-smoke celery-inspect
+.PHONY: lint test up down logs frontend-build migrate migrate-down replay-smoke sandbox-smoke historical-backfill-dry-run historical-quality historical-replay historical-counterfactual historical-report-rebuild calibration-report corporate-actions-import instrument-resolve instrument-resolution-check dividend-sync dividend-sync-730d market-special-days market-special-days-future calibration-primary calibration-special-days historical-replay-clean data-shadow-smoke data-shadow-report data-shadow-readiness analytics-smoke report-rebuild replay-day controlled-launch-acceptance launch-readiness observability-up report-worker-smoke celery-inspect
 
 lint:
 	$(PYTHON) -m ruff check .
@@ -91,6 +93,15 @@ calibration-special-days:
 
 historical-replay-clean:
 	$(PYTHON) scripts/run_historical_replay_from_db.py --lookback-days $(LOOKBACK_DAYS) --instruments $(INSTRUMENTS) --timeframes $(TIMEFRAMES) --strategy-id $(STRATEGY_ID) --require-special-day-classification --json-output
+
+data-shadow-smoke:
+	$(PYTHON) scripts/run_data_only_shadow_smoke.py --instruments $(INSTRUMENTS) --minutes $(DATA_SHADOW_MINUTES) --require-dividend-sync --json-output
+
+data-shadow-report:
+	$(PYTHON) scripts/run_data_shadow_summary_report.py --lookback-hours $(DATA_SHADOW_LOOKBACK_HOURS) --json-output
+
+data-shadow-readiness:
+	$(PYTHON) scripts/run_launch_readiness.py --mode data-shadow --instruments $(INSTRUMENTS) --shadow-minutes $(DATA_SHADOW_MINUTES)
 
 analytics-smoke:
 	$(PYTHON) scripts/run_logging_analytics_acceptance.py --date $(TRADING_DATE) --strategy-id $(STRATEGY_ID)

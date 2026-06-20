@@ -146,6 +146,63 @@ class MarketOverviewResponse(BaseModel):
     instruments: list[MarketInstrumentOverview]
 
 
+class MarketMicrostructureSnapshotResponse(BaseModel):
+    snapshot_id: UUID
+    ts_utc: datetime
+    exchange_ts: datetime | None = None
+    received_ts: datetime
+    instrument_id: str
+    session_type: str
+    session_phase: str
+    micro_session_id: str
+    broker_trading_status: str
+    best_bid: Decimal | None = None
+    best_ask: Decimal | None = None
+    mid_price: Decimal | None = None
+    spread_abs: Decimal | None = None
+    spread_bps: Decimal | None = None
+    bid_depth_lots: Decimal | None = None
+    ask_depth_lots: Decimal | None = None
+    book_imbalance: Decimal | None = None
+    market_quality_score: Decimal | None = None
+    feed_freshness_age_ms: int | None = None
+    is_stale: bool
+    source: str
+    payload: JsonPayload = Field(default_factory=dict)
+
+
+class MarketMicrostructureSummaryResponse(BaseModel):
+    generated_at: datetime
+    lookback_minutes: int
+    instrument_id: str | None = None
+    snapshots_count: int
+    avg_spread_bps: Decimal | None = None
+    p95_spread_bps: Decimal | None = None
+    avg_bid_depth_lots: Decimal | None = None
+    avg_ask_depth_lots: Decimal | None = None
+    avg_book_imbalance: Decimal | None = None
+    avg_market_quality_score: Decimal | None = None
+    stale_incidents: int
+    latest_ts_utc: datetime | None = None
+    sessions: JsonPayload = Field(default_factory=dict)
+
+
+class DataShadowStatusResponse(BaseModel):
+    enabled: bool
+    strategy_trading_disabled: bool
+    real_orders_disabled: bool
+    stream_alive: bool
+    last_message_age_seconds: Decimal | None = None
+    candles_received: int | None = None
+    order_book_snapshots: int
+    market_microstructure_snapshots: int
+    avg_spread_bps: Decimal | None = None
+    p95_spread_bps: Decimal | None = None
+    avg_market_quality_score: Decimal | None = None
+    current_session: str | None = None
+    warning: str | None = None
+
+
 class HourlyReportResponse(BaseModel):
     hourly_report_id: UUID
     trading_date: date

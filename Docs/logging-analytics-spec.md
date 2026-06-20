@@ -1078,3 +1078,29 @@ Machine-readable failure code:
 
 This code must be present when dividend sync, historical backfill, market streams
 or order placement would otherwise send an internal `MOEX:*` id to T-Bank.
+
+## Data-only Shadow Events
+
+Data-only shadow writes market microstructure facts to PostgreSQL and technical logs to JSON. The
+analytics source of truth remains PostgreSQL, not logs.
+
+Required event names:
+
+- `data_only_shadow_started`;
+- `data_only_shadow_strategy_disabled`;
+- `data_only_shadow_stopped`;
+- `live_data_collector_started`;
+- `live_candle_received`;
+- `live_order_book_snapshot_written`;
+- `live_market_snapshot_written`.
+
+Required metrics:
+
+- `data_only_shadow_enabled`;
+- `order_book_snapshots_total`;
+- `market_microstructure_snapshots_total`;
+- existing `market_stream_alive`, `last_stream_message_age_seconds`,
+  `candle_close_delivery_lag_seconds`, and `stream_reconnect_total`.
+
+Prometheus labels must stay bounded to service/instrument/status/stream/timeframe. Do not export
+candidate ids, order ids, snapshot ids or broker tracking ids as metric labels.

@@ -29,6 +29,7 @@ from trading_common.db.models import (
     FillEvent,
     HourlyReport,
     InstrumentRegistry,
+    MarketMicrostructureSnapshot,
     OrderBookSummary,
     OrderIntent,
     PositionSnapshot,
@@ -366,6 +367,26 @@ def seed_database(database: DatabaseService) -> None:
                         ]
                     },
                 ),
+                MarketMicrostructureSnapshot(
+                    **session_context(),
+                    ts_utc=now,
+                    exchange_ts=now,
+                    received_ts=now,
+                    instrument_id="MOEX:SBER",
+                    best_bid=Decimal("100"),
+                    best_ask=Decimal("100.10"),
+                    mid_price=Decimal("100.05"),
+                    spread_abs=Decimal("0.10"),
+                    spread_bps=Decimal("9.9950"),
+                    bid_depth_lots=Decimal("20"),
+                    ask_depth_lots=Decimal("16"),
+                    book_imbalance=Decimal("0.1111"),
+                    market_quality_score=Decimal("0.9000"),
+                    feed_freshness_age_ms=100,
+                    is_stale=False,
+                    source="data_only_shadow",
+                    snapshot_payload={"source": "test"},
+                ),
                 HourlyReport(
                     **session_context(),
                     run_id=None,
@@ -512,11 +533,21 @@ def seed_database(database: DatabaseService) -> None:
         )
 
 
-def test_robot_status_and_market_overview(tmp_path: Path) -> None:
+def test_robot_status_and_market_overview(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("TRADING_DATA_ONLY_SHADOW", "true")
     client = make_client(tmp_path)
 
     status = client.get("/robot/status").json()
     market = client.get("/market/overview").json()
+    latest_microstructure = client.get("/market/microstructure/latest").json()
+    microstructure_summary = client.get(
+        "/market/microstructure/summary",
+        params={"lookback_minutes": 20000},
+    ).json()
+    data_shadow_status = client.get("/runtime/data-shadow/status").json()
 
     assert status["strategy_state"] == "candidate"
     assert status["session_type"] == "weekday_main"
@@ -524,6 +555,11 @@ def test_robot_status_and_market_overview(tmp_path: Path) -> None:
     assert status["active_positions_count"] == 1
     assert market["instruments"][0]["instrument_id"] == "MOEX:SBER"
     assert market["instruments"][0]["mid_price"] == "100.05000000"
+    assert latest_microstructure[0]["source"] == "data_only_shadow"
+    assert latest_microstructure[0]["spread_bps"] == "9.9950"
+    assert microstructure_summary["snapshots_count"] == 1
+    assert data_shadow_status["real_orders_disabled"] is True
+    assert "Strategy trading disabled" in data_shadow_status["warning"]
 
 
 def test_management_auth_and_daily_report_job(tmp_path: Path) -> None:
