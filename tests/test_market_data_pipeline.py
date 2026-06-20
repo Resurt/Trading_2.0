@@ -557,6 +557,12 @@ def test_live_market_data_collector_writes_microstructure_snapshot() -> None:
     engine.dispose()
 
 
+def test_historical_backfill_accepts_expanded_universe_tickers() -> None:
+    config = HistoricalBackfillConfig(instruments=("YDEX", "TATN", "GMKN", "OZON", "VTBR"))
+
+    assert config.normalized_instruments() == ("YDEX", "TATN", "GMKN", "OZON", "VTBR")
+
+
 def test_historical_backfill_writes_raw_and_derived_bars_idempotently() -> None:
     candles = [recovered_candle_payload(minute) for minute in range(15)]
     fake_gateway = FakeHistoricalBackfillGateway(candles)

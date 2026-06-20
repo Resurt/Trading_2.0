@@ -7,10 +7,12 @@ from scripts.run_candle_feature_research import (
     CandlePoint,
     EvaluationMetrics,
     ResearchConfig,
+    _short_available_from_payloads,
     build_report_payload,
     classify_result,
     compute_feature_rows,
     evaluate_configs,
+    normalize_instruments,
     split_trading_dates,
     total_cost_bps,
 )
@@ -73,7 +75,12 @@ def test_negative_validation_result_is_rejected() -> None:
         top_day_contribution=0.2,
     )
 
-    passed, reasons = classify_result(train, validation, min_validation_candidates=100)
+    passed, reasons = classify_result(
+        ResearchConfig(config_id="test", hypothesis="momentum_continuation", horizon_minutes=5),
+        train,
+        validation,
+        min_validation_candidates=100,
+    )
 
     assert not passed
     assert "validation_net_not_positive" in reasons
@@ -83,7 +90,12 @@ def test_too_few_validation_candidates_are_rejected() -> None:
     train = _positive_metrics(candidates=200)
     validation = _positive_metrics(candidates=99)
 
-    passed, reasons = classify_result(train, validation, min_validation_candidates=100)
+    passed, reasons = classify_result(
+        ResearchConfig(config_id="test", hypothesis="momentum_continuation", horizon_minutes=5),
+        train,
+        validation,
+        min_validation_candidates=100,
+    )
 
     assert not passed
     assert "too_few_validation_candidates" in reasons
@@ -111,6 +123,8 @@ def test_json_report_payload_is_valid() -> None:
         validation_dates=validation_dates,
         total_cost_bps_value=12,
         min_validation_candidates=100,
+        short_available_by_instrument={},
+        enforce_short_availability=False,
     )
 
     payload = build_report_payload(
@@ -123,6 +137,10 @@ def test_json_report_payload_is_valid() -> None:
         timeframes=("5m",),
         sessions=("weekday_main",),
         total_cost=12,
+        sides=("long",),
+        short_available_by_instrument={},
+        enforce_short_availability=False,
+        exclude_dividend_windows_for_shorts=False,
         train_dates=train_dates,
         validation_dates=validation_dates,
         dry_run=True,
@@ -130,6 +148,87 @@ def test_json_report_payload_is_valid() -> None:
 
     encoded = json.dumps(payload)
     assert json.loads(encoded)["real_orders_disabled"] is True
+
+
+def test_expanded_instruments_normalize_without_whitelist() -> None:
+    assert normalize_instruments("YDEX,TATN,GMKN,OZON,VTBR") == (
+        "MOEX:YDEX",
+        "MOEX:TATN",
+        "MOEX:GMKN",
+        "MOEX:OZON",
+        "MOEX:VTBR",
+    )
+
+
+def test_short_outcome_uses_negative_future_return_minus_costs() -> None:
+    candles = _candles([100.0] * 13 + [99.0, 98.0, 97.0, 96.0, 95.0])
+    features = compute_feature_rows(candles, selected_timeframes={"5m"})
+    train_dates, validation_dates = split_trading_dates(
+        [feature.trading_date for feature in features]
+    )
+    config = ResearchConfig(
+        config_id="short-test",
+        hypothesis="momentum_breakdown",
+        horizon_minutes=5,
+        side="short",
+        return_bars=1,
+        return_threshold_bps=1,
+    )
+
+    results = evaluate_configs(
+        features,
+        configs=[config],
+        train_dates=train_dates,
+        validation_dates=validation_dates,
+        total_cost_bps_value=12,
+        min_validation_candidates=1,
+        short_available_by_instrument={"MOEX:SBER": True},
+        enforce_short_availability=True,
+    )
+
+    assert results[0].full.candidates > 0
+    assert results[0].full.net_pnl_bps_proxy > 0
+
+
+def test_short_rejected_when_broker_short_unavailable() -> None:
+    candles = _candles([100.0] * 13 + [99.0, 98.0, 97.0, 96.0, 95.0])
+    features = compute_feature_rows(candles, selected_timeframes={"5m"})
+    train_dates, validation_dates = split_trading_dates(
+        [feature.trading_date for feature in features]
+    )
+    config = ResearchConfig(
+        config_id="short-test",
+        hypothesis="momentum_breakdown",
+        horizon_minutes=5,
+        side="short",
+        return_bars=1,
+        return_threshold_bps=1,
+        short_available_by_broker=False,
+    )
+
+    results = evaluate_configs(
+        features,
+        configs=[config],
+        train_dates=train_dates,
+        validation_dates=validation_dates,
+        total_cost_bps_value=12,
+        min_validation_candidates=1,
+        short_available_by_instrument={"MOEX:SBER": False},
+        enforce_short_availability=True,
+    )
+
+    assert results[0].full.candidates == 0
+    assert "short_not_available_by_broker" in results[0].rejection_reasons
+
+
+def test_short_available_loaded_from_registry_payloads() -> None:
+    assert _short_available_from_payloads({"short_available": True}, {}) is True
+    assert _short_available_from_payloads({}, {"short_available": True}) is True
+    assert (
+        _short_available_from_payloads({"short_available": False}, {"short_available": True})
+        is False
+    )
+    assert _short_available_from_payloads({}, {}) is False
 
 
 def _positive_metrics(*, candidates: int) -> EvaluationMetrics:

@@ -33,7 +33,6 @@ from trading_common.telemetry import get_logger, log_event
 JsonPayload = dict[str, Any]
 MSK = ZoneInfo("Europe/Moscow")
 DEFAULT_INSTRUMENTS = ("SBER", "GAZP")
-SUPPORTED_INSTRUMENTS = {"SBER", "GAZP", "LKOH"}
 DEFAULT_DERIVED_TIMEFRAMES = (Timeframe.M5, Timeframe.M10, Timeframe.M15)
 
 LOGGER = get_logger(__name__)
@@ -59,10 +58,6 @@ class HistoricalBackfillConfig:
 
     def normalized_instruments(self) -> tuple[str, ...]:
         values = tuple(ticker.strip().upper() for ticker in self.instruments if ticker.strip())
-        unsupported = sorted(set(values) - SUPPORTED_INSTRUMENTS)
-        if unsupported:
-            msg = "Unsupported historical backfill instruments: " + ", ".join(unsupported)
-            raise ValueError(msg)
         return values or DEFAULT_INSTRUMENTS
 
 

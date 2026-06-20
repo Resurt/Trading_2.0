@@ -16,7 +16,7 @@ import json
 import math
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from sys import path
@@ -34,7 +34,7 @@ for src in (
         path.insert(0, str(src))
 
 from trading_common.db.config import build_database_url_from_env
-from trading_common.db.models import MarketCandle, MarketSpecialDay
+from trading_common.db.models import InstrumentRegistry, MarketCandle, MarketSpecialDay
 from trading_common.db.service import DatabaseService
 
 TEN_THOUSAND = 10_000.0
@@ -77,6 +77,12 @@ class OutcomeSet:
             10: self.future_return_10m_bps,
             15: self.future_return_15m_bps,
         }[horizon_minutes]
+
+    def gross_for_side(self, horizon_minutes: int, side: str) -> float | None:
+        gross = self.gross_for_horizon(horizon_minutes)
+        if gross is None:
+            return None
+        return -gross if side == "short" else gross
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +127,7 @@ class ResearchConfig:
     config_id: str
     hypothesis: str
     horizon_minutes: int
+    side: str = "long"
     return_bars: int | None = None
     return_threshold_bps: float | None = None
     slope_threshold_bps: float | None = None
@@ -131,6 +138,8 @@ class ResearchConfig:
     instruments: tuple[str, ...] = ()
     timeframes: tuple[str, ...] = ()
     sessions: tuple[str, ...] = ()
+    short_available_by_broker: bool = True
+    short_requires_broker_confirmation: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +179,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--slippage-bps", type=float, default=2.0)
     parser.add_argument("--max-configs", type=int, default=100)
     parser.add_argument("--min-validation-candidates", type=int, default=100)
+    parser.add_argument("--sides", default="long")
+    parser.add_argument("--allow-short-only-if-broker-short-available", action="store_true")
+    parser.add_argument("--exclude-dividend-windows-for-shorts", action="store_true")
     parser.add_argument("--database-url")
     parser.add_argument("--json-output", action="store_true")
     parser.add_argument("--output-dir", default=".local/collection_reports/365d")
@@ -182,6 +194,7 @@ def main() -> None:
     instruments = normalize_instruments(args.instruments)
     timeframes = parse_csv(args.timeframes)
     sessions = parse_csv(args.sessions)
+    sides = parse_sides(args.sides)
     total_cost = total_cost_bps(args.commission_bps_per_side, args.slippage_bps)
     database = DatabaseService(args.database_url or build_database_url_from_env())
     try:
@@ -209,13 +222,20 @@ def main() -> None:
                 sessions=sessions,
                 special_days=special_days,
             )
+            short_available_by_instrument = load_short_availability(
+                session,
+                instruments=instruments,
+            )
     finally:
         database.engine.dispose()
 
     features = compute_feature_rows(candles, selected_timeframes=set(timeframes))
     configs = generate_research_configs(
         instruments=instruments,
+        sides=sides,
         max_configs=args.max_configs,
+        short_available_by_instrument=short_available_by_instrument,
+        enforce_short_availability=args.allow_short_only_if_broker_short_available,
     )
     train_dates, validation_dates = split_trading_dates(
         [feature.trading_date for feature in features]
@@ -227,6 +247,8 @@ def main() -> None:
         validation_dates=validation_dates,
         total_cost_bps_value=total_cost,
         min_validation_candidates=args.min_validation_candidates,
+        short_available_by_instrument=short_available_by_instrument,
+        enforce_short_availability=args.allow_short_only_if_broker_short_available,
     )
     payload = build_report_payload(
         features=features,
@@ -238,6 +260,10 @@ def main() -> None:
         timeframes=timeframes,
         sessions=sessions,
         total_cost=total_cost,
+        sides=sides,
+        short_available_by_instrument=short_available_by_instrument,
+        enforce_short_availability=args.allow_short_only_if_broker_short_available,
+        exclude_dividend_windows_for_shorts=args.exclude_dividend_windows_for_shorts,
         train_dates=train_dates,
         validation_dates=validation_dates,
         dry_run=args.dry_run,
@@ -255,6 +281,15 @@ def parse_csv(value: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in value.split(",") if item.strip())
 
 
+def parse_sides(value: str) -> tuple[str, ...]:
+    sides = tuple(item.strip().lower() for item in value.split(",") if item.strip())
+    invalid = sorted(set(sides) - {"long", "short"})
+    if invalid:
+        msg = "Unsupported research sides: " + ", ".join(invalid)
+        raise ValueError(msg)
+    return sides or ("long",)
+
+
 def normalize_instruments(value: str) -> tuple[str, ...]:
     instruments: list[str] = []
     for item in parse_csv(value):
@@ -263,6 +298,33 @@ def normalize_instruments(value: str) -> tuple[str, ...]:
         else:
             instruments.append(f"MOEX:{item.upper()}")
     return tuple(dict.fromkeys(instruments))
+
+
+def load_short_availability(
+    session: Any,
+    *,
+    instruments: tuple[str, ...],
+) -> dict[str, bool]:
+    rows = session.execute(
+        select(
+            InstrumentRegistry.instrument_id,
+            InstrumentRegistry.instrument_payload,
+            InstrumentRegistry.broker_payload,
+        ).where(
+            InstrumentRegistry.instrument_id.in_(instruments)
+        )
+    ).all()
+    return {
+        str(instrument_id): _short_available_from_payloads(instrument_payload, broker_payload)
+        for instrument_id, instrument_payload, broker_payload in rows
+    }
+
+
+def _short_available_from_payloads(*payloads: Any) -> bool:
+    for payload in payloads:
+        if isinstance(payload, dict) and "short_available" in payload:
+            return bool(payload.get("short_available"))
+    return False
 
 
 def resolve_period(
@@ -502,7 +564,10 @@ def outcome_for_horizon(
 def generate_research_configs(
     *,
     instruments: tuple[str, ...],
+    sides: tuple[str, ...],
     max_configs: int,
+    short_available_by_instrument: Mapping[str, bool] | None = None,
+    enforce_short_availability: bool = False,
 ) -> list[ResearchConfig]:
     configs: list[ResearchConfig] = []
     counter = 1
@@ -516,6 +581,7 @@ def generate_research_configs(
                 config_id=f"candle_feature_{counter:03d}",
                 hypothesis=config.hypothesis,
                 horizon_minutes=config.horizon_minutes,
+                side=config.side,
                 return_bars=config.return_bars,
                 return_threshold_bps=config.return_threshold_bps,
                 slope_threshold_bps=config.slope_threshold_bps,
@@ -526,85 +592,202 @@ def generate_research_configs(
                 instruments=config.instruments,
                 timeframes=config.timeframes,
                 sessions=config.sessions,
+                short_available_by_broker=config.short_available_by_broker,
+                short_requires_broker_confirmation=config.short_requires_broker_confirmation,
             )
         )
         counter += 1
 
-    for bars in (1, 2, 3):
-        for threshold in (20, 30, 45, 60, 90):
-            for horizon in (5, 10, 15):
+    short_availability = short_available_by_instrument or {}
+
+    def short_ready(instrument: str | None = None) -> bool:
+        if not enforce_short_availability:
+            return True
+        if instrument is not None:
+            return short_availability.get(instrument, False)
+        return any(short_availability.get(item, False) for item in instruments)
+
+    for side in sides:
+        short_available_for_side = short_ready()
+        short_requires_confirmation = side == "short" and not enforce_short_availability
+        if side == "long":
+            for bars in (1, 2, 3):
+                for threshold in (20, 30, 45, 60, 90):
+                    for horizon in (5, 10, 15):
+                        add(
+                            ResearchConfig(
+                                config_id="",
+                                hypothesis="momentum_continuation",
+                                horizon_minutes=horizon,
+                                side=side,
+                                return_bars=bars,
+                                return_threshold_bps=float(threshold),
+                            )
+                        )
+            for slope in (15, 30, 45):
+                for horizon in (5, 10, 15):
+                    add(
+                        ResearchConfig(
+                            config_id="",
+                            hypothesis="pullback_in_uptrend",
+                            horizon_minutes=horizon,
+                            side=side,
+                            slope_threshold_bps=float(slope),
+                            edge_margin_bps=10.0,
+                        )
+                    )
+            for multiplier in (1.5, 2.0, 2.5):
+                for horizon in (5, 10, 15):
+                    add(
+                        ResearchConfig(
+                            config_id="",
+                            hypothesis="breakout_after_compression",
+                            horizon_minutes=horizon,
+                            side=side,
+                            breakout_multiplier=multiplier,
+                            compression_max_avg_range_bps=120.0,
+                            edge_margin_bps=10.0,
+                        )
+                    )
+            for threshold in (30, 45):
+                for max_vol in (80, 120, 160, 220):
+                    add(
+                        ResearchConfig(
+                            config_id="",
+                            hypothesis="momentum_with_volatility_filter",
+                            horizon_minutes=15,
+                            side=side,
+                            return_bars=3,
+                            return_threshold_bps=float(threshold),
+                            max_volatility_12_bps=float(max_vol),
+                            edge_margin_bps=10.0,
+                        )
+                    )
+            for instrument in instruments:
+                for session_type in ("weekday_morning", "weekday_main", "weekday_evening"):
+                    for threshold in (45, 60):
+                        add(
+                            ResearchConfig(
+                                config_id="",
+                                hypothesis="restricted_momentum_15m",
+                                horizon_minutes=15,
+                                side=side,
+                                return_bars=3,
+                                return_threshold_bps=float(threshold),
+                                instruments=(instrument,),
+                                timeframes=("15m",),
+                                sessions=(session_type,),
+                                edge_margin_bps=10.0,
+                            )
+                        )
+            for margin in (5, 10, 15, 25):
                 add(
                     ResearchConfig(
                         config_id="",
-                        hypothesis="momentum_continuation",
-                        horizon_minutes=horizon,
-                        return_bars=bars,
-                        return_threshold_bps=float(threshold),
-                    )
-                )
-    for slope in (15, 30, 45):
-        for horizon in (5, 10, 15):
-            add(
-                ResearchConfig(
-                    config_id="",
-                    hypothesis="pullback_in_uptrend",
-                    horizon_minutes=horizon,
-                    slope_threshold_bps=float(slope),
-                    edge_margin_bps=10.0,
-                )
-            )
-    for multiplier in (1.5, 2.0, 2.5):
-        for horizon in (5, 10, 15):
-            add(
-                ResearchConfig(
-                    config_id="",
-                    hypothesis="breakout_after_compression",
-                    horizon_minutes=horizon,
-                    breakout_multiplier=multiplier,
-                    compression_max_avg_range_bps=120.0,
-                    edge_margin_bps=10.0,
-                )
-            )
-    for threshold in (30, 45):
-        for max_vol in (80, 120, 160, 220):
-            add(
-                ResearchConfig(
-                    config_id="",
-                    hypothesis="momentum_with_volatility_filter",
+                    hypothesis="cost_aware_momentum",
                     horizon_minutes=15,
+                    side=side,
                     return_bars=3,
-                    return_threshold_bps=float(threshold),
-                    max_volatility_12_bps=float(max_vol),
-                    edge_margin_bps=10.0,
+                    return_threshold_bps=60.0,
+                    edge_margin_bps=float(margin),
                 )
             )
-    for instrument in instruments:
-        for session_type in ("weekday_morning", "weekday_main", "weekday_evening"):
-            for threshold in (45, 60):
+        if side == "short":
+            for bars in (1, 2, 3):
+                for threshold in (20, 30, 45, 60, 90):
+                    for horizon in (5, 10, 15):
+                        add(
+                            ResearchConfig(
+                                config_id="",
+                                hypothesis="momentum_breakdown",
+                                horizon_minutes=horizon,
+                                side=side,
+                                return_bars=bars,
+                                return_threshold_bps=float(threshold),
+                                short_available_by_broker=short_available_for_side,
+                                short_requires_broker_confirmation=short_requires_confirmation,
+                            )
+                        )
+            for slope in (15, 30, 45):
+                for horizon in (5, 10, 15):
+                    add(
+                        ResearchConfig(
+                            config_id="",
+                            hypothesis="pullback_in_downtrend",
+                            horizon_minutes=horizon,
+                            side=side,
+                            slope_threshold_bps=float(slope),
+                            edge_margin_bps=10.0,
+                            short_available_by_broker=short_available_for_side,
+                            short_requires_broker_confirmation=short_requires_confirmation,
+                        )
+                    )
+            for multiplier in (1.5, 2.0, 2.5):
+                for horizon in (5, 10, 15):
+                    add(
+                        ResearchConfig(
+                            config_id="",
+                            hypothesis="breakdown_after_compression",
+                            horizon_minutes=horizon,
+                            side=side,
+                            breakout_multiplier=multiplier,
+                            compression_max_avg_range_bps=120.0,
+                            edge_margin_bps=10.0,
+                            short_available_by_broker=short_available_for_side,
+                            short_requires_broker_confirmation=short_requires_confirmation,
+                        )
+                    )
+            for threshold in (30, 45):
+                for max_vol in (80, 120, 160, 220):
+                    add(
+                        ResearchConfig(
+                            config_id="",
+                            hypothesis="breakdown_with_volatility_filter",
+                            horizon_minutes=15,
+                            side=side,
+                            return_bars=3,
+                            return_threshold_bps=float(threshold),
+                            max_volatility_12_bps=float(max_vol),
+                            edge_margin_bps=10.0,
+                            short_available_by_broker=short_available_for_side,
+                            short_requires_broker_confirmation=short_requires_confirmation,
+                        )
+                    )
+            for instrument in instruments:
+                if enforce_short_availability and not short_ready(instrument):
+                    continue
+                for session_type in ("weekday_morning", "weekday_main", "weekday_evening"):
+                    for threshold in (45, 60):
+                        add(
+                            ResearchConfig(
+                                config_id="",
+                                hypothesis="restricted_breakdown_15m",
+                                horizon_minutes=15,
+                                side=side,
+                                return_bars=3,
+                                return_threshold_bps=float(threshold),
+                                instruments=(instrument,),
+                                timeframes=("15m",),
+                                sessions=(session_type,),
+                                edge_margin_bps=10.0,
+                                short_available_by_broker=short_ready(instrument),
+                                short_requires_broker_confirmation=not enforce_short_availability,
+                            )
+                        )
+            for margin in (5, 10, 15, 25):
                 add(
                     ResearchConfig(
                         config_id="",
-                        hypothesis="restricted_momentum_15m",
+                        hypothesis="cost_aware_breakdown",
                         horizon_minutes=15,
+                        side=side,
                         return_bars=3,
-                        return_threshold_bps=float(threshold),
-                        instruments=(instrument,),
-                        timeframes=("15m",),
-                        sessions=(session_type,),
-                        edge_margin_bps=10.0,
+                        return_threshold_bps=60.0,
+                        edge_margin_bps=float(margin),
+                        short_available_by_broker=short_available_for_side,
+                        short_requires_broker_confirmation=short_requires_confirmation,
                     )
                 )
-    for margin in (5, 10, 15, 25):
-        add(
-            ResearchConfig(
-                config_id="",
-                hypothesis="cost_aware_momentum",
-                horizon_minutes=15,
-                return_bars=3,
-                return_threshold_bps=60.0,
-                edge_margin_bps=float(margin),
-            )
-        )
     return configs[:max_configs]
 
 
@@ -616,22 +799,24 @@ def evaluate_configs(
     validation_dates: set[date],
     total_cost_bps_value: float,
     min_validation_candidates: int,
+    short_available_by_instrument: Mapping[str, bool] | None = None,
+    enforce_short_availability: bool = False,
 ) -> list[EvaluationResult]:
     results: list[EvaluationResult] = []
+    short_availability = short_available_by_instrument or {}
+    feature_index = build_feature_index(features)
     for config in configs:
-        selected = [feature for feature in features if config_matches_feature(config, feature)]
-        train = evaluate_rows(
-            [feature for feature in selected if feature.trading_date in train_dates],
+        train, validation, full = evaluate_config_features(
+            iter_features_for_config(config, features=features, feature_index=feature_index),
             config=config,
+            train_dates=train_dates,
+            validation_dates=validation_dates,
             total_cost_bps_value=total_cost_bps_value,
+            short_available_by_instrument=short_availability,
+            enforce_short_availability=enforce_short_availability,
         )
-        validation = evaluate_rows(
-            [feature for feature in selected if feature.trading_date in validation_dates],
-            config=config,
-            total_cost_bps_value=total_cost_bps_value,
-        )
-        full = evaluate_rows(selected, config=config, total_cost_bps_value=total_cost_bps_value)
         passed, reasons = classify_result(
+            config,
             train,
             validation,
             min_validation_candidates=min_validation_candidates,
@@ -649,7 +834,44 @@ def evaluate_configs(
     return results
 
 
-def config_matches_feature(config: ResearchConfig, feature: FeatureRow) -> bool:
+def build_feature_index(
+    features: Sequence[FeatureRow],
+) -> dict[tuple[str, str, str], list[FeatureRow]]:
+    index: dict[tuple[str, str, str], list[FeatureRow]] = defaultdict(list)
+    for feature in features:
+        index[(feature.instrument_id, feature.timeframe, feature.session_type)].append(feature)
+    return index
+
+
+def iter_features_for_config(
+    config: ResearchConfig,
+    *,
+    features: Sequence[FeatureRow],
+    feature_index: Mapping[tuple[str, str, str], Sequence[FeatureRow]],
+) -> Iterable[FeatureRow]:
+    if not (config.instruments or config.timeframes or config.sessions):
+        return iter(features)
+
+    instruments = config.instruments or tuple({feature.instrument_id for feature in features})
+    timeframes = config.timeframes or tuple({feature.timeframe for feature in features})
+    sessions = config.sessions or tuple({feature.session_type for feature in features})
+
+    def scoped() -> Iterable[FeatureRow]:
+        for instrument in instruments:
+            for timeframe in timeframes:
+                for session_type in sessions:
+                    yield from feature_index.get((instrument, timeframe, session_type), ())
+
+    return scoped()
+
+
+def config_matches_feature(
+    config: ResearchConfig,
+    feature: FeatureRow,
+    *,
+    short_available_by_instrument: Mapping[str, bool],
+    enforce_short_availability: bool,
+) -> bool:
     if config.instruments and feature.instrument_id not in config.instruments:
         return False
     if config.timeframes and feature.timeframe not in config.timeframes:
@@ -657,6 +879,12 @@ def config_matches_feature(config: ResearchConfig, feature: FeatureRow) -> bool:
     if config.sessions and feature.session_type not in config.sessions:
         return False
     if feature.special_day or feature.dividend_or_corporate_action:
+        return False
+    if (
+        config.side == "short"
+        and enforce_short_availability
+        and not short_available_by_instrument.get(feature.instrument_id, False)
+    ):
         return False
     if config.max_volatility_12_bps is not None and (
         feature.volatility_12_bps > config.max_volatility_12_bps
@@ -671,11 +899,26 @@ def config_matches_feature(config: ResearchConfig, feature: FeatureRow) -> bool:
         assert config.return_bars is not None
         value = return_for_bars(feature, config.return_bars)
         return value >= float(config.return_threshold_bps or 0)
+    if config.hypothesis in {
+        "momentum_breakdown",
+        "breakdown_with_volatility_filter",
+        "restricted_breakdown_15m",
+        "cost_aware_breakdown",
+    }:
+        assert config.return_bars is not None
+        value = return_for_bars(feature, config.return_bars)
+        return value <= -float(config.return_threshold_bps or 0)
     if config.hypothesis == "pullback_in_uptrend":
         return (
             feature.trend_slope_6 >= float(config.slope_threshold_bps or 0)
             and feature.return_1_bar_bps < 0
             and feature.close_vs_sma_6_bps > 0
+        )
+    if config.hypothesis == "pullback_in_downtrend":
+        return (
+            feature.trend_slope_6 <= -float(config.slope_threshold_bps or 0)
+            and feature.return_1_bar_bps > 0
+            and feature.close_vs_sma_6_bps < 0
         )
     if config.hypothesis == "breakout_after_compression":
         return (
@@ -684,7 +927,84 @@ def config_matches_feature(config: ResearchConfig, feature: FeatureRow) -> bool:
             >= feature.avg_range_6_bps * float(config.breakout_multiplier or 1.0)
             and feature.close_position_in_range >= 0.75
         )
+    if config.hypothesis == "breakdown_after_compression":
+        return (
+            feature.avg_range_6_bps <= float(config.compression_max_avg_range_bps or 120.0)
+            and feature.range_bps
+            >= feature.avg_range_6_bps * float(config.breakout_multiplier or 1.0)
+            and feature.close_position_in_range <= 0.25
+        )
     return False
+
+
+@dataclass(slots=True)
+class MetricsAccumulator:
+    day_net: dict[date, float] = field(default_factory=lambda: defaultdict(float))
+    candidates: int = 0
+    gross_total: float = 0.0
+    net_total: float = 0.0
+    wins: int = 0
+
+    def add(self, *, trading_date: date, gross: float, net: float) -> None:
+        self.candidates += 1
+        self.gross_total += gross
+        self.net_total += net
+        if net > 0:
+            self.wins += 1
+        self.day_net[trading_date] += net
+
+    def metrics(self) -> EvaluationMetrics:
+        max_bad_day = min(self.day_net.values()) if self.day_net else 0.0
+        top_day = max((abs(value) for value in self.day_net.values()), default=0.0)
+        top_day_contribution = top_day / abs(self.net_total) if abs(self.net_total) > 0 else 0.0
+        return EvaluationMetrics(
+            candidates=self.candidates,
+            gross_pnl_bps_proxy=round(self.gross_total, 4),
+            net_pnl_bps_proxy=round(self.net_total, 4),
+            average_net_bps_proxy=round(self.net_total / self.candidates, 4)
+            if self.candidates
+            else 0.0,
+            win_proxy=round(self.wins / self.candidates, 4) if self.candidates else 0.0,
+            active_days=len(self.day_net),
+            max_bad_day_bps_proxy=round(max_bad_day, 4),
+            top_day_contribution=round(top_day_contribution, 4),
+        )
+
+
+def evaluate_config_features(
+    rows: Iterable[FeatureRow],
+    *,
+    config: ResearchConfig,
+    train_dates: set[date],
+    validation_dates: set[date],
+    total_cost_bps_value: float,
+    short_available_by_instrument: Mapping[str, bool],
+    enforce_short_availability: bool,
+) -> tuple[EvaluationMetrics, EvaluationMetrics, EvaluationMetrics]:
+    train = MetricsAccumulator()
+    validation = MetricsAccumulator()
+    full = MetricsAccumulator()
+    for row in rows:
+        if not config_matches_feature(
+            config,
+            row,
+            short_available_by_instrument=short_available_by_instrument,
+            enforce_short_availability=enforce_short_availability,
+        ):
+            continue
+        signal_strength = signal_strength_bps(row, config)
+        if signal_strength < total_cost_bps_value + config.edge_margin_bps:
+            continue
+        gross = row.outcomes.gross_for_side(config.horizon_minutes, config.side)
+        if gross is None:
+            continue
+        net = gross - total_cost_bps_value
+        full.add(trading_date=row.trading_date, gross=gross, net=net)
+        if row.trading_date in train_dates:
+            train.add(trading_date=row.trading_date, gross=gross, net=net)
+        elif row.trading_date in validation_dates:
+            validation.add(trading_date=row.trading_date, gross=gross, net=net)
+    return train.metrics(), validation.metrics(), full.metrics()
 
 
 def evaluate_rows(
@@ -700,7 +1020,7 @@ def evaluate_rows(
         signal_strength = signal_strength_bps(row, config)
         if signal_strength < total_cost_bps_value + config.edge_margin_bps:
             continue
-        gross = row.outcomes.gross_for_horizon(config.horizon_minutes)
+        gross = row.outcomes.gross_for_side(config.horizon_minutes, config.side)
         if gross is None:
             continue
         net = gross - total_cost_bps_value
@@ -728,6 +1048,7 @@ def evaluate_rows(
 
 
 def classify_result(
+    config: ResearchConfig,
     train: EvaluationMetrics,
     validation: EvaluationMetrics,
     *,
@@ -746,6 +1067,10 @@ def classify_result(
         reasons.append("train_validation_signs_contradict")
     if train.net_pnl_bps_proxy <= 0:
         reasons.append("train_net_not_positive")
+    if config.side == "short" and not config.short_available_by_broker:
+        reasons.append("short_not_available_by_broker")
+    if config.side == "short" and config.short_requires_broker_confirmation:
+        reasons.append("short_requires_broker_confirmation")
     return not reasons, reasons
 
 
@@ -770,6 +1095,10 @@ def build_report_payload(
     timeframes: tuple[str, ...],
     sessions: tuple[str, ...],
     total_cost: float,
+    sides: tuple[str, ...],
+    short_available_by_instrument: Mapping[str, bool],
+    enforce_short_availability: bool,
+    exclude_dividend_windows_for_shorts: bool,
     train_dates: set[date],
     validation_dates: set[date],
     dry_run: bool,
@@ -813,6 +1142,16 @@ def build_report_payload(
         "cost_model": {
             "total_cost_bps": round(total_cost, 4),
             "minimum_round_trip_fee_bps": MIN_ROUND_TRIP_FEE_BPS,
+        },
+        "sides": list(sides),
+        "short_available_by_instrument": dict(sorted(short_available_by_instrument.items())),
+        "allow_short_only_if_broker_short_available": enforce_short_availability,
+        "exclude_dividend_windows_for_shorts": exclude_dividend_windows_for_shorts,
+        "short_restrictions": {
+            "exclude_dividend_or_corporate_action_days": True,
+            "exclude_future_dividend_risk_windows": exclude_dividend_windows_for_shorts,
+            "minimum_validation_candidates": 100,
+            "requires_broker_short_available": enforce_short_availability,
         },
         "tested_configs": [result_payload(result) for result in results],
         "passing_configs": [result_payload(result) for result in passing],
@@ -920,7 +1259,10 @@ def warnings_for_results(
     warnings = [
         "historical candles do not validate spread/depth/slippage/latency/rejects/partial fills",
         "all results are candle-only gross/net bps proxy, not executable PnL",
-        "shorts were not tested in this iteration",
+        (
+            "short results require broker short availability and later live microstructure "
+            "confirmation"
+        ),
     ]
     if not any(result.passed for result in results):
         warnings.append("no configuration passed validation criteria")
@@ -1032,8 +1374,9 @@ whether additional candle-only filters improve walk-forward validation.
 ## 5. Hypotheses tested
 
 Momentum continuation, pullback in uptrend, breakout after compression, volatility
-filtering, session/timeframe restriction, and cost-aware edge filtering. Shorts are
-not tested.
+filtering, session/timeframe restriction, and cost-aware edge filtering. When `short`
+is included, the symmetric breakdown/downtrend hypotheses use `gross=-future_return`
+and are rejected unless broker short availability is confirmed.
 
 ## 6. Train/validation methodology
 
@@ -1122,10 +1465,15 @@ def return_for_bars(feature: FeatureRow, bars: int) -> float:
 def signal_strength_bps(row: FeatureRow, config: ResearchConfig) -> float:
     if config.hypothesis == "pullback_in_uptrend":
         return row.trend_slope_6
+    if config.hypothesis == "pullback_in_downtrend":
+        return abs(row.trend_slope_6)
     if config.hypothesis == "breakout_after_compression":
         return row.range_bps
+    if config.hypothesis == "breakdown_after_compression":
+        return row.range_bps
     if config.return_bars is not None:
-        return return_for_bars(row, config.return_bars)
+        value = return_for_bars(row, config.return_bars)
+        return abs(value) if config.side == "short" else value
     return 0.0
 
 
