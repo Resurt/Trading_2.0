@@ -291,3 +291,20 @@ python scripts/run_launch_readiness.py --mode instrument-resolution
 
 If T-Bank returns `NOT_FOUND` for `MOEX:SBER` / `MOEX:GAZP`, treat it as an
 unresolved instrument-registry problem, not as a missing MOEX share.
+
+## Session preflight and account balance
+
+`TradingSessionPreflightService` uses BrokerGateway methods in readonly mode:
+
+- `trading_schedules`
+- `get_trading_status`
+
+Broker `TradingSchedules` is authoritative when available. Saturday/Sunday trading days returned by the broker are classified as `session_type=weekend`. If broker schedules are unavailable, fallback time rules are used and marked as `source=fallback_time_rules` or `source=fallback_weekend_time_rules`.
+
+Portfolio/account visibility uses readonly methods:
+
+- `get_accounts`
+- `get_portfolio`
+- `get_positions`
+
+Balance read models must mask account ids and must not log secrets or full account identifiers. If broker balance is unavailable, API returns `balance_degraded=true` with a reason code instead of hiding the Balance card.

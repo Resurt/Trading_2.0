@@ -23,6 +23,34 @@ const robot = useRobotStore();
 const market = useMarketStore();
 const portfolio = usePortfolioStore();
 const reports = useReportsStore();
+
+function balanceValue(): string {
+  if (robot.status.balance.balance_degraded) {
+    return "Balance unavailable";
+  }
+  return formatMoney(
+    robot.status.balance.total_portfolio_value_rub ?? robot.status.balance.available,
+    robot.status.balance.balance_currency ?? robot.status.balance.currency,
+  );
+}
+
+function balanceDetail(): string {
+  const currency = robot.status.balance.balance_currency ?? robot.status.balance.currency;
+  if (robot.status.balance.balance_degraded) {
+    return robot.status.balance.balance_degraded_reason_code ?? "broker_balance_unavailable";
+  }
+  const available = formatMoney(
+    robot.status.balance.available_cash_rub ?? robot.status.balance.available,
+    currency,
+  );
+  const blocked = formatMoney(
+    robot.status.balance.blocked_cash_rub ?? robot.status.balance.blocked,
+    currency,
+  );
+  const expected = formatMoney(robot.status.balance.expected_yield_rub, currency);
+  const freshness = robot.status.balance.balance_freshness_seconds;
+  return `cash ${available} / blocked ${blocked} / yield ${expected} / ${freshness ?? "?"}s`;
+}
 </script>
 
 <template>
@@ -59,10 +87,11 @@ const reports = useReportsStore();
 
     <div class="metric-grid">
       <MetricTile
-        label="Баланс"
-        :value="formatMoney(robot.status.balance.available, robot.status.balance.currency)"
-        :detail="`blocked ${formatMoney(robot.status.balance.blocked, robot.status.balance.currency)}`"
-        :tone="robot.status.degraded_flags.includes('balance_unavailable') ? 'warn' : 'good'"
+        label="Balance"
+        :value="balanceValue()"
+        :detail="balanceDetail()"
+        :code="robot.status.balance.account_id_masked"
+        :tone="robot.status.balance.balance_degraded ? 'warn' : 'good'"
       />
       <MetricTile
         label="Session"
@@ -81,7 +110,7 @@ const reports = useReportsStore();
       />
       <MetricTile
         label="Micro-session"
-        :value="robot.status.micro_session_id ?? 'Нет активной'"
+        :value="robot.status.micro_session_id ?? 'РќРµС‚ Р°РєС‚РёРІРЅРѕР№'"
         :detail="countdownFromMicroSession(robot.status.micro_session_id)"
       />
       <MetricTile
@@ -98,7 +127,7 @@ const reports = useReportsStore();
           <template #title>Market overview</template>
           <template #action>
             <select v-model="market.selectedInstrumentId" class="compact-input">
-              <option v-if="market.overview.instruments.length === 0" value="">Нет инструментов</option>
+              <option v-if="market.overview.instruments.length === 0" value="">РќРµС‚ РёРЅСЃС‚СЂСѓРјРµРЅС‚РѕРІ</option>
               <option
                 v-for="instrument in market.overview.instruments"
                 :key="instrument.instrument_id"
@@ -143,8 +172,8 @@ const reports = useReportsStore();
               </div>
               <EmptyState
                 v-else
-                title="Нет агрегатов стакана"
-                detail="Ожидается order_book_summary из BFF."
+                title="РќРµС‚ Р°РіСЂРµРіР°С‚РѕРІ СЃС‚Р°РєР°РЅР°"
+                detail="РћР¶РёРґР°РµС‚СЃСЏ order_book_summary РёР· BFF."
               />
             </div>
             <div>
@@ -158,8 +187,8 @@ const reports = useReportsStore();
               </div>
               <EmptyState
                 v-else
-                title="Лента сделок пуста"
-                detail="market trades feed еще не прислал read model."
+                title="Р›РµРЅС‚Р° СЃРґРµР»РѕРє РїСѓСЃС‚Р°"
+                detail="market trades feed РµС‰Рµ РЅРµ РїСЂРёСЃР»Р°Р» read model."
               />
             </div>
           </div>
@@ -193,8 +222,8 @@ const reports = useReportsStore();
             </table>
             <EmptyState
               v-if="portfolio.positions.length === 0"
-              title="Позиции отсутствуют"
-              detail="position_snapshot еще не вернул активные позиции."
+              title="РџРѕР·РёС†РёРё РѕС‚СЃСѓС‚СЃС‚РІСѓСЋС‚"
+              detail="position_snapshot РµС‰Рµ РЅРµ РІРµСЂРЅСѓР» Р°РєС‚РёРІРЅС‹Рµ РїРѕР·РёС†РёРё."
             />
           </div>
 
@@ -212,17 +241,17 @@ const reports = useReportsStore();
               <tbody>
                 <tr v-for="order in portfolio.openOrders" :key="order.request_order_id">
                   <td><code>{{ order.request_order_id }}</code></td>
-                  <td>{{ order.instrument_id ?? "Нет данных" }}</td>
-                  <td>{{ order.side ?? "Нет данных" }}</td>
+                  <td>{{ order.instrument_id ?? "РќРµС‚ РґР°РЅРЅС‹С…" }}</td>
+                  <td>{{ order.side ?? "РќРµС‚ РґР°РЅРЅС‹С…" }}</td>
                   <td><StatusPill :code="order.broker_status" compact /></td>
-                  <td>{{ order.cancel_reason_code ?? order.reject_reason_code ?? "Нет причины" }}</td>
+                  <td>{{ order.cancel_reason_code ?? order.reject_reason_code ?? "РќРµС‚ РїСЂРёС‡РёРЅС‹" }}</td>
                 </tr>
               </tbody>
             </table>
             <EmptyState
               v-if="portfolio.openOrders.length === 0"
-              title="Открытых заявок нет"
-              detail="broker_order не содержит активных ордеров."
+              title="РћС‚РєСЂС‹С‚С‹С… Р·Р°СЏРІРѕРє РЅРµС‚"
+              detail="broker_order РЅРµ СЃРѕРґРµСЂР¶РёС‚ Р°РєС‚РёРІРЅС‹С… РѕСЂРґРµСЂРѕРІ."
             />
           </div>
         </DataPanel>
@@ -251,7 +280,7 @@ const reports = useReportsStore();
               :code="flag"
             />
           </div>
-          <EmptyState v-else title="Деградаций нет" detail="BFF не вернул degraded flags." />
+          <EmptyState v-else title="Р”РµРіСЂР°РґР°С†РёР№ РЅРµС‚" detail="BFF РЅРµ РІРµСЂРЅСѓР» degraded flags." />
         </DataPanel>
 
         <DataPanel>
@@ -325,12 +354,12 @@ const reports = useReportsStore();
             <dt>blocked</dt>
             <dd>{{ reports.latestHourly.blocked_count }}</dd>
             <dt>fill_ratio</dt>
-            <dd>{{ reports.latestHourly.fill_ratio ?? "Нет данных" }}</dd>
+            <dd>{{ reports.latestHourly.fill_ratio ?? "РќРµС‚ РґР°РЅРЅС‹С…" }}</dd>
           </dl>
           <EmptyState
             v-else
-            title="Hourly report еще не готов"
-            detail="После закрытия micro-session отчет появится здесь."
+            title="Hourly report РµС‰Рµ РЅРµ РіРѕС‚РѕРІ"
+            detail="РџРѕСЃР»Рµ Р·Р°РєСЂС‹С‚РёСЏ micro-session РѕС‚С‡РµС‚ РїРѕСЏРІРёС‚СЃСЏ Р·РґРµСЃСЊ."
           />
         </DataPanel>
 

@@ -13,7 +13,7 @@ CLASS_CODE ?= TQBR
 DATA_SHADOW_MINUTES ?= 10
 DATA_SHADOW_LOOKBACK_HOURS ?= 6
 
-.PHONY: lint test up down logs frontend-build migrate migrate-down replay-smoke sandbox-smoke historical-backfill-dry-run historical-quality historical-replay historical-counterfactual historical-report-rebuild calibration-report corporate-actions-import instrument-resolve instrument-resolution-check dividend-sync dividend-sync-730d market-special-days market-special-days-future calibration-primary calibration-special-days historical-replay-clean data-shadow-smoke data-shadow-report data-shadow-readiness analytics-smoke report-rebuild replay-day controlled-launch-acceptance launch-readiness observability-up report-worker-smoke celery-inspect
+.PHONY: lint test up down logs frontend-build migrate migrate-down replay-smoke sandbox-smoke historical-backfill-dry-run historical-quality historical-replay historical-counterfactual historical-report-rebuild calibration-report corporate-actions-import instrument-resolve instrument-resolution-check dividend-sync dividend-sync-730d market-special-days market-special-days-future calibration-primary calibration-special-days historical-replay-clean data-shadow-smoke data-shadow-report data-shadow-readiness api-route-smoke docs-check analytics-smoke report-rebuild replay-day controlled-launch-acceptance launch-readiness observability-up report-worker-smoke celery-inspect
 
 lint:
 	$(PYTHON) -m ruff check .
@@ -27,6 +27,7 @@ frontend-build:
 
 up:
 	docker compose up -d --build
+	$(PYTHON) scripts/run_api_route_smoke.py --json-output
 
 down:
 	docker compose down
@@ -102,6 +103,12 @@ data-shadow-report:
 
 data-shadow-readiness:
 	$(PYTHON) scripts/run_launch_readiness.py --mode data-shadow --instruments $(INSTRUMENTS) --shadow-minutes $(DATA_SHADOW_MINUTES)
+
+api-route-smoke:
+	$(PYTHON) scripts/run_api_route_smoke.py --json-output
+
+docs-check:
+	$(PYTHON) scripts/run_docs_consistency_check.py
 
 analytics-smoke:
 	$(PYTHON) scripts/run_logging_analytics_acceptance.py --date $(TRADING_DATE) --strategy-id $(STRATEGY_ID)

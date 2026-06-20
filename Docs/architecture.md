@@ -361,3 +361,9 @@ Dev fallback через env допустим только локально и б
 - Не добавляем новые сервисы без архитектурной необходимости.
 - Не используем физический hourly restart `trade-core`.
 - Не храним сырые технические логи как основной источник аналитики в PostgreSQL или файлах.
+
+## Session preflight and safe data-only collection
+
+Trade-core now has `TradingSessionPreflightService` in `trade_core.session.preflight`. Live data-only smoke resolves instruments, checks dividend readiness when required, runs broker schedule/status preflight, and starts streams only when `market_open=true`. Weekend broker schedules remain `session_type=weekend`; fallback weekend rules are 10:00-19:00 MSK and are explicitly marked as fallback.
+
+Closed market with `market_closed_expected=true` is an expected data-collection state, not a strategy failure.

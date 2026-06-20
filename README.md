@@ -290,3 +290,9 @@ Data-only shadow writes `market_microstructure_snapshot` and exposes
 `broker_order`, pseudo-orders, `PostOrder`, or `CancelOrder`.
 
 Runbook: `Docs/runbooks/data-only-shadow.md`.
+
+## Documentation acceptance rule
+
+When code changes affect runtime behavior, API contracts, database schema, frontend surfaces or operator workflows, docs must be updated in the same change. If code changes but docs do not, the final response must explain why docs were not affected.
+
+Current documentation index: `Docs/README.md`.

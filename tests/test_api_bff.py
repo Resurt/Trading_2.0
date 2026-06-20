@@ -176,7 +176,19 @@ def seed_database(database: DatabaseService) -> None:
                     realised_pnl=Decimal("0"),
                     exposure=Decimal("1010"),
                     snapshot_reason="test",
-                    snapshot_payload={},
+                    snapshot_payload={
+                        "broker_balance": {
+                            "account_id_masked": "acc***t-1",
+                            "balance_currency": "RUB",
+                            "total_portfolio_value_rub": "150000",
+                            "available_cash_rub": "120000",
+                            "blocked_cash_rub": "1000",
+                            "expected_yield_rub": "2500",
+                            "free_collateral_rub": "90000",
+                            "last_balance_refresh_at": now.isoformat(),
+                            "source": "test_broker_payload",
+                        }
+                    },
                 ),
                 SignalCandidate(
                     **session_context(),
@@ -553,6 +565,11 @@ def test_robot_status_and_market_overview(
     assert status["session_type"] == "weekday_main"
     assert status["open_orders_count"] == 1
     assert status["active_positions_count"] == 1
+    assert status["balance"]["total_portfolio_value_rub"] == "150000"
+    assert status["balance"]["available_cash_rub"] == "120000"
+    assert status["balance"]["account_id_masked"] == "acc***t-1"
+    assert status["balance"]["balance_degraded"] is False
+    assert "account-1" not in str(status["balance"])
     assert market["instruments"][0]["instrument_id"] == "MOEX:SBER"
     assert market["instruments"][0]["mid_price"] == "100.05000000"
     assert latest_microstructure[0]["source"] == "data_only_shadow"
@@ -560,6 +577,20 @@ def test_robot_status_and_market_overview(
     assert microstructure_summary["snapshots_count"] == 1
     assert data_shadow_status["real_orders_disabled"] is True
     assert "Strategy trading disabled" in data_shadow_status["warning"]
+
+
+def test_portfolio_summary_degrades_when_balance_missing(tmp_path: Path) -> None:
+    database = DatabaseService(f"sqlite+pysqlite:///{tmp_path / 'empty-api-bff.db'}")
+    Base.metadata.create_all(database.engine)
+    app = create_fastapi_app(database=database, report_task_client=FakeReportTaskClient())
+    client = TestClient(app)
+
+    summary = client.get("/portfolio/summary").json()
+    status = client.get("/robot/status").json()
+
+    assert summary["balance"]["balance_degraded"] is True
+    assert summary["balance"]["balance_degraded_reason_code"] == "broker_balance_unavailable"
+    assert "balance_unavailable" in status["degraded_flags"]
 
 
 def test_management_auth_and_daily_report_job(tmp_path: Path) -> None:

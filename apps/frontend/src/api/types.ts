@@ -6,6 +6,19 @@ export interface MoneyBalance {
   currency: string;
   available: string;
   blocked: string;
+  total_portfolio_value_rub: string | null;
+  available_cash_rub: string | null;
+  blocked_cash_rub: string | null;
+  expected_yield_rub: string | null;
+  free_collateral_rub: string | null;
+  account_id_masked: string | null;
+  account_type: string | null;
+  account_status: string | null;
+  balance_currency: string;
+  last_balance_refresh_at: string | null;
+  balance_freshness_seconds: number | null;
+  balance_degraded: boolean;
+  balance_degraded_reason_code: string | null;
 }
 
 export interface RobotStatusResponse {

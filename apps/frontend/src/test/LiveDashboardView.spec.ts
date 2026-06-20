@@ -1,5 +1,6 @@
 import { mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
+import { nextTick } from "vue";
 import { describe, expect, it } from "vitest";
 
 import LiveDashboardView from "../views/LiveDashboardView.vue";
@@ -17,7 +18,24 @@ function mountWithStores() {
   const reports = useReportsStore();
 
   robot.status = {
-    balance: { currency: "RUB", available: "150000", blocked: "1000" },
+    balance: {
+      currency: "RUB",
+      available: "150000",
+      blocked: "1000",
+      total_portfolio_value_rub: "250000",
+      available_cash_rub: "150000",
+      blocked_cash_rub: "1000",
+      expected_yield_rub: "2500",
+      free_collateral_rub: "120000",
+      account_id_masked: "acc***001",
+      account_type: "broker",
+      account_status: "open",
+      balance_currency: "RUB",
+      last_balance_refresh_at: "2026-06-13T07:10:00Z",
+      balance_freshness_seconds: 12,
+      balance_degraded: false,
+      balance_degraded_reason_code: null,
+    },
     active_instruments: ["MOEX:SBER"],
     active_timeframes: ["5m"],
     strategy_state: "candidate",
@@ -146,5 +164,22 @@ describe("LiveDashboardView", () => {
     expect(wrapper.text()).toContain("request-1");
     expect(wrapper.text()).toContain("Stream health / reconnect");
     expect(wrapper.text()).toContain("Strategy trading disabled: data-only shadow mode");
+    expect(wrapper.text()).toContain("acc***001");
+  });
+
+  it("renders degraded balance state", async () => {
+    const wrapper = mountWithStores();
+    const robot = useRobotStore();
+
+    robot.status.balance = {
+      ...robot.status.balance,
+      balance_degraded: true,
+      balance_degraded_reason_code: "broker_balance_unavailable",
+      account_id_masked: null,
+    };
+    await nextTick();
+
+    expect(wrapper.text()).toContain("Balance unavailable");
+    expect(wrapper.text()).toContain("broker_balance_unavailable");
   });
 });

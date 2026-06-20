@@ -230,3 +230,40 @@ Live widgets:
 REST используется для initial snapshot/history. WebSocket используется для snapshot/live
 обновлений. BFF WebSocket держит соединение открытым, отправляет snapshot при
 подключении, затем push-обновления по interval и heartbeat.
+
+## Current pages and blocks
+
+Current pages:
+
+- Live Dashboard
+- Historical Data
+- Reports
+- Intraday Analytics
+- Calibration / Calibration Center
+- Settings
+- Logs / Diagnostics
+
+Current Live Dashboard blocks:
+
+- Balance card
+- session type, phase, broker status and micro-session
+- Data-only Shadow Status
+- market overview and order book summary
+- positions and active orders
+- current signal and blocker reason
+- recent risk events
+- stream health
+- report freshness
+
+Balance card:
+
+- shows portfolio value, available cash, blocked cash, expected yield and freshness;
+- shows masked account id only;
+- shows `Balance unavailable` and `balance_degraded_reason_code` when broker balance is missing;
+- remains readonly account state in data-only shadow mode and never implies trading permission.
+
+Analytics pages:
+
+- Historical Data: candle quality, instrument registry, dividend/special-day state and replay links.
+- Intraday Analytics: session tabs for morning/main/evening/weekend, per-session summary, hour/micro-session rows and instrument x timeframe x side table.
+- Calibration Center: Run Diagnostics, diagnosis, rolling performance cube, filters, market regime summary, top/dead contours, warnings and candidate config proposals.

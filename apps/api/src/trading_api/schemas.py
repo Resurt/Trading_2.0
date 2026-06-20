@@ -62,6 +62,19 @@ class MoneyBalance(BaseModel):
     currency: str = "RUB"
     available: Decimal = Decimal("0")
     blocked: Decimal = Decimal("0")
+    total_portfolio_value_rub: Decimal | None = None
+    available_cash_rub: Decimal | None = None
+    blocked_cash_rub: Decimal | None = None
+    expected_yield_rub: Decimal | None = None
+    free_collateral_rub: Decimal | None = None
+    account_id_masked: str | None = None
+    account_type: str | None = None
+    account_status: str | None = None
+    balance_currency: str = "RUB"
+    last_balance_refresh_at: datetime | None = None
+    balance_freshness_seconds: int | None = None
+    balance_degraded: bool = True
+    balance_degraded_reason_code: str | None = "broker_balance_unavailable"
 
 
 class SessionSnapshotResponse(BaseModel):
@@ -99,6 +112,12 @@ class PositionResponse(BaseModel):
     unrealized_pnl: Decimal | None = None
     realised_pnl: Decimal | None = None
     snapshot_ts: datetime
+
+
+class PortfolioSummaryResponse(BaseModel):
+    balance: MoneyBalance
+    positions_count: int
+    source: str
 
 
 class OrderResponse(BaseModel):

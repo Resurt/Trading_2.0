@@ -834,14 +834,26 @@ def _schedule_window(
     end = _attr(day, end_field)
     if not _is_present(start) or not _is_present(end) or start == end:
         return None
+    normalized_session_type = (
+        "weekend" if _is_weekend_date(trading_date) else session_type
+    )
     return {
-        "session_type": session_type,
+        "session_type": normalized_session_type,
         "session_phase": "continuous_trading",
         "start_at": _iso_or_none(start),
         "end_at": _iso_or_none(end),
         "trading_date": trading_date,
         "calendar_date": trading_date,
     }
+
+
+def _is_weekend_date(value: str | None) -> bool:
+    if value is None:
+        return False
+    try:
+        return date.fromisoformat(value).weekday() >= 5
+    except ValueError:
+        return False
 
 
 def _trading_status_payload(response: Any, *, request_payload: Mapping[str, object]) -> JsonPayload:

@@ -55,6 +55,7 @@ from trading_api.schemas import (
     MarketOverviewResponse,
     MarketRegimeSnapshotResponse,
     OrderResponse,
+    PortfolioSummaryResponse,
     PositionResponse,
     ReportJobResponse,
     ReportJobStatusResponse,
@@ -219,6 +220,10 @@ def create_fastapi_app(
     @app.get("/positions", response_model=list[PositionResponse], tags=["portfolio"])
     def positions(service: ReadServiceDep) -> list[PositionResponse]:
         return service.positions()
+
+    @app.get("/portfolio/summary", response_model=PortfolioSummaryResponse, tags=["portfolio"])
+    def portfolio_summary(service: ReadServiceDep) -> PortfolioSummaryResponse:
+        return service.portfolio_summary()
 
     @app.get("/orders/open", response_model=list[OrderResponse], tags=["orders"])
     def open_orders(service: ReadServiceDep) -> list[OrderResponse]:

@@ -202,3 +202,7 @@ operator explicitly allows manual corporate actions.
 
 Clean calibration is also blocked if enabled instruments are unresolved in
 `instrument_registry`. `MOEX:*` ids are internal analytics ids, not broker ids.
+
+## Data-only preflight before calibration evidence
+
+Calibration based on live microstructure must only use samples collected after data-only shadow preflight. If preflight returns `market_closed_expected`, no live samples are expected and the period must not be interpreted as robot failure. 10-20 trading days remain early evidence, not final truth, and must not hard-disable a contour by themselves.

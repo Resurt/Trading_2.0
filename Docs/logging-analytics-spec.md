@@ -1123,3 +1123,20 @@ Required metrics:
 
 Prometheus labels must stay bounded to service/instrument/status/stream/timeframe. Do not export
 candidate ids, order ids, snapshot ids or broker tracking ids as metric labels.
+
+## Session preflight, balance and observatory events
+
+New structured events/payloads:
+
+- `trading_session_preflight`: emitted around session/calendar checks before live data-only smoke.
+- `market_closed_expected`: closed market by broker/fallback schedule, with `next_session_at`.
+- `data_only_shadow_preflight`: preflight-only smoke result before stream startup.
+- `balance_refresh`: broker account/portfolio read model update; full account id must not be logged.
+- `intraday_analytics_rebuild`: rebuild of `intraday_session_analytics`.
+- `calibration_observatory_run`: diagnostic run for rolling cube, regime and candidate proposals.
+
+Required payload fields for preflight: `market_open`, `market_closed_expected`, `now_msk`, `trading_date`, `calendar_date`, `session_type`, `session_phase`, `broker_trading_status`, `api_trade_available`, `next_session_at`, `reason_code`, `instruments_checked`, `per_instrument_status`, `source`.
+
+Required balance payload fields: `total_portfolio_value_rub`, `available_cash_rub`, `blocked_cash_rub`, `expected_yield_rub`, `free_collateral_rub`, `account_id_masked`, `balance_currency`, `last_balance_refresh_at`, `balance_freshness_seconds`, `balance_degraded`, `balance_degraded_reason_code`.
+
+Intraday analytics and Calibration Center payloads remain diagnostic-only. Candidate config proposal events must state that configs are draft/proposal only and are not applied automatically.

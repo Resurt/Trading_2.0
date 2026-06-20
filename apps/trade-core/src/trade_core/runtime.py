@@ -2251,7 +2251,11 @@ def default_trading_schedule(moment: datetime) -> TradingSchedule:
     local = _ensure_msk(moment)
     trading_date = local.date()
     if local.weekday() >= 5:
-        return TradingSchedule(windows=())
+        return TradingSchedule(
+            windows=(
+                _window(trading_date, SessionKind.WEEKEND, time(10, 0), time(19, 0)),
+            )
+        )
     return TradingSchedule(
         windows=(
             _window(trading_date, SessionKind.MORNING, time(7, 0), time(10, 0)),
@@ -2265,6 +2269,7 @@ class SessionKind:
     MORNING = "weekday_morning"
     MAIN = "weekday_main"
     EVENING = "weekday_evening"
+    WEEKEND = "weekend"
 
 
 def _window(
@@ -2298,23 +2303,34 @@ def trading_schedule_from_response(
         if not isinstance(item, Mapping):
             continue
         try:
+            start_at = _ensure_msk(datetime.fromisoformat(str(item["start_at"])))
+            calendar_date = date.fromisoformat(
+                str(item.get("calendar_date", item["trading_date"]))
+            )
             windows.append(
                 ScheduleWindow(
-                    session_type=SessionType(str(item["session_type"])),
+                    session_type=_schedule_session_type(
+                        str(item["session_type"]),
+                        calendar_date=calendar_date,
+                    ),
                     session_phase=SessionPhase(
                         str(item.get("session_phase", "continuous_trading"))
                     ),
-                    start_at=_ensure_msk(datetime.fromisoformat(str(item["start_at"]))),
+                    start_at=start_at,
                     end_at=_ensure_msk(datetime.fromisoformat(str(item["end_at"]))),
                     trading_date=date.fromisoformat(str(item["trading_date"])),
-                    calendar_date=date.fromisoformat(
-                        str(item.get("calendar_date", item["trading_date"]))
-                    ),
+                    calendar_date=calendar_date,
                 )
             )
         except (KeyError, ValueError, TypeError):
             continue
     return TradingSchedule(windows=tuple(windows)) if windows else default_trading_schedule(now)
+
+
+def _schedule_session_type(raw: str, *, calendar_date: date) -> SessionType:
+    if calendar_date.weekday() >= 5:
+        return SessionType.WEEKEND
+    return SessionType(raw)
 
 
 def broker_status_from_response(

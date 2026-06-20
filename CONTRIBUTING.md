@@ -41,3 +41,9 @@ cd apps/frontend && npm run build
 ```bash
 python scripts/check.py
 ```
+
+## Documentation acceptance rule
+
+When code changes affect runtime behavior, API contracts, database schema, frontend surfaces or operator workflows, update the relevant docs in the same change.
+
+If code changes but docs do not, the final response must explain why docs were not affected.

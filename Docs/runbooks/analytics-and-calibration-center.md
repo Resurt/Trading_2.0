@@ -78,3 +78,7 @@ Supported diagnostic outcomes:
 - Data-only shadow evidence can recommend more data collection or strategy shadow review, but it
   is not a claim that a strategy is ready.
 - Real `PostOrder` and real `CancelOrder` are outside this workflow.
+
+## Live data-only readiness update
+
+Calibration Center remains diagnostic-only. Session preflight and closed-market handling were added for safe live data-only collection. A `market_closed_expected` result means no live samples are expected and no stream subscription should start. Candidate configs remain draft/proposal storage and are not applied automatically.

@@ -135,3 +135,23 @@ python -m alembic downgrade -1
 make migrate
 make migrate-down
 ```
+
+## Current schema index
+
+This document started as the bootstrap schema description. The current schema map also includes:
+
+- `instrument_registry` with broker resolution fields: `instrument_uid`, `figi`, `class_code`, `ticker`, `lot_size`, `min_price_increment`, `resolution_status`, support flags and payloads.
+- `market_candle` for raw 1m candles and derived bars.
+- `corporate_action_event` for dividend/corporate-action facts.
+- `market_special_day` for dividend gap and special-day classification.
+- `dividend_sync_run` for T-Bank dividend sync status and readiness.
+- `market_microstructure_snapshot` for data-only shadow spread/depth/imbalance/freshness facts.
+- `historical_data_quality_report` for coverage and OHLC quality.
+- `calibration_report` for calibration evidence and recommendations.
+- `intraday_session_analytics` for current-day session/hour/instrument analytics.
+- `rolling_performance_cube` for rolling contour statistics.
+- `calibration_diagnostic_run` for no-trade, health and drift diagnostics.
+- `strategy_config_candidate` for draft/proposal config candidates only.
+- `market_regime_snapshot` for regime and drift snapshots.
+
+Current migration source of truth is `packages/common/alembic/versions/` and SQLAlchemy models in `packages/common/src/trading_common/db/models.py`.

@@ -21,7 +21,24 @@ describe("api client auth", () => {
     });
     const fetchMock = vi.fn(async () =>
       jsonResponse({
-        balance: { currency: "RUB", available: "0", blocked: "0" },
+        balance: {
+          currency: "RUB",
+          available: "0",
+          blocked: "0",
+          total_portfolio_value_rub: null,
+          available_cash_rub: null,
+          blocked_cash_rub: null,
+          expected_yield_rub: null,
+          free_collateral_rub: null,
+          account_id_masked: null,
+          account_type: null,
+          account_status: null,
+          balance_currency: "RUB",
+          last_balance_refresh_at: null,
+          balance_freshness_seconds: null,
+          balance_degraded: true,
+          balance_degraded_reason_code: "test_fixture",
+        },
         active_instruments: [],
         active_timeframes: [],
         strategy_state: "wait",

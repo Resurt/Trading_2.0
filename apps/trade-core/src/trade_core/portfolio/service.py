@@ -132,12 +132,19 @@ class PositionService:
             portfolio_response.data,
             tracked_instruments=self._tracked_instruments,
         )
+        broker_balance = _broker_balance_payload(
+            account_id=account_id,
+            positions_payload=positions_response.data,
+            portfolio_payload=portfolio_response.data,
+            observed_at=observed_at,
+        )
         snapshots = tuple(
             self._write_position_snapshot(
                 account_id=account_id,
                 position=position,
                 snapshot_ts=observed_at,
                 reason=reason,
+                broker_balance=broker_balance,
             )
             for position in positions
         )
@@ -267,8 +274,13 @@ class PositionService:
         position: PositionRecord,
         snapshot_ts: datetime,
         reason: str,
+        broker_balance: JsonPayload,
     ) -> PositionSnapshot:
         context = self._session_context_provider(position.instrument_id)
+        snapshot_payload = {
+            **(position.payload or {}),
+            "broker_balance": broker_balance,
+        }
         existing = self._session.execute(
             select(PositionSnapshot).where(
                 PositionSnapshot.micro_session_id == context.micro_session_id,
@@ -286,7 +298,7 @@ class PositionService:
             existing.realised_pnl = position.realised_pnl
             existing.exposure = position.exposure
             existing.snapshot_reason = reason
-            existing.snapshot_payload = position.payload or {}
+            existing.snapshot_payload = snapshot_payload
             return existing
 
         snapshot = PositionSnapshot(
@@ -302,7 +314,7 @@ class PositionService:
             realised_pnl=position.realised_pnl,
             exposure=position.exposure,
             snapshot_reason=reason,
-            snapshot_payload=position.payload or {},
+            snapshot_payload=snapshot_payload,
         )
         self._session.add(snapshot)
         return snapshot
@@ -444,6 +456,82 @@ def _portfolio_from_positions(positions: tuple[PositionRecord, ...]) -> Portfoli
         gross_exposure_rub=gross_exposure,
         net_exposure_rub=net_exposure,
     )
+
+
+def _broker_balance_payload(
+    *,
+    account_id: str,
+    positions_payload: Mapping[str, Any],
+    portfolio_payload: Mapping[str, Any],
+    observed_at: datetime,
+) -> JsonPayload:
+    available_cash, currency = _money_sum(positions_payload.get("money"))
+    blocked_cash, blocked_currency = _money_sum(positions_payload.get("blocked"))
+    balance_currency = currency or blocked_currency or "RUB"
+    return {
+        "account_id_masked": _mask_account_id(account_id),
+        "account_id_present": bool(account_id),
+        "balance_currency": balance_currency,
+        "total_portfolio_value_rub": _decimal_payload(
+            _decimal_or_none(portfolio_payload.get("total_amount_portfolio"))
+        ),
+        "available_cash_rub": _decimal_payload(available_cash),
+        "blocked_cash_rub": _decimal_payload(blocked_cash),
+        "expected_yield_rub": _decimal_payload(
+            _decimal_or_none(portfolio_payload.get("expected_yield"))
+        ),
+        "free_collateral_rub": _decimal_payload(
+            _decimal_or_none(portfolio_payload.get("available_margin"))
+        ),
+        "last_balance_refresh_at": observed_at.isoformat(),
+        "source": "broker_portfolio_and_positions",
+    }
+
+
+def _money_sum(value: object) -> tuple[Decimal | None, str | None]:
+    if not isinstance(value, list | tuple):
+        return None, None
+    total = Decimal("0")
+    seen = False
+    currency: str | None = None
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        amount = _money_amount(item)
+        if amount is None:
+            continue
+        total += amount
+        seen = True
+        raw_currency = item.get("currency")
+        if isinstance(raw_currency, str) and raw_currency:
+            currency = raw_currency.upper()
+    return (total if seen else None), currency
+
+
+def _money_amount(payload: Mapping[str, Any]) -> Decimal | None:
+    for key in ("amount", "value", "balance"):
+        value = _decimal_or_none(payload.get(key))
+        if value is not None:
+            return value
+    units = payload.get("units")
+    nano = payload.get("nano")
+    if units is None and nano is None:
+        return None
+    return _decimal_from_payload(units or 0) + (
+        _decimal_from_payload(nano or 0) / Decimal("1000000000")
+    )
+
+
+def _decimal_payload(value: Decimal | None) -> str | None:
+    return str(value) if value is not None else None
+
+
+def _mask_account_id(account_id: str) -> str | None:
+    if not account_id:
+        return None
+    if len(account_id) <= 6:
+        return f"{account_id[:2]}***"
+    return f"{account_id[:3]}***{account_id[-3:]}"
 
 
 def _with_position_validation(

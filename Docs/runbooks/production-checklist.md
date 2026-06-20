@@ -169,3 +169,12 @@ Required review:
 
 Production remains blocked if any process attempts to treat Calibration Center output as automatic
 runtime config or as permission for real `PostOrder`/`CancelOrder`.
+
+## Session preflight and balance visibility
+
+Production, strategy shadow and live trading remain forbidden until both are true:
+
+- clean session/calendar preflight exists for the target universe;
+- broker balance visibility is present on `/robot/status` and `/portfolio/summary`.
+
+`market_closed_expected` must not be treated as a strategy failure. A live data-only smoke must not start streams before session preflight. Production is forbidden without clean session calendar/preflight and balance visibility.

@@ -199,6 +199,11 @@ def run_compose(args: argparse.Namespace) -> list[GateResult]:
                     cwd=FRONTEND,
                     timeout_seconds=180,
                 ),
+                run_cmd(
+                    "api_route_smoke",
+                    [sys.executable, "scripts/run_api_route_smoke.py", "--json-output"],
+                    timeout_seconds=120,
+                ),
             ]
         )
     return results
@@ -599,6 +604,16 @@ def run_instrument_resolution(args: argparse.Namespace) -> list[GateResult]:
 
 
 def run_data_shadow(args: argparse.Namespace, env: Mapping[str, str]) -> list[GateResult]:
+    preflight = [
+        sys.executable,
+        "scripts/run_data_only_shadow_smoke.py",
+        "--instruments",
+        args.instruments,
+        "--minutes",
+        "0",
+        "--preflight-only",
+        "--json-output",
+    ]
     smoke = [
         sys.executable,
         "scripts/run_data_only_shadow_smoke.py",
@@ -607,12 +622,18 @@ def run_data_shadow(args: argparse.Namespace, env: Mapping[str, str]) -> list[Ga
         "--minutes",
         str(max(args.shadow_minutes, 0.2)),
         "--json-output",
+        "--max-instruments-per-stream-batch",
+        "4",
+        "--stream-batch-delay-seconds",
+        "2",
     ]
     if args.dry_run:
+        preflight.append("--dry-run")
         smoke.append("--dry-run")
     if not args.skip_dividend_sync_check:
+        preflight.append("--require-dividend-sync")
         smoke.append("--require-dividend-sync")
-    return [
+    results = [
         run_cmd(
             "tbank_sdk_import_check",
             [sys.executable, "scripts/run_tbank_sdk_import_check.py"],
@@ -629,23 +650,89 @@ def run_data_shadow(args: argparse.Namespace, env: Mapping[str, str]) -> list[Ga
             command="--skip-dividend-sync-check",
             details={"status": "skipped"},
         ),
-        env_gate(
-            "data_only_shadow_enabled",
-            env.get("TRADING_DATA_ONLY_SHADOW", "false").lower()
-            in {"1", "true", "yes", "on"},
+        GateResult(
+            name="data_only_shadow_forced_by_smoke",
+            passed=True,
+            command="scripts/run_data_only_shadow_smoke.py",
+            details={
+                "status": "script_sets_TRADING_DATA_ONLY_SHADOW_true",
+                "environment_value": env.get("TRADING_DATA_ONLY_SHADOW"),
+            },
         ),
         env_gate("production_confirmation_absent", "TRADING_PRODUCTION_CONFIRM" not in env),
-        run_json_cmd_gate(
+    ]
+    preflight_gate = run_json_cmd_capture(
+        "data_only_shadow_preflight",
+        preflight,
+        timeout_seconds=int(max(args.gate_timeout_seconds, 120)),
+    )
+    results.append(preflight_gate)
+    payload = _json_payload(preflight_gate)
+    if not preflight_gate.passed:
+        return results
+
+    if payload.get("market_open") is False and payload.get("market_closed_expected") is True:
+        results.append(
+            GateResult(
+                name="data_only_shadow_closed_market_expected",
+                passed=True,
+                command=format_cmd(preflight),
+                details={
+                    "status": "market_closed_expected",
+                    "market_open": False,
+                    "market_closed_expected": True,
+                    "reason_code": payload.get("reason_code"),
+                    "next_session_at": payload.get("next_session_at"),
+                    "smoke_was_run": False,
+                    "no_live_samples_expected": True,
+                    "no_real_orders": True,
+                },
+            )
+        )
+    elif payload.get("market_open") is True:
+        smoke_gate = run_json_cmd_gate(
             "data_only_shadow_smoke",
             smoke,
             expected={
                 "data_only_shadow_enabled": True,
                 "real_orders_disabled": True,
+                "market_open": True,
                 "post_order_calls": 0,
                 "cancel_order_calls": 0,
+                "signal_candidates_delta": 0,
+                "order_intents_delta": 0,
+                "broker_orders_delta": 0,
             },
             timeout_seconds=int(max(args.gate_timeout_seconds, 120)),
-        ),
+        )
+        details = dict(smoke_gate.details)
+        details["smoke_was_run"] = True
+        results.append(
+            GateResult(
+                name=smoke_gate.name,
+                passed=smoke_gate.passed,
+                command=smoke_gate.command,
+                details=details,
+            )
+        )
+    else:
+        results.append(
+            GateResult(
+                name="data_only_shadow_preflight_state",
+                passed=False,
+                command=format_cmd(preflight),
+                details={
+                    "status": "preflight_not_open_not_expected_closed",
+                    "market_open": payload.get("market_open"),
+                    "market_closed_expected": payload.get("market_closed_expected"),
+                    "reason_code": payload.get("reason_code"),
+                    "next_session_at": payload.get("next_session_at"),
+                    "smoke_was_run": False,
+                    "no_real_orders": True,
+                },
+            )
+        )
+    results.append(
         GateResult(
             name="data_shadow_strategy_pipeline_disabled",
             passed=True,
@@ -654,9 +741,12 @@ def run_data_shadow(args: argparse.Namespace, env: Mapping[str, str]) -> list[Ga
                 "signal_candidate": "disabled",
                 "order_intent": "disabled",
                 "pseudo_order": "disabled",
+                "smoke_was_run": payload.get("market_open") is True,
+                "no_real_orders": True,
             },
         ),
-    ]
+    )
+    return results
 
 
 def run_cmd(
@@ -786,6 +876,87 @@ def run_json_cmd_gate(
             "json_mismatches": mismatches,
         },
     )
+
+
+def run_json_cmd_capture(
+    name: str,
+    argv: Sequence[str],
+    *,
+    cwd: Path = ROOT,
+    timeout_seconds: int = 240,
+) -> GateResult:
+    try:
+        completed = subprocess.run(
+            list(argv),
+            cwd=cwd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return GateResult(
+            name=name,
+            passed=False,
+            command=format_cmd(argv),
+            details={
+                "status": "timeout",
+                "subcommand": subcommand_name(argv),
+                "timeout_seconds": timeout_seconds,
+                "stdout_tail": tail(exc.stdout or ""),
+                "stderr_tail": tail(exc.stderr or ""),
+            },
+        )
+    if completed.returncode != 0:
+        return GateResult(
+            name=name,
+            passed=False,
+            command=format_cmd(argv),
+            details={
+                "status": "completed",
+                "returncode": completed.returncode,
+                "subcommand": subcommand_name(argv),
+                "timeout_seconds": timeout_seconds,
+                "stdout_tail": tail(completed.stdout),
+                "stderr_tail": tail(completed.stderr),
+            },
+        )
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        return GateResult(
+            name=name,
+            passed=False,
+            command=format_cmd(argv),
+            details={
+                "status": "json_parse_failed",
+                "returncode": completed.returncode,
+                "subcommand": subcommand_name(argv),
+                "timeout_seconds": timeout_seconds,
+                "stdout_tail": tail(completed.stdout),
+                "stderr_tail": tail(completed.stderr),
+                "error_message": str(exc),
+            },
+        )
+    return GateResult(
+        name=name,
+        passed=bool(payload.get("passed", True)),
+        command=format_cmd(argv),
+        details={
+            "status": "completed",
+            "returncode": completed.returncode,
+            "subcommand": subcommand_name(argv),
+            "timeout_seconds": timeout_seconds,
+            "stdout_tail": tail(completed.stdout),
+            "stderr_tail": tail(completed.stderr),
+            "json_payload": payload,
+        },
+    )
+
+
+def _json_payload(result: GateResult) -> Mapping[str, object]:
+    payload = result.details.get("json_payload")
+    return payload if isinstance(payload, Mapping) else {}
 
 
 def run_dividend_sync_status_gate(

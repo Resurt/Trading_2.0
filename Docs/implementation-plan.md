@@ -412,3 +412,5 @@
 - `.github/workflows/ci.yml`;
 - `scripts/run_replay_harness.py`;
 - `scripts/run_sandbox_smoke.py`.
+
+> Historical roadmap note: this file is an initial implementation roadmap. Current acceptance criteria live in `Docs/README.md`, current runbooks and OpenAPI.

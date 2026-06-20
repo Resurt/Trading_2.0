@@ -35,6 +35,7 @@ from trading_api.schemas import (
     MarketRegimeSnapshotResponse,
     MoneyBalance,
     OrderResponse,
+    PortfolioSummaryResponse,
     PositionResponse,
     RobotStatusResponse,
     RollingPerformanceCubeResponse,
@@ -125,10 +126,12 @@ class BffReadService:
             degraded_flags.append("no_active_instruments")
         if latest_state == "unknown":
             degraded_flags.append("strategy_state_unavailable")
-        degraded_flags.append("balance_unavailable")
+        portfolio_summary = self.portfolio_summary()
+        if portfolio_summary.balance.balance_degraded:
+            degraded_flags.append("balance_unavailable")
 
         return RobotStatusResponse(
-            balance=MoneyBalance(),
+            balance=portfolio_summary.balance,
             active_instruments=active_instruments,
             active_timeframes=active_timeframes,
             strategy_state=latest_state,
@@ -140,6 +143,38 @@ class BffReadService:
             active_positions_count=sum(1 for position in positions if position.qty_lots != 0),
             degraded_flags=degraded_flags,
             robot_control_state=robot_control_state,
+        )
+
+    def portfolio_summary(self) -> PortfolioSummaryResponse:
+        snapshots = list(
+            self._session.execute(
+                select(PositionSnapshot).order_by(PositionSnapshot.snapshot_ts.desc())
+            ).scalars()
+        )
+        if not snapshots:
+            return PortfolioSummaryResponse(
+                balance=MoneyBalance(
+                    balance_degraded=True,
+                    balance_degraded_reason_code="broker_balance_unavailable",
+                ),
+                positions_count=0,
+                source="position_snapshot_missing",
+            )
+        latest = snapshots[0]
+        balance_payload = _payload_dict_value(latest.snapshot_payload, "broker_balance")
+        if balance_payload:
+            balance = _money_balance_from_payload(balance_payload, latest=latest)
+            return PortfolioSummaryResponse(
+                balance=balance,
+                positions_count=sum(
+                    1 for item in snapshots if item.snapshot_ts == latest.snapshot_ts
+                ),
+                source=str(balance_payload.get("source", "broker_balance_payload")),
+            )
+        return PortfolioSummaryResponse(
+            balance=_money_balance_from_positions(snapshots),
+            positions_count=len(snapshots),
+            source="position_snapshot_derived",
         )
 
     def current_session(self) -> SessionSnapshotResponse:
@@ -1475,6 +1510,103 @@ def _payload_list_value(payload: JsonPayload, key: str) -> list[JsonPayload]:
 def _payload_dict_value(payload: JsonPayload, key: str) -> JsonPayload:
     value = payload.get(key)
     return value if isinstance(value, dict) else {}
+
+
+def _money_balance_from_payload(
+    payload: JsonPayload,
+    *,
+    latest: PositionSnapshot,
+) -> MoneyBalance:
+    currency = str(payload.get("balance_currency") or "RUB")
+    available = _decimal_value(payload.get("available_cash_rub")) or Decimal("0")
+    blocked = _decimal_value(payload.get("blocked_cash_rub")) or Decimal("0")
+    total = _decimal_value(payload.get("total_portfolio_value_rub"))
+    expected_yield = _decimal_value(payload.get("expected_yield_rub"))
+    free_collateral = _decimal_value(payload.get("free_collateral_rub"))
+    refreshed_at = _coerce_datetime(payload.get("last_balance_refresh_at") or latest.snapshot_ts)
+    freshness = max(
+        0,
+        int((datetime.now(tz=UTC) - refreshed_at.astimezone(UTC)).total_seconds()),
+    )
+    return MoneyBalance(
+        currency=currency,
+        available=available,
+        blocked=blocked,
+        total_portfolio_value_rub=total,
+        available_cash_rub=available,
+        blocked_cash_rub=blocked,
+        expected_yield_rub=expected_yield,
+        free_collateral_rub=free_collateral,
+        account_id_masked=_safe_masked_account(payload, latest.account_id),
+        account_type=_optional_string(payload.get("account_type")),
+        account_status=_optional_string(payload.get("account_status")),
+        balance_currency=currency,
+        last_balance_refresh_at=refreshed_at,
+        balance_freshness_seconds=freshness,
+        balance_degraded=False,
+        balance_degraded_reason_code=None,
+    )
+
+
+def _money_balance_from_positions(snapshots: list[PositionSnapshot]) -> MoneyBalance:
+    latest = snapshots[0]
+    latest_ts = latest.snapshot_ts
+    latest_rows = [snapshot for snapshot in snapshots if snapshot.snapshot_ts == latest_ts]
+    total_exposure = sum(
+        (snapshot.exposure or Decimal("0") for snapshot in latest_rows),
+        Decimal("0"),
+    )
+    expected_yield = sum(
+        (snapshot.unrealized_pnl or Decimal("0") for snapshot in latest_rows),
+        Decimal("0"),
+    )
+    freshness = max(
+        0,
+        int((datetime.now(tz=UTC) - latest_ts.astimezone(UTC)).total_seconds()),
+    )
+    return MoneyBalance(
+        currency="RUB",
+        available=Decimal("0"),
+        blocked=Decimal("0"),
+        total_portfolio_value_rub=total_exposure,
+        available_cash_rub=None,
+        blocked_cash_rub=None,
+        expected_yield_rub=expected_yield,
+        account_id_masked=_mask_account_id(latest.account_id),
+        balance_currency="RUB",
+        last_balance_refresh_at=latest_ts,
+        balance_freshness_seconds=freshness,
+        balance_degraded=True,
+        balance_degraded_reason_code="broker_balance_payload_unavailable",
+    )
+
+
+def _decimal_value(value: object) -> Decimal | None:
+    if value is None:
+        return None
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return None
+
+
+def _safe_masked_account(payload: JsonPayload, fallback_account_id: str) -> str | None:
+    masked = payload.get("account_id_masked")
+    if isinstance(masked, str) and masked and masked != fallback_account_id:
+        return masked
+    return _mask_account_id(fallback_account_id)
+
+
+def _mask_account_id(account_id: str) -> str | None:
+    if not account_id:
+        return None
+    if len(account_id) <= 6:
+        return f"{account_id[:2]}***"
+    return f"{account_id[:3]}***{account_id[-3:]}"
+
+
+def _optional_string(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
 
 
 def _coerce_datetime(value: object) -> datetime:

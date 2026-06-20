@@ -110,3 +110,47 @@ Interpretation boundary:
 - 10-20 trading days are early evidence, not final truth.
 - Candidate configs created by the observatory are draft proposals only and are not applied to live
   trading automatically.
+
+## Session preflight before live samples
+
+Every live data-only smoke must run session/calendar preflight before starting runtime streams.
+
+Required order:
+
+```bash
+python scripts/run_tbank_instrument_resolve.py --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR --strict --json-output
+python scripts/run_tbank_dividend_sync.py --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR --lookback-days 730 --lookahead-days 365 --json-output
+python scripts/run_data_only_shadow_smoke.py --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR --minutes 0 --preflight-only --require-dividend-sync --json-output
+```
+
+Preflight fields include `market_open`, `market_closed_expected`, `reason_code`,
+`next_session_at`, `session_type`, `session_phase`, `broker_trading_status`,
+`api_trade_available`, `per_instrument_status` and `source`.
+
+If `market_open=false` and `market_closed_expected=true`, the smoke must not start market streams,
+must not subscribe to order book, and must not call the data-only runtime. The JSON result should
+pass safety checks and include `warning=market_closed_expected_no_live_samples`,
+`post_order_calls=0`, `cancel_order_calls=0`, `signal_candidates_delta=0`,
+`order_intents_delta=0`, `broker_orders_delta=0`, and
+`microstructure_snapshots_delta=0`.
+
+Weekend handling:
+
+- broker `TradingSchedules` is authoritative when available;
+- a broker trading day on Saturday/Sunday is classified as `session_type=weekend`;
+- fallback weekend window is 10:00-19:00 MSK and is marked `source=fallback_weekend_time_rules`;
+- outside the weekend window, closed market is expected and `next_session_at` must be present when
+  known.
+
+Readiness gate:
+
+```bash
+python scripts/run_launch_readiness.py --mode data-shadow --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR --shadow-minutes 10 --gate-timeout-seconds 900
+```
+
+The readiness gate first runs preflight-only. If the market is expected closed, it passes with
+`status=market_closed_expected`, `no_live_samples_expected=true`, and `smoke_was_run=false`.
+If the market is open, it runs the bounded data-only smoke.
+
+For large universes, use stream batching flags on smoke. `RESOURCE_EXHAUSTED` is a broker resource
+warning; do not retry aggressively, reduce the universe or stream batch size.

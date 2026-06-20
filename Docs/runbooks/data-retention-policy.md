@@ -25,3 +25,7 @@ delete existing data and does not enable any cleanup job by itself.
   `strategy_config_candidate` or `rolling_performance_cube` rows by default.
 - Raw microstructure cleanup must preserve already-built aggregate rows.
 - Cleanup must be documented in an operator runbook before use.
+
+## Cleanup activation status
+
+No cleanup is enabled by this change. Retention remains policy-only. Future cleanup must start as explicit/manual dry-run before any automated schedule is considered.
