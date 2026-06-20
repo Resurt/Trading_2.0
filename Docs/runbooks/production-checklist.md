@@ -146,3 +146,26 @@ python scripts/run_launch_readiness.py --mode data-shadow --instruments SBER,GAZ
 
 Data-only shadow is readonly. It cannot be used to justify live orders by itself; it only supplies
 microstructure inputs required for later spread/depth/slippage calibration.
+
+## Analytics and Calibration Center Gate
+
+Before any strategy shadow or live consideration, run diagnostic-only analytics:
+
+```powershell
+python scripts/run_intraday_analytics.py --date YYYY-MM-DD --mode data_shadow --json-output
+python scripts/run_calibration_observatory.py --universe SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR --lookback-days 20 --mode data_shadow --json-output
+```
+
+Required review:
+
+- Intraday Analytics explains session/hour/instrument activity and no-trade reasons.
+- Calibration Center diagnosis is reviewed with warnings and blocking issues visible.
+- Small sample warnings are not hidden.
+- 10-20 trading days are early evidence, not final truth.
+- No timeframe/session/side/instrument contour is permanently disabled from low sample alone.
+- Any `strategy_config_candidate` remains proposal storage only.
+- `approved_for_shadow` does not apply live config and does not start strategy shadow.
+- Applying an actual config remains a separate operator/admin-approved future workflow.
+
+Production remains blocked if any process attempts to treat Calibration Center output as automatic
+runtime config or as permission for real `PostOrder`/`CancelOrder`.

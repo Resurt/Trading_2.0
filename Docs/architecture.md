@@ -50,6 +50,32 @@
 | `loki` | Loki | Хранилище технических логов. |
 | `fluent-bit` | Fluent Bit | Сбор stdout/stderr контейнеров и отправка JSON logs в Loki. |
 
+### Intraday Analytics and Calibration Center
+
+The analytics layer now has two additional operator surfaces:
+
+- Intraday Analytics: session/hour/micro-session diagnostics for the current trading day,
+  grouped by instrument, timeframe and side.
+- Calibration Center: rolling performance cube, robot health, no-trade diagnostics, market
+  regime/drift and draft strategy config proposals.
+
+Persistent tables:
+
+- `intraday_session_analytics`
+- `rolling_performance_cube`
+- `calibration_diagnostic_run`
+- `strategy_config_candidate`
+- `market_regime_snapshot`
+
+The services live in `apps/report-worker/src/report_worker/analytics/calibration_observatory.py`.
+The API exposes read-only GET endpoints for observers and restricted POST endpoints for diagnostic
+runs and candidate approval/rejection. The frontend exposes `/intraday` and the Calibration Center
+inside `/calibration`.
+
+Safety boundary: Intraday Analytics never makes live decisions. Calibration Center never applies
+live config automatically. Candidate config approval changes proposal status only; runtime config
+application remains a separate future operator/admin workflow.
+
 ## Топология
 
 ```text
@@ -251,6 +277,15 @@ PostgreSQL хранит доменные сущности:
 - `build_daily_report`;
 - `rebuild_reports_for_date`;
 - `run_counterfactual_analysis_for_date`.
+- `run_daily_intraday_analytics_rebuild`;
+- `run_daily_calibration_diagnostics`;
+- `run_weekly_calibration_observatory`.
+
+Diagnostic schedules are disabled by default and require explicit env flags:
+
+- `INTRADAY_ANALYTICS_DAILY_ENABLED=false`
+- `CALIBRATION_OBSERVATORY_DAILY_ENABLED=false`
+- `CALIBRATION_OBSERVATORY_WEEKLY_ENABLED=false`
 
 Hourly report строится после закрытия micro-session.
 

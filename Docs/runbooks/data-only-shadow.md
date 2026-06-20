@@ -88,3 +88,25 @@ Strategy trading disabled: data-only shadow mode
 
 Collect 10-20 trading days of data-only shadow samples, then calibrate spread, depth, imbalance,
 freshness, slippage assumptions, latency, and stream stability before considering any strategy shadow.
+
+Run diagnostic analytics after data-only shadow has collected enough market hours:
+
+```bash
+python scripts/run_intraday_analytics.py --date YYYY-MM-DD --mode data_shadow --json-output
+python scripts/run_calibration_observatory.py --universe SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR --lookback-days 20 --mode data_shadow --json-output
+```
+
+Outputs:
+
+- `.local/collection_reports/intraday/`
+- `.local/collection_reports/calibration_observatory/`
+
+Interpretation boundary:
+
+- Intraday Analytics is diagnostic only and does not enable trading.
+- Calibration Center can report `market_dead`, `robot_too_strict`, `data_quality_problem`,
+  `regime_changed`, `not_enough_data`, `normal_no_action_needed` or
+  `calibration_recommended`.
+- 10-20 trading days are early evidence, not final truth.
+- Candidate configs created by the observatory are draft proposals only and are not applied to live
+  trading automatically.

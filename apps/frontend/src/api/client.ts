@@ -1,6 +1,10 @@
 import type {
   AuthStatusResponse,
   BlockerAnalyticsResponse,
+  CalibrationDiagnosticRunResponse,
+  CalibrationObservatoryRunRequest,
+  CalibrationObservatoryRunResponse,
+  CalibrationObservatoryStatusResponse,
   CalibrationResponse,
   CandidateFunnelResponse,
   CanceledOrderDiagnosticsResponse,
@@ -14,9 +18,11 @@ import type {
   HistoricalRunResponse,
   HourlyReportResponse,
   InstrumentRegistryResponse,
+  IntradayAnalyticsSnapshotResponse,
   MarketMicrostructureSnapshotResponse,
   MarketMicrostructureSummaryResponse,
   MarketOverviewResponse,
+  MarketRegimeSnapshotResponse,
   MarketSpecialDayClassificationResponse,
   MarketSpecialDayResponse,
   OrderResponse,
@@ -25,8 +31,11 @@ import type {
   ReportJobStatusResponse,
   ReportRebuildRequest,
   RobotStatusResponse,
+  RollingPerformanceCubeResponse,
   SessionSnapshotResponse,
   SignalResponse,
+  StrategyConfigCandidateRejectRequest,
+  StrategyConfigCandidateResponse,
   StrategyConfigResponse,
   StrategyConfigUpdateRequest,
   WebSocketTicketResponse,
@@ -150,6 +159,20 @@ export const apiClient = {
     requestJson<CandidateFunnelResponse>(withQuery("/analytics/candidate-funnel", query)),
   canceledOrderDiagnostics: (query: Record<string, QueryValue>) =>
     requestJson<CanceledOrderDiagnosticsResponse>(withQuery("/analytics/canceled-orders", query)),
+  intradayToday: (query: Record<string, QueryValue> = {}) =>
+    requestJson<IntradayAnalyticsSnapshotResponse>(
+      withQuery("/analytics/intraday/today", query),
+    ),
+  intradayAnalytics: (query: Record<string, QueryValue>) =>
+    requestJson<IntradayAnalyticsSnapshotResponse>(withQuery("/analytics/intraday", query)),
+  intradaySession: (query: Record<string, QueryValue>) =>
+    requestJson<IntradayAnalyticsSnapshotResponse>(
+      withQuery("/analytics/intraday/session", query),
+    ),
+  intradayMicroSession: (microSessionId: string, query: Record<string, QueryValue> = {}) =>
+    requestJson<IntradayAnalyticsSnapshotResponse>(
+      withQuery(`/analytics/intraday/micro-session/${encodeURIComponent(microSessionId)}`, query),
+    ),
   historicalDataQuality: (query: Record<string, QueryValue>) =>
     requestJson<HistoricalQualityResponse>(withQuery("/historical/data-quality", query)),
   instrumentsRegistry: () =>
@@ -212,6 +235,53 @@ export const apiClient = {
     ),
   calibrationReport: (query: Record<string, QueryValue>) =>
     requestJson<CalibrationResponse>(withQuery("/analytics/calibration", query)),
+  calibrationObservatoryStatus: () =>
+    requestJson<CalibrationObservatoryStatusResponse>("/calibration/observatory/status"),
+  runCalibrationObservatory: (payload: CalibrationObservatoryRunRequest) =>
+    requestJson<CalibrationObservatoryRunResponse>(
+      "/calibration/observatory/run",
+      { method: "POST", body: JSON.stringify(payload) },
+      "operator",
+    ),
+  calibrationDiagnostics: (query: Record<string, QueryValue> = {}) =>
+    requestJson<CalibrationDiagnosticRunResponse[]>(
+      withQuery("/calibration/diagnostics", query),
+    ),
+  calibrationDiagnostic: (diagnosticRunId: string) =>
+    requestJson<CalibrationDiagnosticRunResponse>(
+      `/calibration/diagnostics/${encodeURIComponent(diagnosticRunId)}`,
+    ),
+  rollingPerformance: (query: Record<string, QueryValue> = {}) =>
+    requestJson<RollingPerformanceCubeResponse[]>(
+      withQuery("/calibration/rolling-performance", query),
+    ),
+  calibrationRegime: (query: Record<string, QueryValue> = {}) =>
+    requestJson<MarketRegimeSnapshotResponse[]>(withQuery("/calibration/regime", query)),
+  configCandidates: (query: Record<string, QueryValue> = {}) =>
+    requestJson<StrategyConfigCandidateResponse[]>(
+      withQuery("/calibration/config-candidates", query),
+    ),
+  configCandidate: (candidateConfigId: string) =>
+    requestJson<StrategyConfigCandidateResponse>(
+      `/calibration/config-candidates/${encodeURIComponent(candidateConfigId)}`,
+    ),
+  approveConfigCandidateForShadow: (candidateConfigId: string) =>
+    requestJson<StrategyConfigCandidateResponse>(
+      `/calibration/config-candidates/${encodeURIComponent(
+        candidateConfigId,
+      )}/approve-for-shadow`,
+      { method: "POST" },
+      "admin",
+    ),
+  rejectConfigCandidate: (
+    candidateConfigId: string,
+    payload: StrategyConfigCandidateRejectRequest,
+  ) =>
+    requestJson<StrategyConfigCandidateResponse>(
+      `/calibration/config-candidates/${encodeURIComponent(candidateConfigId)}/reject`,
+      { method: "POST", body: JSON.stringify(payload) },
+      "operator",
+    ),
   reportJobStatus: (jobId: string) =>
     requestJson<ReportJobStatusResponse>(`/reports/jobs/${encodeURIComponent(jobId)}`),
   strategyConfig: (strategyId: string, sessionTemplate: string) =>

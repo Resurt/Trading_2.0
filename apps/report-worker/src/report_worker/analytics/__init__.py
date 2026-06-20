@@ -6,6 +6,13 @@ from report_worker.analytics.calculations import (
     classify_day_trend,
     state_time_distribution,
 )
+from report_worker.analytics.calibration_observatory import (
+    CalibrationDiagnosticService,
+    IntradayAnalyticsService,
+    MarketRegimeDiagnosticService,
+    RollingPerformanceCubeService,
+    StrategyConfigProposalService,
+)
 from report_worker.analytics.models import (
     AnalyticsAssumptions,
     AnalyticsFilters,
@@ -21,11 +28,16 @@ from report_worker.analytics.service import ReportAnalyticsService
 __all__ = [
     "AnalyticsAssumptions",
     "AnalyticsFilters",
+    "CalibrationDiagnosticService",
     "CounterfactualAnalysis",
     "CounterfactualSource",
     "FunnelMetrics",
+    "IntradayAnalyticsService",
+    "MarketRegimeDiagnosticService",
     "PricePathPoint",
     "ReportAnalyticsService",
+    "RollingPerformanceCubeService",
+    "StrategyConfigProposalService",
     "TrendClassification",
     "WindowOutcome",
     "analyze_counterfactual",

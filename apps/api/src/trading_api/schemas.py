@@ -372,6 +372,146 @@ class StrategyConfigUpdateRequest(BaseModel):
     actor: str = "operator"
 
 
+class IntradayAnalyticsSnapshotResponse(BaseModel):
+    generated_at: datetime
+    trading_date: date | None = None
+    session_summaries: list[JsonPayload] = Field(default_factory=list)
+    instrument_summaries: list[JsonPayload] = Field(default_factory=list)
+    timeframe_summaries: list[JsonPayload] = Field(default_factory=list)
+    side_summaries: list[JsonPayload] = Field(default_factory=list)
+    market_bias: str = "unknown"
+    market_activity: str = "unknown"
+    near_miss_count: int = 0
+    spread_depth_imbalance_summary: JsonPayload = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+    rows: list[JsonPayload] = Field(default_factory=list)
+
+
+class CalibrationObservatoryRunRequest(BaseModel):
+    universe: str = "SBER,GAZP"
+    lookback_days: int = Field(default=20, ge=1, le=3660)
+    windows: str = "7d,20d,60d,90d,180d,365d"
+    mode: str = "all"
+    trigger_type: str = "manual"
+    create_candidate_config: bool = False
+    requested_by: str | None = None
+
+
+class CalibrationObservatoryRunResponse(BaseModel):
+    diagnostic_run_id: UUID
+    diagnosis: str
+    confidence: str
+    rolling_cube_rows: int
+    regime_summary: JsonPayload = Field(default_factory=dict)
+    top_contours: list[JsonPayload] = Field(default_factory=list)
+    dead_contours: list[JsonPayload] = Field(default_factory=list)
+    calibration_recommended: bool
+    candidate_config_id: UUID | None = None
+    warnings: list[str] = Field(default_factory=list)
+    blocking_issues: list[str] = Field(default_factory=list)
+    payload: JsonPayload = Field(default_factory=dict)
+
+
+class CalibrationDiagnosticRunResponse(BaseModel):
+    diagnostic_run_id: UUID
+    created_at: datetime
+    completed_at: datetime | None = None
+    requested_by: str | None = None
+    trigger_type: str
+    status: str
+    from_ts: datetime
+    to_ts: datetime
+    universe: JsonPayload = Field(default_factory=dict)
+    diagnosis: str
+    confidence: str
+    blocking_issues: JsonPayload = Field(default_factory=dict)
+    warnings: JsonPayload = Field(default_factory=dict)
+    diagnostic_payload: JsonPayload = Field(default_factory=dict)
+
+
+class RollingPerformanceCubeResponse(BaseModel):
+    cube_id: UUID
+    generated_at: datetime
+    window_start: datetime
+    window_end: datetime
+    window_name: str
+    instrument_id: str
+    session_type: str
+    timeframe: str
+    side: str
+    mode: str
+    candidate_count: int
+    approved_count: int
+    blocked_count: int
+    pseudo_order_count: int
+    real_order_count: int
+    gross_pnl_proxy: Decimal
+    net_pnl_proxy: Decimal
+    avg_net_pnl_proxy: Decimal
+    win_proxy: Decimal | None = None
+    avg_spread_bps: Decimal | None = None
+    p95_spread_bps: Decimal | None = None
+    avg_depth: Decimal | None = None
+    p95_depth: Decimal | None = None
+    avg_imbalance: Decimal | None = None
+    avg_market_quality: Decimal | None = None
+    stale_incidents: int
+    stream_gap_count: int
+    active_days: int
+    last_signal_at: datetime | None = None
+    sample_warning: str | None = None
+    confidence: str
+    contour_status: str
+    cube_payload: JsonPayload = Field(default_factory=dict)
+
+
+class MarketRegimeSnapshotResponse(BaseModel):
+    regime_snapshot_id: UUID
+    generated_at: datetime
+    window_start: datetime
+    window_end: datetime
+    instrument_id: str | None = None
+    session_type: str | None = None
+    market_regime: str
+    volume_score: Decimal | None = None
+    volatility_score: Decimal | None = None
+    spread_score: Decimal | None = None
+    depth_score: Decimal | None = None
+    imbalance_score: Decimal | None = None
+    candidate_frequency_score: Decimal | None = None
+    regime_payload: JsonPayload = Field(default_factory=dict)
+
+
+class StrategyConfigCandidateResponse(BaseModel):
+    candidate_config_id: UUID
+    created_at: datetime
+    source_diagnostic_run_id: UUID | None = None
+    base_strategy_id: str
+    proposed_strategy_id: str
+    status: str
+    proposed_by: str
+    approval_required: bool
+    approved_by: str | None = None
+    approved_at: datetime | None = None
+    proposal_payload: JsonPayload = Field(default_factory=dict)
+    validation_payload: JsonPayload = Field(default_factory=dict)
+    caveats: JsonPayload = Field(default_factory=dict)
+    rejection_reason: str | None = None
+
+
+class StrategyConfigCandidateRejectRequest(BaseModel):
+    reason: str = "operator_rejected"
+
+
+class CalibrationObservatoryStatusResponse(BaseModel):
+    generated_at: datetime
+    latest_diagnostic: CalibrationDiagnosticRunResponse | None = None
+    latest_cube_generated_at: datetime | None = None
+    latest_regime_generated_at: datetime | None = None
+    open_candidate_configs: int = 0
+    caveat: str = "Candidate configs are not applied to live trading automatically."
+
+
 class WebSocketEnvelope(BaseModel):
     message_id: UUID
     ts_utc: datetime

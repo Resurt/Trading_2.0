@@ -595,6 +595,66 @@ def test_management_auth_and_daily_report_job(tmp_path: Path) -> None:
     assert job_status["successful"] is True
 
 
+def test_intraday_and_calibration_observatory_api_roles(tmp_path: Path) -> None:
+    client = make_client(tmp_path)
+
+    intraday = client.get(
+        "/analytics/intraday",
+        params={"trading_date": "2026-06-12", "session_type": "weekday_main"},
+    )
+    status = client.get("/calibration/observatory/status")
+    run_request = {
+        "universe": "SBER",
+        "lookback_days": 20,
+        "windows": "7d,20d",
+        "mode": "all",
+        "trigger_type": "manual",
+        "create_candidate_config": True,
+    }
+    forbidden_run = client.post("/calibration/observatory/run", json=run_request)
+    before_config = client.get(
+        "/config/strategy",
+        params={"strategy_id": "baseline", "session_template": "weekday_main"},
+    ).json()
+
+    run = client.post(
+        "/calibration/observatory/run",
+        headers={"X-API-Role": "operator"},
+        json=run_request,
+    )
+    run_payload = run.json()
+    candidate_id = run_payload["candidate_config_id"]
+    operator_approve = client.post(
+        f"/calibration/config-candidates/{candidate_id}/approve-for-shadow",
+        headers={"X-API-Role": "operator"},
+    )
+    approved = client.post(
+        f"/calibration/config-candidates/{candidate_id}/approve-for-shadow",
+        headers={"X-API-Role": "admin"},
+    )
+    candidates = client.get("/calibration/config-candidates").json()
+    after_config = client.get(
+        "/config/strategy",
+        params={"strategy_id": "baseline", "session_template": "weekday_main"},
+    ).json()
+
+    assert intraday.status_code == 200
+    assert intraday.json()["market_activity"] in {"low", "normal", "high", "unknown"}
+    assert status.status_code == 200
+    assert forbidden_run.status_code == 403
+    assert run.status_code == 200
+    assert run_payload["diagnostic_run_id"]
+    assert run_payload["rolling_cube_rows"] >= 0
+    assert candidate_id
+    assert operator_approve.status_code == 403
+    assert approved.status_code == 200
+    assert approved.json()["status"] == "approved_for_shadow"
+    assert approved.json()["validation_payload"]["runtime_config_changed"] is False
+    assert any(row["candidate_config_id"] == candidate_id for row in candidates)
+    assert after_config["version"] == before_config["version"] == 1
+    assert after_config["config_payload"] == before_config["config_payload"]
+
+
 def test_robot_control_persists_command_and_audit(tmp_path: Path) -> None:
     database = DatabaseService(f"sqlite+pysqlite:///{tmp_path / 'api-control.db'}")
     Base.metadata.create_all(database.engine)

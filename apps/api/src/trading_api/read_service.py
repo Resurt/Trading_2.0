@@ -16,6 +16,8 @@ from sqlalchemy.orm import Session
 from trading_api.schemas import (
     BlockerAnalyticsResponse,
     BlockerAnalyticsRow,
+    CalibrationDiagnosticRunResponse,
+    CalibrationObservatoryStatusResponse,
     CanceledOrderDiagnosticsResponse,
     CanceledOrderDiagnosticsRow,
     CandidateFunnelResponse,
@@ -24,37 +26,46 @@ from trading_api.schemas import (
     DailyReportResponse,
     DataShadowStatusResponse,
     HourlyReportResponse,
+    IntradayAnalyticsSnapshotResponse,
     JsonPayload,
     MarketInstrumentOverview,
     MarketMicrostructureSnapshotResponse,
     MarketMicrostructureSummaryResponse,
     MarketOverviewResponse,
+    MarketRegimeSnapshotResponse,
     MoneyBalance,
     OrderResponse,
     PositionResponse,
     RobotStatusResponse,
+    RollingPerformanceCubeResponse,
     SessionSnapshotResponse,
     SignalResponse,
+    StrategyConfigCandidateResponse,
     StrategyConfigResponse,
     StrategyConfigUpdateRequest,
 )
 from trading_common.db.models import (
     BlockerEvent,
     BrokerOrder,
+    CalibrationDiagnosticRun,
     CandidateStageResult,
     CounterfactualResult,
     DailyReport,
     FillEvent,
     HourlyReport,
     InstrumentRegistry,
+    IntradaySessionAnalytics,
     MarketCandle,
     MarketMicrostructureSnapshot,
+    MarketRegimeSnapshot,
     OrderBookSummary,
     OrderIntent,
     PositionSnapshot,
+    RollingPerformanceCube,
     SessionRun,
     SignalCandidate,
     StrategyConfig,
+    StrategyConfigCandidate,
     StrategyStateEvent,
 )
 
@@ -714,6 +725,203 @@ class BffReadService:
             rows=rows,
         )
 
+    def intraday_analytics_snapshot(
+        self,
+        *,
+        trading_date: date | None = None,
+        session_type: str | None = None,
+        micro_session_id: str | None = None,
+        mode: str = "all",
+    ) -> IntradayAnalyticsSnapshotResponse:
+        target_date = trading_date or datetime.now(tz=UTC).date()
+        rows = self._intraday_rows(
+            trading_date=target_date,
+            session_type=session_type,
+            micro_session_id=micro_session_id,
+            mode=mode,
+        )
+        if not rows:
+            from report_worker.analytics.calibration_observatory import (
+                IntradayAnalyticsService,
+            )
+
+            service = IntradayAnalyticsService(self._session)
+            if micro_session_id is not None:
+                payload = service.build_for_micro_session(micro_session_id)
+            elif session_type is not None:
+                payload = service.build_for_session(target_date, session_type, mode=mode)
+            else:
+                payload = service.build_for_trading_date(target_date, mode=mode)
+            return _intraday_snapshot_response(payload)
+        return _intraday_snapshot_response(_intraday_payload_from_rows(rows))
+
+    def calibration_observatory_status(self) -> CalibrationObservatoryStatusResponse:
+        latest_diagnostic = self._session.execute(
+            select(CalibrationDiagnosticRun).order_by(
+                CalibrationDiagnosticRun.created_at.desc()
+            )
+        ).scalars().first()
+        latest_cube_generated_at = self._session.execute(
+            select(RollingPerformanceCube.generated_at).order_by(
+                RollingPerformanceCube.generated_at.desc()
+            )
+        ).scalars().first()
+        latest_regime_generated_at = self._session.execute(
+            select(MarketRegimeSnapshot.generated_at).order_by(
+                MarketRegimeSnapshot.generated_at.desc()
+            )
+        ).scalars().first()
+        open_candidates = list(
+            self._session.execute(
+                select(StrategyConfigCandidate).where(
+                    StrategyConfigCandidate.status == "draft"
+                )
+            ).scalars()
+        )
+        return CalibrationObservatoryStatusResponse(
+            generated_at=datetime.now(tz=UTC),
+            latest_diagnostic=(
+                _diagnostic_run_response(latest_diagnostic)
+                if latest_diagnostic is not None
+                else None
+            ),
+            latest_cube_generated_at=latest_cube_generated_at,
+            latest_regime_generated_at=latest_regime_generated_at,
+            open_candidate_configs=len(open_candidates),
+        )
+
+    def calibration_diagnostics(
+        self,
+        *,
+        limit: int = 50,
+    ) -> list[CalibrationDiagnosticRunResponse]:
+        rows = self._session.execute(
+            select(CalibrationDiagnosticRun)
+            .order_by(CalibrationDiagnosticRun.created_at.desc())
+            .limit(limit)
+        ).scalars()
+        return [_diagnostic_run_response(row) for row in rows]
+
+    def calibration_diagnostic(
+        self,
+        diagnostic_run_id: UUID,
+    ) -> CalibrationDiagnosticRunResponse:
+        row = self._session.get(CalibrationDiagnosticRun, diagnostic_run_id)
+        if row is None:
+            msg = f"Calibration diagnostic not found: {diagnostic_run_id}"
+            raise LookupError(msg)
+        return _diagnostic_run_response(row)
+
+    def rolling_performance(
+        self,
+        *,
+        window_name: str | None = None,
+        instrument_id: str | None = None,
+        session_type: str | None = None,
+        timeframe: str | None = None,
+        side: str | None = None,
+        mode: str | None = None,
+        contour_status: str | None = None,
+        limit: int = 200,
+    ) -> list[RollingPerformanceCubeResponse]:
+        stmt = select(RollingPerformanceCube).order_by(
+            RollingPerformanceCube.generated_at.desc()
+        )
+        if window_name is not None:
+            stmt = stmt.where(RollingPerformanceCube.window_name == window_name)
+        if instrument_id is not None:
+            stmt = stmt.where(RollingPerformanceCube.instrument_id == instrument_id)
+        if session_type is not None:
+            stmt = stmt.where(RollingPerformanceCube.session_type == session_type)
+        if timeframe is not None:
+            stmt = stmt.where(RollingPerformanceCube.timeframe == timeframe)
+        if side is not None:
+            stmt = stmt.where(RollingPerformanceCube.side == side)
+        if mode is not None:
+            stmt = stmt.where(RollingPerformanceCube.mode == mode)
+        if contour_status is not None:
+            stmt = stmt.where(RollingPerformanceCube.contour_status == contour_status)
+        rows = self._session.execute(stmt.limit(limit)).scalars()
+        return [_rolling_cube_response(row) for row in rows]
+
+    def market_regime_snapshots(
+        self,
+        *,
+        instrument_id: str | None = None,
+        session_type: str | None = None,
+        market_regime: str | None = None,
+        limit: int = 100,
+    ) -> list[MarketRegimeSnapshotResponse]:
+        stmt = select(MarketRegimeSnapshot).order_by(MarketRegimeSnapshot.generated_at.desc())
+        if instrument_id is not None:
+            stmt = stmt.where(MarketRegimeSnapshot.instrument_id == instrument_id)
+        if session_type is not None:
+            stmt = stmt.where(MarketRegimeSnapshot.session_type == session_type)
+        if market_regime is not None:
+            stmt = stmt.where(MarketRegimeSnapshot.market_regime == market_regime)
+        rows = self._session.execute(stmt.limit(limit)).scalars()
+        return [_market_regime_response(row) for row in rows]
+
+    def config_candidates(
+        self,
+        *,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[StrategyConfigCandidateResponse]:
+        stmt = select(StrategyConfigCandidate).order_by(
+            StrategyConfigCandidate.created_at.desc()
+        )
+        if status is not None:
+            stmt = stmt.where(StrategyConfigCandidate.status == status)
+        rows = self._session.execute(stmt.limit(limit)).scalars()
+        return [_config_candidate_response(row) for row in rows]
+
+    def config_candidate(
+        self,
+        candidate_config_id: UUID,
+    ) -> StrategyConfigCandidateResponse:
+        row = self._config_candidate_row(candidate_config_id)
+        return _config_candidate_response(row)
+
+    def approve_config_candidate_for_shadow(
+        self,
+        candidate_config_id: UUID,
+        *,
+        approved_by: str,
+    ) -> StrategyConfigCandidateResponse:
+        row = self._config_candidate_row(candidate_config_id)
+        if row.status not in {"draft", "rejected"}:
+            msg = f"Candidate cannot be approved from status={row.status}"
+            raise ValueError(msg)
+        row.status = "approved_for_shadow"
+        row.approved_by = approved_by
+        row.approved_at = datetime.now(tz=UTC)
+        row.validation_payload = {
+            **row.validation_payload,
+            "approval_changes_status_only": True,
+            "runtime_config_changed": False,
+        }
+        self._session.flush()
+        return _config_candidate_response(row)
+
+    def reject_config_candidate(
+        self,
+        candidate_config_id: UUID,
+        *,
+        rejected_by: str,
+        reason: str,
+    ) -> StrategyConfigCandidateResponse:
+        row = self._config_candidate_row(candidate_config_id)
+        row.status = "rejected"
+        row.rejection_reason = reason
+        row.validation_payload = {
+            **row.validation_payload,
+            "rejected_by": rejected_by,
+            "runtime_config_changed": False,
+        }
+        self._session.flush()
+        return _config_candidate_response(row)
+
     def get_strategy_config(
         self,
         *,
@@ -841,6 +1049,37 @@ class BffReadService:
         if strategy_version is not None:
             stmt = stmt.where(SignalCandidate.strategy_version == strategy_version)
         return list(self._session.execute(stmt).scalars())
+
+    def _intraday_rows(
+        self,
+        *,
+        trading_date: date,
+        session_type: str | None,
+        micro_session_id: str | None,
+        mode: str,
+    ) -> list[IntradaySessionAnalytics]:
+        stmt = select(IntradaySessionAnalytics).where(
+            IntradaySessionAnalytics.trading_date == trading_date
+        )
+        if session_type is not None:
+            stmt = stmt.where(IntradaySessionAnalytics.session_type == session_type)
+        if micro_session_id is not None:
+            stmt = stmt.where(IntradaySessionAnalytics.micro_session_id == micro_session_id)
+        if mode != "all":
+            stmt = stmt.where(IntradaySessionAnalytics.mode == mode)
+        rows = list(
+            self._session.execute(
+                stmt.order_by(IntradaySessionAnalytics.generated_at.desc()).limit(500)
+            ).scalars()
+        )
+        return _latest_intraday_rows(rows)
+
+    def _config_candidate_row(self, candidate_config_id: UUID) -> StrategyConfigCandidate:
+        row = self._session.get(StrategyConfigCandidate, candidate_config_id)
+        if row is None:
+            msg = f"Strategy config candidate not found: {candidate_config_id}"
+            raise LookupError(msg)
+        return row
 
     def _blockers(
         self,
@@ -998,6 +1237,255 @@ def _order_response(*, broker_order: BrokerOrder, intent: OrderIntent | None) ->
         or (intent.reject_reason_code if intent is not None else None),
         last_observed_at=broker_order.last_observed_at,
     )
+
+
+def _intraday_snapshot_response(payload: JsonPayload) -> IntradayAnalyticsSnapshotResponse:
+    trading_date_value = payload.get("trading_date")
+    parsed_date = (
+        date.fromisoformat(trading_date_value)
+        if isinstance(trading_date_value, str)
+        else trading_date_value
+        if isinstance(trading_date_value, date)
+        else None
+    )
+    generated_at = payload.get("generated_at")
+    return IntradayAnalyticsSnapshotResponse(
+        generated_at=_coerce_datetime(generated_at),
+        trading_date=parsed_date,
+        session_summaries=_payload_list_value(payload, "session_summaries"),
+        instrument_summaries=_payload_list_value(payload, "instrument_summaries"),
+        timeframe_summaries=_payload_list_value(payload, "timeframe_summaries"),
+        side_summaries=_payload_list_value(payload, "side_summaries"),
+        market_bias=str(payload.get("market_bias", "unknown")),
+        market_activity=str(payload.get("market_activity", "unknown")),
+        near_miss_count=int(payload.get("near_miss_count", 0)),
+        spread_depth_imbalance_summary=_payload_dict_value(
+            payload,
+            "spread_depth_imbalance_summary",
+        ),
+        warnings=[str(item) for item in payload.get("warnings", [])],
+        rows=_payload_list_value(payload, "rows"),
+    )
+
+
+def _intraday_payload_from_rows(rows: list[IntradaySessionAnalytics]) -> JsonPayload:
+    row_payloads = [_intraday_row_payload(row) for row in rows]
+    summary_rows = [row for row in row_payloads if row.get("instrument_id") is None]
+    first = summary_rows[0] if summary_rows else row_payloads[0] if row_payloads else {}
+    warnings = sorted({item for row in row_payloads for item in row.get("warnings", [])})
+    return {
+        "generated_at": first.get("generated_at", datetime.now(tz=UTC).isoformat()),
+        "trading_date": first.get("trading_date"),
+        "session_summaries": summary_rows,
+        "instrument_summaries": _latest_payload_by(row_payloads, "instrument_id"),
+        "timeframe_summaries": _latest_payload_by(row_payloads, "timeframe"),
+        "side_summaries": _latest_payload_by(row_payloads, "side"),
+        "market_bias": first.get("market_bias", "unknown"),
+        "market_activity": first.get("market_activity", "unknown"),
+        "near_miss_count": sum(int(row.get("near_miss_count", 0)) for row in summary_rows),
+        "spread_depth_imbalance_summary": first.get("spread_depth_imbalance_summary", {}),
+        "warnings": warnings,
+        "rows": row_payloads,
+    }
+
+
+def _latest_intraday_rows(
+    rows: list[IntradaySessionAnalytics],
+) -> list[IntradaySessionAnalytics]:
+    latest_by_scope: dict[
+        tuple[str, str | None, str | None, str | None, str | None, str | None],
+        IntradaySessionAnalytics,
+    ] = {}
+    for row in rows:
+        key = (
+            row.session_type,
+            row.micro_session_id,
+            row.hour_bucket.isoformat() if row.hour_bucket else None,
+            row.instrument_id,
+            row.timeframe,
+            row.side,
+        )
+        previous = latest_by_scope.get(key)
+        if previous is None or row.generated_at > previous.generated_at:
+            latest_by_scope[key] = row
+    return list(latest_by_scope.values())
+
+
+def _intraday_row_payload(row: IntradaySessionAnalytics) -> JsonPayload:
+    payload = dict(row.analytics_payload)
+    spread_summary = payload.get("spread_depth_imbalance_summary")
+    if not isinstance(spread_summary, dict):
+        spread_summary = {
+            "avg_spread_bps": _optional_str(row.avg_spread_bps),
+            "p95_spread_bps": _optional_str(row.p95_spread_bps),
+            "avg_depth": _optional_str(row.avg_depth),
+            "avg_imbalance": _optional_str(row.avg_imbalance),
+            "avg_market_quality": _optional_str(row.avg_market_quality),
+        }
+    warnings = payload.get("warnings", [])
+    return {
+        "intraday_analytics_id": str(row.intraday_analytics_id),
+        "generated_at": row.generated_at.isoformat(),
+        "trading_date": row.trading_date.isoformat(),
+        "calendar_date": row.calendar_date.isoformat(),
+        "session_type": row.session_type,
+        "session_phase": row.session_phase,
+        "micro_session_id": row.micro_session_id,
+        "hour_bucket": row.hour_bucket.isoformat() if row.hour_bucket else None,
+        "instrument_id": row.instrument_id,
+        "timeframe": row.timeframe,
+        "side": row.side,
+        "mode": row.mode,
+        "market_bias": row.market_bias,
+        "market_activity": row.market_activity,
+        "trend_strength": _optional_str(row.trend_strength),
+        "candidate_count": row.candidate_count,
+        "pseudo_order_count": row.pseudo_order_count,
+        "real_order_count": row.real_order_count,
+        "blocked_count": row.blocked_count,
+        "near_miss_count": row.near_miss_count,
+        "avg_spread_bps": _optional_str(row.avg_spread_bps),
+        "p95_spread_bps": _optional_str(row.p95_spread_bps),
+        "avg_depth": _optional_str(row.avg_depth),
+        "avg_imbalance": _optional_str(row.avg_imbalance),
+        "avg_market_quality": _optional_str(row.avg_market_quality),
+        "stale_incidents": row.stale_incidents,
+        "candle_lag_p95_seconds": _optional_str(row.candle_lag_p95_seconds),
+        "gross_pnl_proxy": _optional_str(row.gross_pnl_proxy),
+        "net_pnl_proxy": _optional_str(row.net_pnl_proxy),
+        "no_trade_reason": payload.get("no_trade_reason"),
+        "closest_to_entry": payload.get("closest_to_entry", []),
+        "warnings": [str(item) for item in warnings] if isinstance(warnings, list) else [],
+        "spread_depth_imbalance_summary": spread_summary,
+        "payload": payload,
+    }
+
+
+def _diagnostic_run_response(row: CalibrationDiagnosticRun) -> CalibrationDiagnosticRunResponse:
+    return CalibrationDiagnosticRunResponse(
+        diagnostic_run_id=row.diagnostic_run_id,
+        created_at=row.created_at,
+        completed_at=row.completed_at,
+        requested_by=row.requested_by,
+        trigger_type=row.trigger_type,
+        status=row.status,
+        from_ts=row.from_ts,
+        to_ts=row.to_ts,
+        universe=row.universe,
+        diagnosis=row.diagnosis,
+        confidence=row.confidence,
+        blocking_issues=row.blocking_issues,
+        warnings=row.warnings,
+        diagnostic_payload=row.diagnostic_payload,
+    )
+
+
+def _rolling_cube_response(row: RollingPerformanceCube) -> RollingPerformanceCubeResponse:
+    return RollingPerformanceCubeResponse(
+        cube_id=row.cube_id,
+        generated_at=row.generated_at,
+        window_start=row.window_start,
+        window_end=row.window_end,
+        window_name=row.window_name,
+        instrument_id=row.instrument_id,
+        session_type=row.session_type,
+        timeframe=row.timeframe,
+        side=row.side,
+        mode=row.mode,
+        candidate_count=row.candidate_count,
+        approved_count=row.approved_count,
+        blocked_count=row.blocked_count,
+        pseudo_order_count=row.pseudo_order_count,
+        real_order_count=row.real_order_count,
+        gross_pnl_proxy=row.gross_pnl_proxy,
+        net_pnl_proxy=row.net_pnl_proxy,
+        avg_net_pnl_proxy=row.avg_net_pnl_proxy,
+        win_proxy=row.win_proxy,
+        avg_spread_bps=row.avg_spread_bps,
+        p95_spread_bps=row.p95_spread_bps,
+        avg_depth=row.avg_depth,
+        p95_depth=row.p95_depth,
+        avg_imbalance=row.avg_imbalance,
+        avg_market_quality=row.avg_market_quality,
+        stale_incidents=row.stale_incidents,
+        stream_gap_count=row.stream_gap_count,
+        active_days=row.active_days,
+        last_signal_at=row.last_signal_at,
+        sample_warning=row.sample_warning,
+        confidence=row.confidence,
+        contour_status=row.contour_status,
+        cube_payload=row.cube_payload,
+    )
+
+
+def _market_regime_response(row: MarketRegimeSnapshot) -> MarketRegimeSnapshotResponse:
+    return MarketRegimeSnapshotResponse(
+        regime_snapshot_id=row.regime_snapshot_id,
+        generated_at=row.generated_at,
+        window_start=row.window_start,
+        window_end=row.window_end,
+        instrument_id=row.instrument_id,
+        session_type=row.session_type,
+        market_regime=row.market_regime,
+        volume_score=row.volume_score,
+        volatility_score=row.volatility_score,
+        spread_score=row.spread_score,
+        depth_score=row.depth_score,
+        imbalance_score=row.imbalance_score,
+        candidate_frequency_score=row.candidate_frequency_score,
+        regime_payload=row.regime_payload,
+    )
+
+
+def _config_candidate_response(row: StrategyConfigCandidate) -> StrategyConfigCandidateResponse:
+    return StrategyConfigCandidateResponse(
+        candidate_config_id=row.candidate_config_id,
+        created_at=row.created_at,
+        source_diagnostic_run_id=row.source_diagnostic_run_id,
+        base_strategy_id=row.base_strategy_id,
+        proposed_strategy_id=row.proposed_strategy_id,
+        status=row.status,
+        proposed_by=row.proposed_by,
+        approval_required=row.approval_required,
+        approved_by=row.approved_by,
+        approved_at=row.approved_at,
+        proposal_payload=row.proposal_payload,
+        validation_payload=row.validation_payload,
+        caveats=row.caveats,
+        rejection_reason=row.rejection_reason,
+    )
+
+
+def _latest_payload_by(rows: list[JsonPayload], key: str) -> list[JsonPayload]:
+    grouped: dict[str, JsonPayload] = {}
+    for row in rows:
+        value = row.get(key)
+        if value is not None:
+            grouped[str(value)] = row
+    return [grouped[item] for item in sorted(grouped)]
+
+
+def _payload_list_value(payload: JsonPayload, key: str) -> list[JsonPayload]:
+    value = payload.get(key)
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _payload_dict_value(payload: JsonPayload, key: str) -> JsonPayload:
+    value = payload.get(key)
+    return value if isinstance(value, dict) else {}
+
+
+def _coerce_datetime(value: object) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=UTC)
+        return parsed
+    return datetime.now(tz=UTC)
 
 
 def _blocker_code(blocker: BlockerEvent) -> str:

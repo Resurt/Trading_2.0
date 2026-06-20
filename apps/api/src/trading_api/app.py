@@ -7,7 +7,7 @@ import os
 from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime
 from typing import Annotated, Any, cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi import (
     Body,
@@ -38,6 +38,10 @@ from trading_api.schemas import (
     ApiRole,
     AuthStatusResponse,
     BlockerAnalyticsResponse,
+    CalibrationDiagnosticRunResponse,
+    CalibrationObservatoryRunRequest,
+    CalibrationObservatoryRunResponse,
+    CalibrationObservatoryStatusResponse,
     CanceledOrderDiagnosticsResponse,
     CandidateFunnelResponse,
     CounterfactualResponse,
@@ -45,9 +49,11 @@ from trading_api.schemas import (
     DailyReportRunRequest,
     DataShadowStatusResponse,
     HourlyReportResponse,
+    IntradayAnalyticsSnapshotResponse,
     MarketMicrostructureSnapshotResponse,
     MarketMicrostructureSummaryResponse,
     MarketOverviewResponse,
+    MarketRegimeSnapshotResponse,
     OrderResponse,
     PositionResponse,
     ReportJobResponse,
@@ -56,8 +62,11 @@ from trading_api.schemas import (
     ReportScope,
     RobotCommandResponse,
     RobotStatusResponse,
+    RollingPerformanceCubeResponse,
     SessionSnapshotResponse,
     SignalResponse,
+    StrategyConfigCandidateRejectRequest,
+    StrategyConfigCandidateResponse,
     StrategyConfigResponse,
     StrategyConfigUpdateRequest,
     WebSocketEnvelope,
@@ -428,6 +437,283 @@ def create_fastapi_app(
             strategy_version=strategy_version,
             limit=limit,
         )
+
+    @app.get(
+        "/analytics/intraday/today",
+        response_model=IntradayAnalyticsSnapshotResponse,
+        tags=["analytics"],
+    )
+    def intraday_today(auth: AuthDep, service: ReadServiceDep) -> IntradayAnalyticsSnapshotResponse:
+        require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
+        return service.intraday_analytics_snapshot(trading_date=datetime.now(tz=UTC).date())
+
+    @app.get(
+        "/analytics/intraday",
+        response_model=IntradayAnalyticsSnapshotResponse,
+        tags=["analytics"],
+    )
+    def intraday_analytics(
+        auth: AuthDep,
+        service: ReadServiceDep,
+        trading_date: Annotated[date | None, Query()] = None,
+        mode: Annotated[str, Query()] = "all",
+    ) -> IntradayAnalyticsSnapshotResponse:
+        require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
+        return service.intraday_analytics_snapshot(trading_date=trading_date, mode=mode)
+
+    @app.get(
+        "/analytics/intraday/session",
+        response_model=IntradayAnalyticsSnapshotResponse,
+        tags=["analytics"],
+    )
+    def intraday_session(
+        auth: AuthDep,
+        service: ReadServiceDep,
+        trading_date: Annotated[date, Query()],
+        session_type: Annotated[str, Query()],
+        mode: Annotated[str, Query()] = "all",
+    ) -> IntradayAnalyticsSnapshotResponse:
+        require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
+        return service.intraday_analytics_snapshot(
+            trading_date=trading_date,
+            session_type=session_type,
+            mode=mode,
+        )
+
+    @app.get(
+        "/analytics/intraday/micro-session/{micro_session_id}",
+        response_model=IntradayAnalyticsSnapshotResponse,
+        tags=["analytics"],
+    )
+    def intraday_micro_session(
+        micro_session_id: str,
+        auth: AuthDep,
+        service: ReadServiceDep,
+    ) -> IntradayAnalyticsSnapshotResponse:
+        require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
+        return service.intraday_analytics_snapshot(micro_session_id=micro_session_id)
+
+    @app.get(
+        "/calibration/observatory/status",
+        response_model=CalibrationObservatoryStatusResponse,
+        tags=["calibration"],
+    )
+    def calibration_observatory_status(
+        auth: AuthDep,
+        service: ReadServiceDep,
+    ) -> CalibrationObservatoryStatusResponse:
+        require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
+        return service.calibration_observatory_status()
+
+    @app.post(
+        "/calibration/observatory/run",
+        response_model=CalibrationObservatoryRunResponse,
+        tags=["calibration"],
+    )
+    def calibration_observatory_run(
+        payload: CalibrationObservatoryRunRequest,
+        request: Request,
+        auth: AuthDep,
+    ) -> CalibrationObservatoryRunResponse:
+        require_role(auth, (ApiRole.OPERATOR, ApiRole.ADMIN))
+        from report_worker.analytics.calibration_observatory import (
+            CalibrationDiagnosticService,
+            RollingPerformanceCubeService,
+            StrategyConfigProposalService,
+        )
+
+        universe = _split_csv(payload.universe)
+        windows = _split_csv(payload.windows)
+        database = _database_service(request)
+        try:
+            with database.session_scope() as session:
+                diagnostic = CalibrationDiagnosticService(session).run_diagnostics(
+                    universe,
+                    payload.lookback_days,
+                    trigger_type=payload.trigger_type,
+                    requested_by=payload.requested_by or auth.subject,
+                    mode=payload.mode,
+                )
+                cube_rows = RollingPerformanceCubeService(session).build_rolling_cube(
+                    windows,
+                    universe=universe,
+                    mode=payload.mode,
+                )
+                candidate_config_id: UUID | None = None
+                if payload.create_candidate_config:
+                    proposal = StrategyConfigProposalService(
+                        session
+                    ).create_strategy_config_candidate(
+                        base_strategy_id="baseline",
+                        proposed_strategy_id="baseline_candidate_draft",
+                        source_diagnostic_run_id=UUID(str(diagnostic["diagnostic_run_id"])),
+                        proposal_payload={
+                            "source": "calibration_observatory",
+                            "diagnosis": diagnostic["diagnosis"],
+                            "apply_automatically": False,
+                        },
+                        validation_payload={"rolling_cube_rows": len(cube_rows)},
+                        proposed_by="system",
+                    )
+                    candidate_config_id = UUID(str(proposal["candidate_config_id"]))
+                return _observatory_run_response(
+                    diagnostic=diagnostic,
+                    cube_rows=cube_rows,
+                    candidate_config_id=candidate_config_id,
+                )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get(
+        "/calibration/diagnostics",
+        response_model=list[CalibrationDiagnosticRunResponse],
+        tags=["calibration"],
+    )
+    def calibration_diagnostics(
+        auth: AuthDep,
+        service: ReadServiceDep,
+        limit: Annotated[int, Query(ge=1, le=500)] = 50,
+    ) -> list[CalibrationDiagnosticRunResponse]:
+        require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
+        return service.calibration_diagnostics(limit=limit)
+
+    @app.get(
+        "/calibration/diagnostics/{diagnostic_run_id}",
+        response_model=CalibrationDiagnosticRunResponse,
+        tags=["calibration"],
+    )
+    def calibration_diagnostic(
+        diagnostic_run_id: UUID,
+        auth: AuthDep,
+        service: ReadServiceDep,
+    ) -> CalibrationDiagnosticRunResponse:
+        require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
+        try:
+            return service.calibration_diagnostic(diagnostic_run_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get(
+        "/calibration/rolling-performance",
+        response_model=list[RollingPerformanceCubeResponse],
+        tags=["calibration"],
+    )
+    def calibration_rolling_performance(
+        auth: AuthDep,
+        service: ReadServiceDep,
+        window_name: Annotated[str | None, Query()] = None,
+        instrument_id: Annotated[str | None, Query()] = None,
+        session_type: Annotated[str | None, Query()] = None,
+        timeframe: Annotated[str | None, Query()] = None,
+        side: Annotated[str | None, Query()] = None,
+        mode: Annotated[str | None, Query()] = None,
+        contour_status: Annotated[str | None, Query()] = None,
+        limit: Annotated[int, Query(ge=1, le=500)] = 200,
+    ) -> list[RollingPerformanceCubeResponse]:
+        require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
+        return service.rolling_performance(
+            window_name=window_name,
+            instrument_id=instrument_id,
+            session_type=session_type,
+            timeframe=timeframe,
+            side=side,
+            mode=mode,
+            contour_status=contour_status,
+            limit=limit,
+        )
+
+    @app.get(
+        "/calibration/regime",
+        response_model=list[MarketRegimeSnapshotResponse],
+        tags=["calibration"],
+    )
+    def calibration_regime(
+        auth: AuthDep,
+        service: ReadServiceDep,
+        instrument_id: Annotated[str | None, Query()] = None,
+        session_type: Annotated[str | None, Query()] = None,
+        market_regime: Annotated[str | None, Query()] = None,
+        limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    ) -> list[MarketRegimeSnapshotResponse]:
+        require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
+        return service.market_regime_snapshots(
+            instrument_id=instrument_id,
+            session_type=session_type,
+            market_regime=market_regime,
+            limit=limit,
+        )
+
+    @app.get(
+        "/calibration/config-candidates",
+        response_model=list[StrategyConfigCandidateResponse],
+        tags=["calibration"],
+    )
+    def calibration_config_candidates(
+        auth: AuthDep,
+        service: ReadServiceDep,
+        status: Annotated[str | None, Query()] = None,
+        limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    ) -> list[StrategyConfigCandidateResponse]:
+        require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
+        return service.config_candidates(status=status, limit=limit)
+
+    @app.get(
+        "/calibration/config-candidates/{candidate_config_id}",
+        response_model=StrategyConfigCandidateResponse,
+        tags=["calibration"],
+    )
+    def calibration_config_candidate(
+        candidate_config_id: UUID,
+        auth: AuthDep,
+        service: ReadServiceDep,
+    ) -> StrategyConfigCandidateResponse:
+        require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
+        try:
+            return service.config_candidate(candidate_config_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post(
+        "/calibration/config-candidates/{candidate_config_id}/approve-for-shadow",
+        response_model=StrategyConfigCandidateResponse,
+        tags=["calibration"],
+    )
+    def calibration_config_candidate_approve_for_shadow(
+        candidate_config_id: UUID,
+        auth: AuthDep,
+        service: ReadServiceDep,
+    ) -> StrategyConfigCandidateResponse:
+        require_role(auth, (ApiRole.ADMIN,))
+        try:
+            return service.approve_config_candidate_for_shadow(
+                candidate_config_id,
+                approved_by=auth.subject,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post(
+        "/calibration/config-candidates/{candidate_config_id}/reject",
+        response_model=StrategyConfigCandidateResponse,
+        tags=["calibration"],
+    )
+    def calibration_config_candidate_reject(
+        candidate_config_id: UUID,
+        payload: StrategyConfigCandidateRejectRequest,
+        auth: AuthDep,
+        service: ReadServiceDep,
+    ) -> StrategyConfigCandidateResponse:
+        require_role(auth, (ApiRole.OPERATOR, ApiRole.ADMIN))
+        try:
+            return service.reject_config_candidate(
+                candidate_config_id,
+                rejected_by=auth.subject,
+                reason=payload.reason,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.get("/historical/data-quality", tags=["historical"])
     def historical_data_quality(
@@ -1177,6 +1463,53 @@ def _ensure_historical_api_mode(runtime_mode: RuntimeMode) -> None:
             "use report-worker jobs in sandbox/shadow/production."
         ),
     )
+
+
+def _observatory_run_response(
+    *,
+    diagnostic: dict[str, Any],
+    cube_rows: list[dict[str, Any]],
+    candidate_config_id: UUID | None,
+) -> CalibrationObservatoryRunResponse:
+    return CalibrationObservatoryRunResponse(
+        diagnostic_run_id=UUID(str(diagnostic["diagnostic_run_id"])),
+        diagnosis=str(diagnostic["diagnosis"]),
+        confidence=str(diagnostic["confidence"]),
+        rolling_cube_rows=len(cube_rows),
+        regime_summary=cast(dict[str, Any], diagnostic.get("regime_summary", {})),
+        top_contours=_top_contours(cube_rows),
+        dead_contours=_dead_contours(cube_rows),
+        calibration_recommended=bool(diagnostic.get("calibration_recommended", False)),
+        candidate_config_id=candidate_config_id,
+        warnings=[str(item) for item in diagnostic.get("warnings", [])],
+        blocking_issues=[str(item) for item in diagnostic.get("blocking_issues", [])],
+        payload={
+            "diagnostic": diagnostic,
+            "candidate_configs_auto_applied": False,
+            "approval_changes_status_only": True,
+        },
+    )
+
+
+def _top_contours(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        rows,
+        key=lambda row: (
+            float(row.get("net_pnl_proxy") or 0),
+            int(row.get("candidate_count") or 0),
+        ),
+        reverse=True,
+    )[:10]
+
+
+def _dead_contours(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        row
+        for row in rows
+        if row.get("sample_warning") is not None
+        or int(row.get("candidate_count") or 0) == 0
+        or row.get("contour_status") in {"data_only", "research_only"}
+    ][:20]
 
 
 def _split_csv(raw: str) -> tuple[str, ...]:

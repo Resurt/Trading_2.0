@@ -24,6 +24,25 @@
 
 Каноническое описание таблиц бизнес-фактов, partitioning, ключей корреляции и read-model helpers находится в [logging_analytics_schema.md](logging_analytics_schema.md). Этот документ является детальной схемой для `session_run`, `micro_session`, `signal_candidate`, `candidate_stage_result`, `blocker_event`, `order_intent`, `broker_order`, `order_state_event`, `fill_event`, `market_context_snapshot`, `counterfactual_result`, `hourly_report`, `daily_report` и `audit_event`.
 
+### Intraday and calibration read models
+
+The analytics layer also persists diagnostic read models:
+
+- `intraday_session_analytics`: current-day session/hour/micro-session summaries by
+  instrument, timeframe and side.
+- `rolling_performance_cube`: rolling 7d/20d/60d/90d/180d/365d contour statistics.
+- `calibration_diagnostic_run`: no-trade, robot-health and drift diagnostic runs.
+- `strategy_config_candidate`: draft/proposal-only candidate configs.
+- `market_regime_snapshot`: market regime, spread/depth/imbalance and drift snapshots.
+
+These tables are built from domain events, market candles and data-only shadow microstructure.
+They are not live decision sources. `strategy_config_candidate` approval changes candidate status
+only; it must not mutate active `strategy_config` or runtime state.
+
+Small samples are stored with warnings such as `small_sample_is_early_evidence_not_final_truth`.
+10-20 trading days of data-only evidence can support investigation but must not permanently disable
+timeframe/session/side/instrument contours.
+
 ## JSON structured logging
 
 Технические логи пишутся в JSON через стандартный Python logging.

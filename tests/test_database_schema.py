@@ -97,6 +97,11 @@ def test_metadata_contains_required_tables_and_partitioning() -> None:
         "market_status_snapshot",
         "order_book_summary",
         "market_microstructure_snapshot",
+        "intraday_session_analytics",
+        "rolling_performance_cube",
+        "calibration_diagnostic_run",
+        "strategy_config_candidate",
+        "market_regime_snapshot",
     }
 
     assert required_tables <= set(Base.metadata.tables)
@@ -125,6 +130,11 @@ def test_alembic_upgrade_and_downgrade_on_sqlite(tmp_path: Path) -> None:
         assert "counterfactual_result" in table_names
         assert "market_candle" in table_names
         assert "market_microstructure_snapshot" in table_names
+        assert "intraday_session_analytics" in table_names
+        assert "rolling_performance_cube" in table_names
+        assert "calibration_diagnostic_run" in table_names
+        assert "strategy_config_candidate" in table_names
+        assert "market_regime_snapshot" in table_names
         assert "robot_command" in table_names
         assert list(tickers) == ["GAZP", "LKOH", "SBER"]
 

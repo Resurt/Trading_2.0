@@ -85,14 +85,57 @@ Recommendations сохраняются в `calibration_report.report_payload`:
 
 ## UI
 
-Frontend имеет страницу `Calibration`:
+Frontend имеет страницу `Calibration` / Calibration Center:
 
+- run diagnostics action;
+- diagnosis status: `market_dead`, `robot_too_strict`, `data_quality_problem`,
+  `regime_changed`, `not_enough_data`, `normal_no_action_needed`,
+  `calibration_recommended`;
+- rolling performance cube filters by window, instrument, session, timeframe, side and mode;
+- market regime summary;
+- top/dead contours;
+- warnings and blocking issues;
+- candidate config proposals with approve/reject controls;
 - blocker ranking;
 - candidate funnel summary;
 - gross/net simulation;
 - missed opportunity;
 - best/worst session/timeframe/instrument;
 - threshold recommendations.
+
+Candidate configs are not applied to live trading automatically. Approval changes only
+`strategy_config_candidate.status`; applying any config to active runtime remains a separate
+future operator/admin workflow.
+
+## Calibration Observatory
+
+CLI:
+
+```powershell
+python scripts/run_calibration_observatory.py --universe SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR --lookback-days 20 --json-output
+```
+
+Optional draft proposal:
+
+```powershell
+python scripts/run_calibration_observatory.py --universe SBER,GAZP --lookback-days 20 --create-candidate-config --json-output
+```
+
+The observatory writes `.local/collection_reports/calibration_observatory/` and persists:
+
+- `calibration_diagnostic_run`;
+- `rolling_performance_cube`;
+- `market_regime_snapshot`;
+- optional `strategy_config_candidate` with `status=draft`.
+
+Rules:
+
+- no live `strategy_config` mutation;
+- no production or strategy shadow startup;
+- no real `PostOrder` or `CancelOrder`;
+- small samples produce warnings and do not hard-disable contours;
+- 10-20 trading days are early evidence, not final truth;
+- operator/admin approval is required before any future workflow can apply a config.
 
 ## Acceptance
 

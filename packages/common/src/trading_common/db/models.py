@@ -955,6 +955,224 @@ class CalibrationReport(Base):
     report_payload: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
 
 
+class IntradaySessionAnalytics(Base):
+    """Session/hour/instrument diagnostic snapshot for the current trading day."""
+
+    __tablename__ = "intraday_session_analytics"
+    __table_args__ = (
+        Index("ix_intraday_analytics_trading_session", "trading_date", "session_type"),
+        Index("ix_intraday_analytics_trading_instrument", "trading_date", "instrument_id"),
+        Index(
+            "ix_intraday_analytics_scope",
+            "trading_date",
+            "session_type",
+            "instrument_id",
+            "timeframe",
+            "side",
+        ),
+        Index("ix_intraday_analytics_generated_at", "generated_at"),
+        Index("ix_intraday_analytics_mode", "mode"),
+    )
+
+    intraday_analytics_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    trading_date: Mapped[date] = mapped_column(Date, nullable=False)
+    calendar_date: Mapped[date] = mapped_column(Date, nullable=False)
+    session_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    session_phase: Mapped[str] = mapped_column(String(32), nullable=False)
+    micro_session_id: Mapped[str | None] = mapped_column(String(96))
+    hour_bucket: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    instrument_id: Mapped[str | None] = mapped_column(String(64))
+    timeframe: Mapped[str | None] = mapped_column(String(16))
+    side: Mapped[str | None] = mapped_column(String(16))
+    mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    market_bias: Mapped[str] = mapped_column(String(32), nullable=False)
+    market_activity: Mapped[str] = mapped_column(String(32), nullable=False)
+    trend_strength: Mapped[Decimal | None] = mapped_column(BPS_TYPE)
+    candidate_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    pseudo_order_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    real_order_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    blocked_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    near_miss_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    avg_spread_bps: Mapped[Decimal | None] = mapped_column(BPS_TYPE)
+    p95_spread_bps: Mapped[Decimal | None] = mapped_column(BPS_TYPE)
+    avg_depth: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    avg_imbalance: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    avg_market_quality: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    stale_incidents: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    candle_lag_p95_seconds: Mapped[Decimal | None] = mapped_column(Numeric(20, 4))
+    gross_pnl_proxy: Mapped[Decimal | None] = mapped_column(MONEY_TYPE)
+    net_pnl_proxy: Mapped[Decimal | None] = mapped_column(MONEY_TYPE)
+    analytics_payload: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
+
+
+class RollingPerformanceCube(Base):
+    """Rolling contour statistics by instrument/session/timeframe/side/mode."""
+
+    __tablename__ = "rolling_performance_cube"
+    __table_args__ = (
+        Index(
+            "ix_rolling_cube_window_scope",
+            "window_name",
+            "instrument_id",
+            "timeframe",
+            "side",
+        ),
+        Index("ix_rolling_cube_generated_at", "generated_at"),
+        Index("ix_rolling_cube_contour_status", "contour_status"),
+        Index("ix_rolling_cube_mode", "mode"),
+        Index(
+            "ix_rolling_cube_full_scope",
+            "instrument_id",
+            "session_type",
+            "timeframe",
+            "side",
+        ),
+    )
+
+    cube_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    window_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    window_name: Mapped[str] = mapped_column(String(16), nullable=False)
+    instrument_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    session_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    timeframe: Mapped[str] = mapped_column(String(16), nullable=False)
+    side: Mapped[str] = mapped_column(String(16), nullable=False)
+    mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    candidate_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    approved_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    blocked_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    pseudo_order_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    real_order_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    gross_pnl_proxy: Mapped[Decimal] = mapped_column(MONEY_TYPE, nullable=False, default=0)
+    net_pnl_proxy: Mapped[Decimal] = mapped_column(MONEY_TYPE, nullable=False, default=0)
+    avg_net_pnl_proxy: Mapped[Decimal] = mapped_column(MONEY_TYPE, nullable=False, default=0)
+    win_proxy: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    avg_spread_bps: Mapped[Decimal | None] = mapped_column(BPS_TYPE)
+    p95_spread_bps: Mapped[Decimal | None] = mapped_column(BPS_TYPE)
+    avg_depth: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    p95_depth: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    avg_imbalance: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    avg_market_quality: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    stale_incidents: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    stream_gap_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    active_days: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_signal_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    sample_warning: Mapped[str | None] = mapped_column(String(256))
+    confidence: Mapped[str] = mapped_column(String(32), nullable=False)
+    contour_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    cube_payload: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
+
+
+class CalibrationDiagnosticRun(Base):
+    """Persisted Calibration Center diagnostic run."""
+
+    __tablename__ = "calibration_diagnostic_run"
+    __table_args__ = (
+        Index("ix_calibration_diagnostic_created_at", "created_at"),
+        Index("ix_calibration_diagnostic_status", "status"),
+        Index("ix_calibration_diagnostic_trigger", "trigger_type"),
+        Index("ix_calibration_diagnostic_diagnosis", "diagnosis"),
+    )
+
+    diagnostic_run_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    requested_by: Mapped[str | None] = mapped_column(String(128))
+    trigger_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    from_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    to_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    universe: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
+    diagnosis: Mapped[str] = mapped_column(String(64), nullable=False)
+    confidence: Mapped[str] = mapped_column(String(32), nullable=False)
+    blocking_issues: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
+    warnings: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
+    diagnostic_payload: Mapped[JsonPayload] = mapped_column(
+        JSONB_TYPE,
+        nullable=False,
+        default=dict,
+    )
+
+
+class StrategyConfigCandidate(Base):
+    """Draft/proposal storage for future strategy config changes."""
+
+    __tablename__ = "strategy_config_candidate"
+    __table_args__ = (
+        Index("ix_strategy_config_candidate_created_at", "created_at"),
+        Index("ix_strategy_config_candidate_status", "status"),
+        Index("ix_strategy_config_candidate_base", "base_strategy_id"),
+        Index("ix_strategy_config_candidate_source_run", "source_diagnostic_run_id"),
+    )
+
+    candidate_config_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    source_diagnostic_run_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("calibration_diagnostic_run.diagnostic_run_id"),
+    )
+    base_strategy_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    proposed_strategy_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="draft")
+    proposed_by: Mapped[str] = mapped_column(String(32), nullable=False)
+    approval_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    approved_by: Mapped[str | None] = mapped_column(String(128))
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    proposal_payload: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
+    validation_payload: Mapped[JsonPayload] = mapped_column(
+        JSONB_TYPE,
+        nullable=False,
+        default=dict,
+    )
+    caveats: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
+    rejection_reason: Mapped[str | None] = mapped_column(String(1024))
+
+
+class MarketRegimeSnapshot(Base):
+    """Market regime/drift diagnostic snapshot."""
+
+    __tablename__ = "market_regime_snapshot"
+    __table_args__ = (
+        Index("ix_market_regime_generated_at", "generated_at"),
+        Index("ix_market_regime_window", "window_start", "window_end"),
+        Index("ix_market_regime_instrument_session", "instrument_id", "session_type"),
+        Index("ix_market_regime_label", "market_regime"),
+    )
+
+    regime_snapshot_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    window_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    instrument_id: Mapped[str | None] = mapped_column(String(64))
+    session_type: Mapped[str | None] = mapped_column(String(32))
+    market_regime: Mapped[str] = mapped_column(String(32), nullable=False)
+    volume_score: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    volatility_score: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    spread_score: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    depth_score: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    imbalance_score: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    candidate_frequency_score: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    regime_payload: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
+
+
 class CorporateActionEvent(Base):
     """Manual/API imported corporate action fact used by calibration filters."""
 

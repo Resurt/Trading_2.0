@@ -31,6 +31,8 @@
 - `Docs/historical-candle-backfill.md`
 - `Docs/runbooks/historical-replay.md`
 - `Docs/runbooks/calibration.md`
+- `Docs/runbooks/analytics-and-calibration-center.md`
+- `Docs/runbooks/data-retention-policy.md`
 - `Docs/runbooks/corporate-actions.md`
 - `Docs/runbooks/final-historical-calibration.md`
 - `Docs/strategy-risk-execution.md`
@@ -194,6 +196,34 @@ Partial dividend sync is not clean: `completed_with_errors`, `failed`,
 `failed_instruments > 0`, or `error_count > 0` blocks final calibration,
 shadow readiness and production preflight. The latest status is persisted in
 `dividend_sync_run`.
+
+## Intraday Analytics and Calibration Center
+
+Two diagnostic analytics surfaces are available:
+
+- `Intraday Analytics`: current trading-day summaries by session, hour/micro-session,
+  instrument, timeframe and side. It explains market bias/activity, spread/depth/imbalance,
+  blockers, near misses and no-trade reasons. It is diagnostic only and does not enable trading.
+- `Calibration Center`: rolling performance cube, robot-health diagnostics, no-trade diagnosis,
+  market regime/drift snapshots and draft strategy config candidate proposals.
+
+CLI:
+
+```bash
+python scripts/run_intraday_analytics.py --date YYYY-MM-DD --json-output
+python scripts/run_calibration_observatory.py --universe SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR --lookback-days 20 --json-output
+```
+
+Outputs are written under `.local/collection_reports/intraday/` and
+`.local/collection_reports/calibration_observatory/`.
+
+Safety invariants:
+
+- no real `PostOrder` or `CancelOrder` is performed by analytics;
+- `strategy_config_candidate` stores proposals only, initially `draft`;
+- approving a candidate changes candidate status only and does not mutate active runtime config;
+- 10-20 trading days are early evidence, not final truth, and must not hard-disable a contour;
+- any actual runtime config application remains a separate future operator/admin workflow.
 
 ## Локальный Docker Compose
 

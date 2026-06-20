@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 
 from celery import Celery
+from celery.schedules import crontab
 
 REPORTS_QUEUE = "reports"
 
@@ -37,7 +38,33 @@ def create_celery_app(
             }
         },
     )
+    beat_schedule = _diagnostic_beat_schedule()
+    if beat_schedule:
+        app.conf.beat_schedule = beat_schedule
     return app
+
+def _diagnostic_beat_schedule() -> dict[str, dict[str, object]]:
+    schedule: dict[str, dict[str, object]] = {}
+    if _env_enabled("INTRADAY_ANALYTICS_DAILY_ENABLED"):
+        schedule["daily-intraday-analytics-rebuild"] = {
+            "task": "report_worker.run_daily_intraday_analytics_rebuild",
+            "schedule": crontab(hour=18, minute=30),
+        }
+    if _env_enabled("CALIBRATION_OBSERVATORY_DAILY_ENABLED"):
+        schedule["daily-calibration-diagnostics"] = {
+            "task": "report_worker.run_daily_calibration_diagnostics",
+            "schedule": crontab(hour=19, minute=0),
+        }
+    if _env_enabled("CALIBRATION_OBSERVATORY_WEEKLY_ENABLED"):
+        schedule["weekly-calibration-observatory"] = {
+            "task": "report_worker.run_weekly_calibration_observatory",
+            "schedule": crontab(hour=19, minute=30, day_of_week="sun"),
+        }
+    return schedule
+
+
+def _env_enabled(name: str) -> bool:
+    return os.getenv(name, "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
 celery_app = create_celery_app()

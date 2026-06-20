@@ -519,6 +519,166 @@ export interface MarketSpecialDayClassificationResponse {
   to_date: string;
 }
 
+export interface IntradayAnalyticsSnapshotResponse {
+  generated_at: string;
+  trading_date: string;
+  calendar_date: string | null;
+  session_type: string | null;
+  session_phase: string | null;
+  mode: string;
+  market_bias: string;
+  market_activity: string;
+  trend_strength: string | null;
+  candidate_count: number;
+  pseudo_order_count: number;
+  real_order_count: number;
+  blocked_count: number;
+  near_miss_count: number;
+  avg_spread_bps: string | null;
+  p95_spread_bps: string | null;
+  avg_depth: string | null;
+  avg_imbalance: string | null;
+  avg_market_quality: string | null;
+  stale_incidents: number;
+  candle_lag_p95_seconds: string | null;
+  gross_pnl_proxy: string | null;
+  net_pnl_proxy: string | null;
+  warnings: string[];
+  no_trade_reason: string | null;
+  session_summaries: JsonPayload[];
+  instrument_summaries: JsonPayload[];
+  timeframe_summaries: JsonPayload[];
+  side_summaries: JsonPayload[];
+  micro_sessions: JsonPayload[];
+  hour_summaries: JsonPayload[];
+  contour_rows: JsonPayload[];
+  payload: JsonPayload;
+}
+
+export interface CalibrationObservatoryStatusResponse {
+  generated_at: string;
+  latest_diagnostic: JsonPayload | null;
+  latest_cube_generated_at: string | null;
+  latest_regime_generated_at: string | null;
+  draft_candidate_count: number;
+  caveats: string[];
+}
+
+export interface CalibrationObservatoryRunRequest {
+  universe: string;
+  lookback_days: number;
+  windows: string;
+  mode: string;
+  trigger_type: string;
+  create_candidate_config: boolean;
+  requested_by?: string | null;
+}
+
+export interface CalibrationObservatoryRunResponse {
+  diagnostic_run_id: string;
+  diagnosis: string;
+  confidence: string;
+  rolling_cube_rows: number;
+  regime_summary: JsonPayload;
+  top_contours: JsonPayload[];
+  dead_contours: JsonPayload[];
+  calibration_recommended: boolean;
+  candidate_config_id: string | null;
+  warnings: string[];
+  blocking_issues: string[];
+}
+
+export interface CalibrationDiagnosticRunResponse {
+  diagnostic_run_id: string;
+  created_at: string;
+  completed_at: string | null;
+  requested_by: string | null;
+  trigger_type: string;
+  status: string;
+  from_ts: string;
+  to_ts: string;
+  universe: JsonPayload;
+  diagnosis: string;
+  confidence: string;
+  blocking_issues: JsonPayload[];
+  warnings: JsonPayload[];
+  diagnostic_payload: JsonPayload;
+}
+
+export interface RollingPerformanceCubeResponse {
+  cube_id: string;
+  generated_at: string;
+  window_start: string;
+  window_end: string;
+  window_name: string;
+  instrument_id: string;
+  session_type: string;
+  timeframe: string;
+  side: string;
+  mode: string;
+  candidate_count: number;
+  approved_count: number;
+  blocked_count: number;
+  pseudo_order_count: number;
+  real_order_count: number;
+  gross_pnl_proxy: string;
+  net_pnl_proxy: string;
+  avg_net_pnl_proxy: string;
+  win_proxy: string | null;
+  avg_spread_bps: string | null;
+  p95_spread_bps: string | null;
+  avg_depth: string | null;
+  p95_depth: string | null;
+  avg_imbalance: string | null;
+  avg_market_quality: string | null;
+  stale_incidents: number;
+  stream_gap_count: number;
+  active_days: number;
+  last_signal_at: string | null;
+  sample_warning: string | null;
+  confidence: string;
+  contour_status: string;
+  cube_payload: JsonPayload;
+}
+
+export interface MarketRegimeSnapshotResponse {
+  regime_snapshot_id: string;
+  generated_at: string;
+  window_start: string;
+  window_end: string;
+  instrument_id: string | null;
+  session_type: string | null;
+  market_regime: string;
+  volume_score: string | null;
+  volatility_score: string | null;
+  spread_score: string | null;
+  depth_score: string | null;
+  imbalance_score: string | null;
+  candidate_frequency_score: string | null;
+  regime_payload: JsonPayload;
+}
+
+export interface StrategyConfigCandidateResponse {
+  candidate_config_id: string;
+  created_at: string;
+  source_diagnostic_run_id: string | null;
+  base_strategy_id: string;
+  proposed_strategy_id: string;
+  status: string;
+  proposed_by: string;
+  approval_required: boolean;
+  approved_by: string | null;
+  approved_at: string | null;
+  proposal_payload: JsonPayload;
+  validation_payload: JsonPayload;
+  caveats: JsonPayload;
+  rejection_reason: string | null;
+}
+
+export interface StrategyConfigCandidateRejectRequest {
+  reason: string;
+}
+
 export interface WebSocketEnvelope<TPayload = unknown> {
   message_id: string;
   ts_utc: string;
