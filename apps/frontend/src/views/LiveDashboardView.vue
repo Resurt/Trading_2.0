@@ -16,7 +16,6 @@ import {
   formatDecimal,
   formatMoney,
   formatPercentRatio,
-  stringifyValue,
 } from "../utils/format";
 
 const robot = useRobotStore();
@@ -412,17 +411,6 @@ function orderBookReason(): string {
   return "Стакан не собран: нет свежих order book samples.";
 }
 
-function depthPercent(side: "bid" | "ask"): number {
-  const instrument = selectedInstrument.value;
-  const bid = Number(instrument?.bid_depth_lots ?? 0);
-  const ask = Number(instrument?.ask_depth_lots ?? 0);
-  const total = bid + ask;
-  if (!Number.isFinite(total) || total <= 0) {
-    return 0;
-  }
-  return Math.max(4, Math.round(((side === "bid" ? bid : ask) / total) * 100));
-}
-
 function tradeTime(trade: JsonPayload): string {
   const raw = trade.ts ?? trade.ts_utc ?? trade.exchange_ts ?? trade.time;
   return typeof raw === "string" ? compactDateTime(raw) : "нет времени";
@@ -436,6 +424,28 @@ function tradePrice(trade: JsonPayload): string {
 function tradeQty(trade: JsonPayload): string {
   const raw = trade.qty_lots ?? trade.quantity_lots ?? trade.quantity;
   return formatLots(typeof raw === "string" || typeof raw === "number" ? String(raw) : null);
+}
+
+function tradeSideLabel(trade: JsonPayload): string {
+  const raw = String(trade.side ?? trade.aggressor_side ?? trade.direction ?? "").toLowerCase();
+  if (raw.includes("buy") || raw.includes("bid") || raw.includes("покуп")) {
+    return "Покупка";
+  }
+  if (raw.includes("sell") || raw.includes("ask") || raw.includes("прод")) {
+    return "Продажа";
+  }
+  return "нет стороны";
+}
+
+function tradeToneClass(trade: JsonPayload): string {
+  const side = tradeSideLabel(trade);
+  if (side === "Покупка") {
+    return "market-tape-price market-tape-price--buy";
+  }
+  if (side === "Продажа") {
+    return "market-tape-price market-tape-price--sell";
+  }
+  return "market-tape-price";
 }
 
 function degradedFlagLabel(flag: string): string {
@@ -654,58 +664,38 @@ function degradedFlagLabel(flag: string): string {
             <MetricTile label="Статус стакана" :value="selectedInstrument?.order_book_stale ? 'stale' : selectedInstrument?.order_book_source ? 'fresh' : 'нет стакана'" :detail="orderBookReason()" />
           </div>
 
-          <OrderBookWidget :instrument="selectedInstrument" />
+          <div class="market-depth-layout">
+            <OrderBookWidget :instrument="selectedInstrument" />
 
-          <div class="depth-bars" v-if="selectedInstrument?.bid_depth_lots || selectedInstrument?.ask_depth_lots">
-            <div>
-              <span>Bid depth</span>
-              <i :style="{ width: `${depthPercent('bid')}%` }" />
-              <strong>{{ formatLots(selectedInstrument?.bid_depth_lots) }}</strong>
-            </div>
-            <div>
-              <span>Ask depth</span>
-              <i :style="{ width: `${depthPercent('ask')}%` }" />
-              <strong>{{ formatLots(selectedInstrument?.ask_depth_lots) }}</strong>
-            </div>
-          </div>
-          <EmptyState v-else title="Стакан не собран" :detail="orderBookReason()" tone="warn" />
-
-          <div class="two-column">
-            <div class="kv-list">
-              <h3>Источник цены</h3>
-              <div>
-                <span>source</span>
-                <strong>{{ sourceLabel(selectedInstrument?.last_price_source ?? null) }}</strong>
-              </div>
-              <div>
-                <span>timestamp</span>
-                <strong>{{ compactDateTime(selectedInstrument?.last_price_at) }}</strong>
-              </div>
-              <div>
-                <span>stale</span>
-                <strong>{{ selectedInstrument?.is_price_stale ? "да" : "нет" }}</strong>
-              </div>
-              <div>
-                <span>order book ts</span>
-                <strong>{{ compactDateTime(selectedInstrument?.order_book_ts) }}</strong>
-              </div>
-            </div>
-            <div>
-              <h3>Лента сделок</h3>
-              <div v-if="market.recentTrades.length" class="tape">
-                <div v-for="(trade, index) in market.recentTrades.slice(0, 8)" :key="index">
+            <section class="market-tape-card">
+              <header class="market-tape-header">
+                <div>
+                  <h3>ЛЕНТА СДЕЛОК</h3>
+                  <span>{{ selectedInstrument?.ticker ?? selectedInstrument?.instrument_id ?? "инструмент не выбран" }}</span>
+                </div>
+                <strong>рыночный поток</strong>
+              </header>
+              <div v-if="market.recentTrades.length" class="market-tape-table">
+                <div class="market-tape-row market-tape-row--head">
+                  <span>время</span>
+                  <span>цена</span>
+                  <span>объем</span>
+                  <span>сторона</span>
+                </div>
+                <div v-for="(trade, index) in market.recentTrades.slice(0, 18)" :key="index" class="market-tape-row">
                   <span>{{ tradeTime(trade) }}</span>
-                  <strong>{{ tradePrice(trade) }}</strong>
-                  <small>{{ stringifyValue(trade.side ?? trade.aggressor_side ?? "side n/a") }} / {{ tradeQty(trade) }}</small>
+                  <strong :class="tradeToneClass(trade)">{{ tradePrice(trade) }}</strong>
+                  <span>{{ tradeQty(trade) }}</span>
+                  <span>{{ tradeSideLabel(trade) }}</span>
                 </div>
               </div>
               <EmptyState
                 v-else
                 title="Лента сделок недоступна"
-                detail="Причина: no_market_trades_samples. Это не скрывается и не считается торговым сигналом."
+                detail="Причина: no_market_trades_samples. Появится после market trades stream; отсутствие ленты не скрывается."
                 tone="warn"
               />
-            </div>
+            </section>
           </div>
         </DataPanel>
       </div>

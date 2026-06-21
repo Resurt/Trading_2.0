@@ -159,6 +159,8 @@ Important quote fields:
 - `best_bid`, `best_ask`, `mid_price`, `spread_abs`, `spread_bps`;
 - `bid_depth_lots`, `ask_depth_lots`, `book_imbalance`, `market_quality`;
 - `order_book_source`, `order_book_ts`, `order_book_stale`;
+- `order_book_summary.bids[]` and `order_book_summary.asks[]`, where each level
+  has `price` and `quantity_lots` when real order-book levels are available;
 - `recent_market_trades`, `quote_payload`.
 
 Price source priority for the dashboard is:

@@ -443,6 +443,14 @@ def seed_database(database: DatabaseService) -> None:
                     book_imbalance=Decimal("0.1111"),
                     market_quality_score=Decimal("0.9"),
                     summary_payload={
+                        "bids": [
+                            {"price": "100", "quantity_lots": "10"},
+                            {"price": "99.9", "quantity_lots": "10"},
+                        ],
+                        "asks": [
+                            {"price": "100.1", "quantity_lots": "8"},
+                            {"price": "100.2", "quantity_lots": "8"},
+                        ],
                         "recent_market_trades": [
                             {"side": "buy", "price": "100.04", "qty_lots": 5}
                         ]
@@ -647,6 +655,8 @@ def test_robot_status_and_market_overview(
     assert market["instruments"][0]["is_price_stale"] is True
     assert market["instruments"][0]["mid_price"] == "100.05000000"
     assert market["instruments"][0]["spread_bps"] == "9.9950"
+    assert market["instruments"][0]["order_book_summary"]["bids"][0]["price"] == "100"
+    assert market["instruments"][0]["order_book_summary"]["asks"][0]["price"] == "100.1"
     assert latest_microstructure[0]["source"] == "data_only_shadow"
     assert latest_microstructure[0]["spread_bps"] == "9.9950"
     assert microstructure_summary["snapshots_count"] == 1

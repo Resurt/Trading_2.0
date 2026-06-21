@@ -123,6 +123,11 @@ describe("LiveDashboardView", () => {
     expect(wrapper.find('[data-testid="live-dashboard"]').exists()).toBe(true);
     expect(wrapper.text()).toContain("Котировки core universe");
     expect(wrapper.text()).toContain("8 инструментов");
+    expect(wrapper.text()).toContain("СТАКАН");
+    expect(wrapper.text()).toContain("ЛЕНТА СДЕЛОК");
+    expect(wrapper.text()).toContain("100,00");
+    expect(wrapper.text()).toContain("100,10");
+    expect(wrapper.text()).toContain("Покупка");
     expect(wrapper.text()).toContain("Сессия MOEX");
     expect(wrapper.text()).toContain("Data-only сбор");
     expect(wrapper.text()).toContain("real orders, pseudo-orders");
@@ -200,15 +205,33 @@ function quoteFixture(
     order_book_source: live ? "tbank_order_book" : null,
     order_book_ts: live ? "2026-06-13T07:10:00Z" : null,
     order_book_stale: !live,
-    recent_market_trades: [],
     order_book_summary: live
       ? {
+          source: "tbank_order_book",
+          bids: [
+            { price: "100.00", quantity_lots: "10" },
+            { price: "99.98", quantity_lots: "30" },
+          ],
+          asks: [
+            { price: "100.10", quantity_lots: "12" },
+            { price: "100.12", quantity_lots: "26" },
+          ],
           best_bid_qty_lots: "10",
           best_ask_qty_lots: "12",
           bid_depth_lots: "100",
           ask_depth_lots: "120",
         }
       : {},
+    recent_market_trades: live
+      ? [
+          {
+            exchange_ts: "2026-06-13T07:10:01Z",
+            price: "100.05",
+            quantity_lots: "5",
+            side: "buy",
+          },
+        ]
+      : [],
     quote_payload: {},
   };
 }

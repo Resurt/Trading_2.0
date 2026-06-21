@@ -357,9 +357,13 @@ class BffReadService:
         recent_market_trades: list[JsonPayload] = []
         if summary is not None:
             recent_market_trades = _payload_list(summary.summary_payload, "recent_market_trades")
+            bids = _payload_list(summary.summary_payload, "bids")
+            asks = _payload_list(summary.summary_payload, "asks")
             order_book_summary = {
                 "source": "live_order_book",
                 "depth_levels": summary.depth_levels,
+                "bids": bids[:20],
+                "asks": asks[:20],
                 "best_bid_qty_lots": _optional_str(summary.best_bid_qty_lots),
                 "best_ask_qty_lots": _optional_str(summary.best_ask_qty_lots),
                 "bid_depth_lots": str(summary.bid_depth_lots),

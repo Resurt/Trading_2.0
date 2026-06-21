@@ -1798,6 +1798,14 @@ def _order_book_overview_payload(payload: dict[str, object]) -> dict[str, object
         "order_book_summary": {
             "source": "tbank_order_book",
             "depth_levels": len(bids) + len(asks),
+            "bids": [
+                {"price": str(price), "quantity_lots": str(quantity)}
+                for price, quantity in bids[:20]
+            ],
+            "asks": [
+                {"price": str(price), "quantity_lots": str(quantity)}
+                for price, quantity in asks[:20]
+            ],
             "best_bid_qty_lots": str(best_bid_qty),
             "best_ask_qty_lots": str(best_ask_qty),
             "bid_depth_lots": str(bid_depth),

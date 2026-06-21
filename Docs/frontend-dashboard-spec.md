@@ -258,7 +258,7 @@ Current Live Dashboard blocks:
 - quote table for the core universe: SBER, GAZP, LKOH, YDEX, TATN, GMKN, OZON, VTBR
 - Data-only Shadow Status
 - selected instrument panel with price, bid/ask, mid, spread, depth, imbalance and book quality
-- order book summary and market trades tape when data exists
+- selected instrument market depth block: order-book ladder on the left and market trades tape on the right
 - current signal and blocker reason
 - recent risk events
 - stream health
@@ -308,6 +308,18 @@ Quotes:
   current live prices.
 - Balance, session state and current/last prices must be visible without starting
   strategy shadow or live trading.
+
+Selected instrument depth:
+
+- When the operator clicks a core universe row, the selected instrument block must
+  render an order-book ladder with bid price, bid volume, ask price and ask volume.
+- Ladder volume bars use only real `order_book_summary.bids`/`asks` levels from
+  live data-only storage or explicit readonly `GetOrderBook` refresh. The UI must
+  not invent synthetic depth levels.
+- If there are no bid/ask levels, the block stays visible and shows the reason
+  (`no_order_book_samples`, market closed, stream unavailable, stale book, etc.).
+- The right side shows recent market trades when the market trades stream exists.
+  If not available, it shows `no_market_trades_samples` instead of an empty panel.
 
 Analytics pages:
 
