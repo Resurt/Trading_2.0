@@ -468,15 +468,14 @@ def _broker_balance_payload(
     observed_at: datetime,
     account_payload: Mapping[str, Any] | None = None,
 ) -> JsonPayload:
-    available_cash, currency = _money_sum(positions_payload.get("money"))
-    blocked_cash, blocked_currency = _money_sum(positions_payload.get("blocked"))
-    balance_currency = currency or blocked_currency or "RUB"
+    available_cash = _money_sum_by_currency(positions_payload.get("money"), "RUB")
+    blocked_cash = _money_sum_by_currency(positions_payload.get("blocked"), "RUB")
     return {
         "account_id_masked": _mask_account_id(account_id),
         "account_id_present": bool(account_id),
         "account_type": _string_or_none((account_payload or {}).get("type")),
         "account_status": _string_or_none((account_payload or {}).get("status")),
-        "balance_currency": balance_currency,
+        "balance_currency": "RUB",
         "total_portfolio_value_rub": _decimal_payload(
             _decimal_or_none(portfolio_payload.get("total_amount_portfolio"))
         ),
@@ -500,24 +499,24 @@ def _string_or_none(value: object) -> str | None:
     return text or None
 
 
-def _money_sum(value: object) -> tuple[Decimal | None, str | None]:
+def _money_sum_by_currency(value: object, currency_code: str) -> Decimal | None:
     if not isinstance(value, list | tuple):
-        return None, None
+        return None
     total = Decimal("0")
     seen = False
-    currency: str | None = None
+    expected_currency = currency_code.upper()
     for item in value:
         if not isinstance(item, Mapping):
+            continue
+        raw_currency = item.get("currency")
+        if not isinstance(raw_currency, str) or raw_currency.upper() != expected_currency:
             continue
         amount = _money_amount(item)
         if amount is None:
             continue
         total += amount
         seen = True
-        raw_currency = item.get("currency")
-        if isinstance(raw_currency, str) and raw_currency:
-            currency = raw_currency.upper()
-    return (total if seen else None), currency
+    return total if seen else None
 
 
 def _money_amount(payload: Mapping[str, Any]) -> Decimal | None:

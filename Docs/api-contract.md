@@ -338,6 +338,11 @@ position snapshot read model. `GET /portfolio/summary` returns the latest stored
 snapshot. If broker balance is unavailable, responses keep the balance object visible
 with `balance_degraded=true` and `balance_degraded_reason_code`.
 
+`available_cash_rub` and `blocked_cash_rub` are RUB-only buckets from broker
+positions. Non-RUB cash balances are not summed into RUB fields unless an explicit
+FX conversion model is added later. `balance_currency` must remain `RUB` for these
+rub-denominated dashboard fields.
+
 Dashboard balance reads are intentionally fast-path reads: `/portfolio/summary` and
 `/robot/status.balance` read only the latest `position_snapshot` timestamp, not the
 full historical position table. `POST /portfolio/refresh` has a bounded broker timeout

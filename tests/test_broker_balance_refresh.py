@@ -45,8 +45,15 @@ class FakeReadonlyBalanceGateway:
             method_name="GetPositions",
             data={
                 "account_id": "account-999999",
-                "money": [{"currency": "RUB", "units": 99000, "nano": 0}],
-                "blocked": [{"currency": "RUB", "units": 250, "nano": 0}],
+                "money": [
+                    {"currency": "EUR", "units": 1, "nano": 0},
+                    {"currency": "RUB", "units": 99000, "nano": 0},
+                    {"currency": "USD", "units": 2, "nano": 0},
+                ],
+                "blocked": [
+                    {"currency": "RUB", "units": 250, "nano": 0},
+                    {"currency": "USD", "units": 3, "nano": 0},
+                ],
                 "positions": [],
             },
         )
@@ -112,7 +119,10 @@ def test_broker_balance_refresh_cli_writes_masked_balance_payload(
         broker_balance = cast(dict[str, object], snapshot.snapshot_payload["broker_balance"])
         assert broker_balance["account_id_masked"] == "acc***999"
         assert broker_balance["account_status"] == "open"
+        assert broker_balance["balance_currency"] == "RUB"
         assert broker_balance["total_portfolio_value_rub"] == "150000"
+        assert broker_balance["available_cash_rub"] == "99000"
+        assert broker_balance["blocked_cash_rub"] == "250"
         assert "account-999999" not in str(broker_balance)
 
 
