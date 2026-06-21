@@ -29,10 +29,20 @@ export const usePortfolioStore = defineStore("portfolio", () => {
       openOrders.value = nextOpenOrders;
     } catch (unknownError) {
       error.value = unknownError instanceof Error ? unknownError.message : "Portfolio snapshot failed";
-      positions.value = [];
-      openOrders.value = [];
     } finally {
       loading.value = false;
+    }
+  }
+
+  function applySnapshot(payload: { positions?: PositionResponse[]; open_orders?: OrderResponse[] }): void {
+    if (payload.positions || payload.open_orders) {
+      error.value = null;
+    }
+    if (payload.positions) {
+      positions.value = payload.positions;
+    }
+    if (payload.open_orders) {
+      openOrders.value = payload.open_orders;
     }
   }
 
@@ -75,6 +85,7 @@ export const usePortfolioStore = defineStore("portfolio", () => {
     activePositions,
     ordersWithReason,
     fetchSnapshot,
+    applySnapshot,
     connectOrdersSocket,
   };
 });

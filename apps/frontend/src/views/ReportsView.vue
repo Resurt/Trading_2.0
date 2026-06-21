@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, onMounted } from "vue";
 import { RefreshCw } from "@lucide/vue";
 
 import DataPanel from "../components/ui/DataPanel.vue";
@@ -46,6 +46,11 @@ function toBars(record: Record<string, unknown>) {
     };
   });
 }
+
+onMounted(() => {
+  void reports.fetchReports();
+  void reports.connectReportsSocket();
+});
 </script>
 
 <template>

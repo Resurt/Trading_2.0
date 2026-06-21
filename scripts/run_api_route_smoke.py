@@ -11,10 +11,12 @@ from urllib.request import Request, urlopen
 
 EXPECTED_ROUTES = (
     "/robot/status",
+    "/dashboard/state",
     "/session/preflight",
     "/portfolio/summary",
     "/portfolio/refresh",
     "/market/overview",
+    "/market/quotes/refresh",
     "/market/microstructure/latest",
     "/market/microstructure/summary",
     "/runtime/data-shadow/status",

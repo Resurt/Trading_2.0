@@ -18,7 +18,7 @@ for src in (
     if str(src) not in path:
         path.insert(0, str(src))
 
-from trade_core.infra.tbank import TBankBrokerGateway
+from trade_core.infra.tbank import TBankBrokerConfig, TBankBrokerGateway, TBankEnvironment
 from trade_core.portfolio import BrokerBalanceRefreshService
 from trading_common.db.config import build_database_url_from_env
 from trading_common.db.service import DatabaseService
@@ -35,7 +35,7 @@ def main() -> None:
 async def async_main(args: argparse.Namespace) -> dict[str, object]:
     database = DatabaseService(args.database_url or build_database_url_from_env())
     try:
-        gateway = TBankBrokerGateway()
+        gateway = _build_readonly_gateway()
     except Exception as exc:
         return {
             "balance_refreshed": False,
@@ -80,6 +80,24 @@ def _reason_from_exception(exc: Exception, *, default: str) -> str:
     if text and " " not in text and len(text) <= 96:
         return text
     return default
+
+
+def _readonly_config() -> TBankBrokerConfig:
+    import os
+
+    raw_environment = os.environ.get(
+        "TBANK_READONLY_ENVIRONMENT",
+        os.environ.get("TBANK_ENVIRONMENT", TBankEnvironment.LIVE.value),
+    )
+    return TBankBrokerConfig.from_env().with_environment(TBankEnvironment(raw_environment))
+
+
+def _build_readonly_gateway() -> TBankBrokerGateway:
+    config = _readonly_config()
+    try:
+        return TBankBrokerGateway(config=config)
+    except TypeError:
+        return TBankBrokerGateway()
 
 
 if __name__ == "__main__":

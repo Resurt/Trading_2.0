@@ -13,6 +13,7 @@ import type {
   SignalResponse,
   WebSocketEnvelope,
 } from "../api/types";
+import { useMarketStore } from "./market";
 
 const CORE_UNIVERSE = "SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR";
 
@@ -33,7 +34,7 @@ const EMPTY_STATUS: RobotStatusResponse = {
     last_balance_refresh_at: null,
     balance_freshness_seconds: null,
     balance_degraded: true,
-    balance_degraded_reason_code: "api_snapshot_unavailable",
+    balance_degraded_reason_code: "broker_balance_unavailable",
   },
   active_instruments: [],
   active_timeframes: [],
@@ -43,7 +44,7 @@ const EMPTY_STATUS: RobotStatusResponse = {
   broker_trading_status: "unknown",
   open_orders_count: 0,
   active_positions_count: 0,
-  degraded_flags: ["api_snapshot_unavailable"],
+  degraded_flags: ["balance_unavailable"],
   robot_control_state: "stopped",
   micro_session_id: null,
 };
@@ -77,6 +78,7 @@ export const useRobotStore = defineStore("robot", () => {
   const commandPhase = ref<string | null>(null);
   const commandLoading = computed(() => startLoading.value || stopLoading.value);
   const balanceRefreshLoading = ref(false);
+  const lastSessionPreflight = ref<SessionPreflightResponse | null>(null);
   let dashboardSocket: WebSocket | null = null;
   let balancePollTimer: number | null = null;
 
@@ -88,6 +90,14 @@ export const useRobotStore = defineStore("robot", () => {
     loading.value = true;
     error.value = null;
     snapshotWarnings.value = [];
+    try {
+      const dashboard = await apiClient.dashboardState();
+      applyDashboardSnapshot(dashboard);
+      loading.value = false;
+      return;
+    } catch (unknownError) {
+      snapshotWarnings.value.push(`dashboard_state_unavailable: ${errorMessage(unknownError)}`);
+    }
     const [statusResult, sessionResult, signalsResult, portfolioResult] =
       await Promise.allSettled([
         apiClient.robotStatus(),
@@ -101,13 +111,8 @@ export const useRobotStore = defineStore("robot", () => {
     } else {
       snapshotWarnings.value.push(`robot_status_unavailable: ${errorMessage(statusResult.reason)}`);
       status.value = {
-        ...EMPTY_STATUS,
-        balance: {
-          ...EMPTY_STATUS.balance,
-          balance_degraded: true,
-          balance_degraded_reason_code: "api_snapshot_unavailable",
-        },
-        degraded_flags: ["api_snapshot_unavailable"],
+        ...status.value,
+        degraded_flags: Array.from(new Set([...status.value.degraded_flags, "dashboard_unavailable"])),
       };
     }
 
@@ -119,7 +124,6 @@ export const useRobotStore = defineStore("robot", () => {
         session.value = EMPTY_SESSION;
       }
     }
-
     if (signalsResult.status === "fulfilled") {
       signals.value = signalsResult.value;
     } else {
@@ -170,6 +174,10 @@ export const useRobotStore = defineStore("robot", () => {
   }
 
   function applyDashboardSnapshot(payload: DashboardSnapshotPayload): void {
+    if (payload.data?.robot_status || payload.data?.signals || payload.data?.session_preflight) {
+      error.value = null;
+      snapshotWarnings.value = [];
+    }
     if (payload.data?.robot_status) {
       status.value = payload.data.robot_status;
       session.value = {
@@ -183,6 +191,39 @@ export const useRobotStore = defineStore("robot", () => {
     if (payload.data?.signals) {
       signals.value = payload.data.signals;
     }
+    if (payload.data?.session_preflight) {
+      applySessionPreflight(payload.data.session_preflight);
+    }
+    if (lastSessionPreflight.value) {
+      applySessionPreflight(lastSessionPreflight.value);
+    }
+  }
+
+  function applySessionPreflight(preflight: SessionPreflightResponse): void {
+    lastSessionPreflight.value = preflight;
+    const brokerStatus =
+      preflight.broker_trading_status !== "unknown" || status.value.broker_trading_status === "unknown"
+        ? preflight.broker_trading_status
+        : status.value.broker_trading_status;
+    const microSessionId = preflight.market_open
+      ? (status.value.micro_session_id ?? session.value.micro_session_id)
+      : null;
+    session.value = {
+      calendar_date: preflight.calendar_date,
+      trading_date: preflight.trading_date,
+      session_type: preflight.session_type,
+      session_phase: preflight.session_phase,
+      micro_session_id: microSessionId,
+      broker_trading_status: brokerStatus,
+      observed_at: preflight.now_msk,
+    };
+    status.value = {
+      ...status.value,
+      session_type: preflight.session_type,
+      session_phase: preflight.session_phase,
+      broker_trading_status: brokerStatus,
+      micro_session_id: microSessionId,
+    };
   }
 
   async function startRobot(): Promise<void> {
@@ -190,26 +231,38 @@ export const useRobotStore = defineStore("robot", () => {
     commandPhase.value = "preflight";
     setCommandState({
       status: "checking_preflight",
-      message: "Проверяем торговую сессию и безопасность data-only запуска...",
+      message: "Проверяю календарь и режим data-only. Заявки не выставляются.",
       reasonCode: "session_preflight_running",
     });
     try {
-      const preflight = await apiClient.sessionPreflight({
+      const preflight = await apiClient.sessionPreflightFast({
         instruments: CORE_UNIVERSE,
         mode: "data_shadow",
       });
+      applySessionPreflight(preflight);
       if (!preflight.market_open) {
         setCommandFromPreflight(preflight);
+        commandPhase.value = "start_command";
+        const response = await apiClient.startRobot({
+          requested_instruments: CORE_UNIVERSE,
+          preflight_result: preflight,
+        });
+        setCommandFromResponse(response);
+        void pollDataShadowStatusUntilSettled();
         return;
       }
       commandPhase.value = "start_command";
       setCommandState({
         status: "start_requesting",
-        message: "Запускаем data-only сбор. Торговля отключена, заявки не выставляются.",
+        message: "Отправляю команду запуска data-only сбора. Торговля отключена, заявки не выставляются.",
         reasonCode: "data_only_start_requested",
       });
-      const response = await apiClient.startRobot({ preflight_result: preflight });
+      const response = await apiClient.startRobot({
+        requested_instruments: CORE_UNIVERSE,
+        preflight_result: preflight,
+      });
       setCommandFromResponse(response);
+      void pollDataShadowStatusUntilSettled();
     } catch (unknownError) {
       setCommandState({
         status: "preflight_failed",
@@ -219,7 +272,7 @@ export const useRobotStore = defineStore("robot", () => {
     } finally {
       startLoading.value = false;
       commandPhase.value = null;
-      await fetchInitialSnapshot();
+      void fetchInitialSnapshot();
     }
   }
 
@@ -228,15 +281,16 @@ export const useRobotStore = defineStore("robot", () => {
     commandPhase.value = "stop_command";
     setCommandState({
       status: "stop_requesting",
-      message: "Остановка запрашивается...",
+      message: "Отправляю controlled stop. Реальные заявки не трогаю.",
       reasonCode: "controlled_stop_requested",
     });
     try {
       const response = await apiClient.stopRobot();
       setCommandFromResponse({
         ...response,
-        message: response.message || "Остановка запрошена",
+        message: response.message || "Остановка запрошена. Жду подтверждение runtime.",
       });
+      void pollDataShadowStatusUntilSettled();
     } catch (unknownError) {
       setCommandState({
         status: "stop_failed",
@@ -246,11 +300,14 @@ export const useRobotStore = defineStore("robot", () => {
     } finally {
       stopLoading.value = false;
       commandPhase.value = null;
-      await fetchInitialSnapshot();
+      void fetchInitialSnapshot();
     }
   }
 
   async function refreshBalance(options: { silent?: boolean } = {}): Promise<void> {
+    if (balanceRefreshLoading.value) {
+      return;
+    }
     balanceRefreshLoading.value = true;
     try {
       const summary = await apiClient.refreshPortfolio();
@@ -261,7 +318,7 @@ export const useRobotStore = defineStore("robot", () => {
             ? "balance_refresh_degraded"
             : "balance_refresh_completed",
           message: summary.balance.balance_degraded
-            ? `Баланс недоступен: ${summary.balance.balance_degraded_reason_code ?? "broker_balance_unavailable"}`
+            ? `Баланс не получен: ${summary.balance.balance_degraded_reason_code ?? "broker_balance_unavailable"}`
             : "Баланс обновлен",
           reasonCode: summary.balance.balance_degraded
             ? summary.balance.balance_degraded_reason_code
@@ -328,7 +385,7 @@ export const useRobotStore = defineStore("robot", () => {
     const preflight = response.preflight_result as Partial<SessionPreflightResponse> | null;
     setCommandState({
       status: response.status,
-      message: response.message || (response.accepted ? "Команда принята" : "Команда отклонена"),
+      message: commandMessageFromResponse(response),
       reasonCode: response.reason_code,
       nextSessionAt: preflight?.next_session_at ?? null,
     });
@@ -349,6 +406,36 @@ export const useRobotStore = defineStore("robot", () => {
 
   function errorMessage(value: unknown): string {
     return value instanceof Error ? value.message : String(value);
+  }
+
+  function commandMessageFromResponse(response: RobotCommandResponse): string {
+    if (!response.accepted) {
+      return response.message || "Команда отклонена preflight.";
+    }
+    if (response.command === "start" && response.status === "requested") {
+      return "Команда старт отправлена в trade-core. Смотрите статус collector: live samples должны начать расти, когда runtime обработает команду.";
+    }
+    if (response.command === "stop" && response.status === "requested") {
+      return "Команда stop отправлена в trade-core. Collector должен перейти в остановку после обработки runtime.";
+    }
+    return response.message || "Команда принята.";
+  }
+
+  async function pollDataShadowStatusUntilSettled(): Promise<void> {
+    const market = useMarketStore();
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      await market.fetchDataShadowStatus();
+      const state = market.dataShadowStatus.collector_state;
+      if (
+        state === "collecting" ||
+        state === "stopped_by_operator" ||
+        state === "preflight_blocked" ||
+        state === "degraded"
+      ) {
+        return;
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 1500));
+    }
   }
 
   return {

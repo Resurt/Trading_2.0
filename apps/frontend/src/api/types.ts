@@ -131,18 +131,37 @@ export interface SignalResponse {
 
 export interface MarketInstrumentOverview {
   instrument_id: string;
+  ticker: string | null;
   last_price: string | null;
   last_price_at: string | null;
+  last_price_ts: string | null;
   last_price_source: string | null;
+  is_price_stale: boolean;
+  price_staleness_seconds: number | null;
+  previous_close: string | null;
+  change_abs: string | null;
+  change_bps: string | null;
+  session_type: string | null;
+  broker_trading_status: string | null;
+  api_trade_available: boolean | null;
   quote_status: string;
   last_candle_timeframe: string | null;
   spread: string | null;
+  spread_abs: string | null;
+  spread_bps: string | null;
   mid_price: string | null;
   market_quality: string | null;
   best_bid: string | null;
   best_ask: string | null;
+  bid_depth_lots: string | null;
+  ask_depth_lots: string | null;
+  book_imbalance: string | null;
+  order_book_source: string | null;
+  order_book_ts: string | null;
+  order_book_stale: boolean;
   recent_market_trades: JsonPayload[];
   order_book_summary: JsonPayload;
+  quote_payload: JsonPayload;
 }
 
 export interface MarketOverviewResponse {
@@ -193,8 +212,13 @@ export interface MarketMicrostructureSummaryResponse {
 
 export interface DataShadowStatusResponse {
   enabled: boolean;
+  collector_state: string;
   strategy_trading_disabled: boolean;
   real_orders_disabled: boolean;
+  market_open: boolean | null;
+  market_closed_expected: boolean | null;
+  reason_code: string | null;
+  next_session_at: string | null;
   stream_alive: boolean;
   last_message_age_seconds: string | null;
   candles_received: number | null;
@@ -204,6 +228,14 @@ export interface DataShadowStatusResponse {
   p95_spread_bps: string | null;
   avg_market_quality_score: string | null;
   current_session: string | null;
+  started_at: string | null;
+  stopped_at: string | null;
+  last_command_id: string | null;
+  last_command_status: string | null;
+  last_command_reason_code: string | null;
+  instruments: string[];
+  stream_batches: JsonPayload[];
+  warnings: string[];
   warning: string | null;
 }
 
@@ -757,7 +789,10 @@ export interface DashboardSnapshotPayload {
     signals?: SignalResponse[];
     blockers?: BlockerAnalyticsResponse;
     candidate_funnel?: CandidateFunnelResponse;
+    session_preflight?: SessionPreflightResponse;
+    session_preflight_error?: string;
   };
+  sequence?: number;
 }
 
 export interface ReportsSnapshotPayload {

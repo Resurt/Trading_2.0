@@ -14,7 +14,6 @@ from trade_core.broker_gateway import (
     BrokerGateway,
     DividendsRequest,
     InstrumentRef,
-    TradingSchedulesRequest,
 )
 from trade_core.corporate_actions.service import (
     CorporateActionEvent,
@@ -420,48 +419,11 @@ class DividendSyncService:
             return explicit_ex_date, {"source": "broker_explicit_ex_date"}
         if last_buy_date is None:
             return None, {"source": "missing", "warning": "missing_last_buy_date"}
-        scheduled = await self._next_trading_day_from_schedule(last_buy_date, config=config)
-        if scheduled is not None:
-            return scheduled, {"source": "trading_schedules_after_last_buy_date"}
         fallback = _next_weekday(last_buy_date)
         return fallback, {
             "source": "fallback_next_weekday",
-            "warning": "trading_schedules_unavailable_for_ex_date_inference",
+            "warning": "trading_schedules_disabled_for_ex_date_inference",
         }
-
-    async def _next_trading_day_from_schedule(
-        self,
-        last_buy_date: date,
-        *,
-        config: DividendSyncConfig,
-    ) -> date | None:
-        try:
-            response = await self._gateway.trading_schedules(
-                TradingSchedulesRequest(
-                    exchange=config.exchange,
-                    from_=datetime.combine(last_buy_date, time.min, tzinfo=UTC),
-                    to=datetime.combine(last_buy_date + timedelta(days=10), time.max, tzinfo=UTC),
-                )
-            )
-        except Exception:
-            return None
-        windows = response.data.get("windows")
-        if not isinstance(windows, list):
-            return None
-        dates: set[date] = set()
-        for item in windows:
-            if not isinstance(item, dict):
-                continue
-            raw = item.get("trading_date")
-            if raw is None:
-                continue
-            try:
-                value = date.fromisoformat(str(raw))
-            except ValueError:
-                continue
-            if value > last_buy_date:
-                dates.add(value)
-        return min(dates) if dates else None
 
     async def _resolve_instruments(
         self,

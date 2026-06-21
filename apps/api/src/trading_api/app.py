@@ -6,6 +6,7 @@ import asyncio
 import os
 from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from typing import Annotated, Any, cast
 from uuid import UUID, uuid4
 
@@ -191,14 +192,22 @@ def create_fastapi_app(
     ) -> RobotCommandResponse:
         allowed_auth = require_role(auth, (ApiRole.OPERATOR, ApiRole.ADMIN))
         control = _robot_control(request)
-        instruments = _default_preflight_instruments()
-        preflight = await _run_session_preflight(request, instruments=instruments)
+        requested_instruments = _requested_instruments_csv(
+            dict(payload or {}).get("requested_instruments")
+        )
+        preflight = await _run_session_preflight(request, instruments=requested_instruments)
         preflight_payload = preflight.model_dump(mode="json")
         command_payload: dict[str, object] = {
             **dict(payload or {}),
             "preflight_result": preflight_payload,
             "mode": "data_shadow",
             "trading_disabled": True,
+            "data_only_shadow": True,
+            "requested_instruments": [
+                item.strip()
+                for item in requested_instruments.split(",")
+                if item.strip()
+            ],
         }
         if not preflight.market_open:
             return control.reject(
@@ -206,22 +215,35 @@ def create_fastapi_app(
                 auth=allowed_auth,
                 reason_code=preflight.reason_code,
                 message=(
-                    "Start rejected by session preflight: "
-                    f"{preflight.reason_code}. Trading remains disabled."
+                    "Рынок закрыт. Data-only сбор не запущен. "
+                    f"Причина: {preflight.reason_code}."
                 ),
                 payload=command_payload,
             )
-        return control.request(
+        response = control.request(
             command=RobotCommand.START,
             auth=allowed_auth,
             payload=command_payload,
         )
+        response.message = "Data-only collection start requested. Trading disabled."
+        return response
 
     @app.post("/robot/stop", response_model=RobotCommandResponse, tags=["robot"])
     def robot_stop(request: Request, auth: AuthDep) -> RobotCommandResponse:
         allowed_auth = require_role(auth, (ApiRole.OPERATOR, ApiRole.ADMIN))
         control = _robot_control(request)
-        return control.stop(auth=allowed_auth)
+        response = control.request(
+            command=RobotCommand.STOP,
+            auth=allowed_auth,
+            payload={
+                "mode": "data_shadow",
+                "trading_disabled": True,
+                "data_only_shadow": True,
+                "reason_code": "operator_stop_requested",
+            },
+        )
+        response.message = "Data-only collection stop requested. Trading disabled."
+        return response
 
     @app.post("/robot/pause", response_model=RobotCommandResponse, tags=["robot"])
     def robot_pause(request: Request, auth: AuthDep) -> RobotCommandResponse:
@@ -245,6 +267,20 @@ def create_fastapi_app(
     ) -> RobotStatusResponse:
         return service.robot_status(robot_control_state=_robot_control(request).current_state())
 
+    @app.get("/dashboard/state", tags=["dashboard"])
+    async def dashboard_state(request: Request, auth: AuthDep) -> dict[str, object]:
+        require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
+        payload = _dashboard_payload(cast(FastAPI, request.app))
+        try:
+            preflight = await _run_dashboard_session_preflight()
+            payload["session_preflight"] = preflight.model_dump(mode="json")
+        except Exception as exc:
+            payload["session_preflight_error"] = _reason_from_exception(
+                exc,
+                default="session_preflight_unavailable",
+            )
+        return {"data": jsonable_encoder(payload), "sequence": 0}
+
     @app.get("/session/current", response_model=SessionSnapshotResponse, tags=["session"])
     def current_session(service: ReadServiceDep) -> SessionSnapshotResponse:
         return service.current_session()
@@ -255,9 +291,12 @@ def create_fastapi_app(
         auth: AuthDep,
         instruments: Annotated[str | None, Query()] = None,
         mode: Annotated[str, Query()] = "data_shadow",
+        broker_checks: Annotated[bool, Query()] = True,
     ) -> SessionPreflightResponse:
         del mode
         require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
+        if not broker_checks:
+            return await _run_dashboard_session_preflight()
         return await _run_session_preflight(request, instruments=instruments)
 
     @app.get("/positions", response_model=list[PositionResponse], tags=["portfolio"])
@@ -303,8 +342,27 @@ def create_fastapi_app(
         return service.current_signals()
 
     @app.get("/market/overview", response_model=MarketOverviewResponse, tags=["market"])
-    def market_overview(service: ReadServiceDep) -> MarketOverviewResponse:
+    def market_overview(
+        service: ReadServiceDep,
+        refresh: Annotated[bool, Query()] = True,
+        instruments: Annotated[str | None, Query()] = None,
+    ) -> MarketOverviewResponse:
+        del refresh, instruments
         return service.market_overview()
+
+    @app.post("/market/quotes/refresh", response_model=MarketOverviewResponse, tags=["market"])
+    async def market_quotes_refresh(
+        request: Request,
+        auth: AuthDep,
+        service: ReadServiceDep,
+        instruments: Annotated[str | None, Query()] = None,
+    ) -> MarketOverviewResponse:
+        require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
+        return await _market_overview_with_broker_quotes(
+            request,
+            overview=service.market_overview(),
+            instruments=instruments or _default_preflight_instruments(),
+        )
 
     @app.get(
         "/market/microstructure/latest",
@@ -1505,6 +1563,26 @@ async def _run_session_preflight(
     return SessionPreflightResponse(**payload)
 
 
+async def _run_dashboard_session_preflight() -> SessionPreflightResponse:
+    from trade_core.broker_gateway import BrokerGateway
+    from trade_core.session.preflight import (
+        TradingSessionPreflightConfig,
+        TradingSessionPreflightService,
+    )
+
+    result = await TradingSessionPreflightService(
+        cast(BrokerGateway, _UnavailableReadonlyBrokerGateway())
+    ).run(TradingSessionPreflightConfig(instruments=()))
+    payload = result.as_payload()
+    payload["source"] = "dashboard_fallback_calendar"
+    warnings = payload.get("warnings")
+    payload["warnings"] = [
+        *(warnings if isinstance(warnings, list) else []),
+        "dashboard_calendar_only_no_broker_calls",
+    ]
+    return SessionPreflightResponse(**payload)
+
+
 async def _run_broker_balance_refresh(
     request: Request,
     *,
@@ -1513,9 +1591,7 @@ async def _run_broker_balance_refresh(
     from trade_core.portfolio import BrokerBalanceRefreshResult, BrokerBalanceRefreshService
 
     try:
-        from trade_core.infra.tbank import TBankBrokerGateway
-
-        gateway = TBankBrokerGateway()
+        gateway = _readonly_tbank_gateway()
     except Exception as exc:
         return BrokerBalanceRefreshResult(
             balance_refreshed=False,
@@ -1556,11 +1632,242 @@ async def _run_broker_balance_refresh(
             )
 
 
+async def _market_overview_with_broker_quotes(
+    request: Request,
+    *,
+    overview: MarketOverviewResponse,
+    instruments: str,
+) -> MarketOverviewResponse:
+    from trade_core.broker_gateway import LastPricesRequest
+
+    refs = [
+        ref
+        for ref in _instrument_refs_for_preflight(_database_service(request), instruments)
+        if getattr(ref, "instrument_uid", None) or getattr(ref, "figi", None)
+    ]
+    if not refs:
+        return overview
+    try:
+        gateway = _readonly_tbank_gateway()
+        timeout_seconds = float(os.environ.get("MARKET_LAST_PRICES_REFRESH_TIMEOUT_SECONDS", "3"))
+        last_prices_response = await asyncio.wait_for(
+            gateway.get_last_prices(LastPricesRequest(instruments=tuple(refs))),
+            timeout=timeout_seconds,
+        )
+    except Exception:
+        last_prices_response = None
+
+    ref_by_broker_id: dict[str, str] = {}
+    for ref in refs:
+        instrument_id = str(getattr(ref, "instrument_id", "") or "")
+        for key in (getattr(ref, "instrument_uid", None), getattr(ref, "figi", None)):
+            if key:
+                ref_by_broker_id[str(key)] = instrument_id
+
+    prices_by_instrument: dict[str, dict[str, object]] = {}
+    if last_prices_response is not None:
+        raw_prices = last_prices_response.data.get("prices")
+        if isinstance(raw_prices, list):
+            for item in raw_prices:
+                if not isinstance(item, dict):
+                    continue
+                broker_key = str(
+                    item.get("instrument_uid")
+                    or item.get("figi")
+                    or item.get("instrument_id")
+                    or ""
+                )
+                target_instrument_id = ref_by_broker_id.get(broker_key)
+                if not target_instrument_id:
+                    continue
+                prices_by_instrument[target_instrument_id] = item
+
+    order_books_by_instrument = await _broker_order_books_by_instrument(
+        gateway=gateway,
+        refs=refs,
+    )
+
+    refreshed = []
+    for instrument in overview.instruments:
+        order_book_payload = order_books_by_instrument.get(instrument.instrument_id)
+        if order_book_payload is not None:
+            refreshed.append(
+                instrument.model_copy(
+                    update={
+                        **order_book_payload,
+                    }
+                )
+            )
+            continue
+        price_payload = prices_by_instrument.get(instrument.instrument_id)
+        if price_payload is None:
+            refreshed.append(instrument)
+            continue
+        price = _decimal_or_none(price_payload.get("price"))
+        if price is None:
+            refreshed.append(instrument)
+            continue
+        exchange_ts = _datetime_or_none(price_payload.get("exchange_ts"))
+        refreshed.append(
+            instrument.model_copy(
+                update={
+                    "last_price": price,
+                    "last_price_at": exchange_ts or datetime.now(tz=UTC),
+                    "last_price_ts": exchange_ts or datetime.now(tz=UTC),
+                    "last_price_source": "tbank_last_price",
+                    "is_price_stale": False,
+                    "price_staleness_seconds": 0,
+                    "quote_status": "live",
+                }
+            )
+        )
+    return MarketOverviewResponse(generated_at=datetime.now(tz=UTC), instruments=refreshed)
+
+
+async def _broker_order_books_by_instrument(
+    *,
+    gateway: Any,
+    refs: list[Any],
+) -> dict[str, dict[str, object]]:
+    from trade_core.broker_gateway import OrderBookRequest
+
+    timeout_seconds = float(os.environ.get("MARKET_ORDER_BOOK_REFRESH_TIMEOUT_SECONDS", "2.5"))
+
+    async def fetch(ref: Any) -> tuple[str, dict[str, object] | None]:
+        instrument_id = str(getattr(ref, "instrument_id", "") or "")
+        try:
+            response = await asyncio.wait_for(
+                gateway.get_order_book(OrderBookRequest(instrument=ref, depth=10)),
+                timeout=timeout_seconds,
+            )
+        except Exception:
+            return instrument_id, None
+        return instrument_id, _order_book_overview_payload(response.data)
+
+    results = await asyncio.gather(*(fetch(ref) for ref in refs))
+    return {
+        instrument_id: payload
+        for instrument_id, payload in results
+        if instrument_id and payload is not None
+    }
+
+
+def _order_book_overview_payload(payload: dict[str, object]) -> dict[str, object] | None:
+    bids = _price_levels(payload.get("bids"), reverse=True)
+    asks = _price_levels(payload.get("asks"), reverse=False)
+    if not bids or not asks:
+        return None
+    now = datetime.now(tz=UTC)
+    exchange_ts = _datetime_or_none(payload.get("exchange_ts")) or now
+    best_bid_price, best_bid_qty = bids[0]
+    best_ask_price, best_ask_qty = asks[0]
+    bid_depth = sum((qty for _, qty in bids[:5]), Decimal("0"))
+    ask_depth = sum((qty for _, qty in asks[:5]), Decimal("0"))
+    mid_price = (best_bid_price + best_ask_price) / Decimal("2")
+    spread_abs = best_ask_price - best_bid_price
+    spread_bps = (spread_abs / mid_price * Decimal("10000")) if mid_price > 0 else None
+    depth_total = bid_depth + ask_depth
+    imbalance = None if depth_total == 0 else (bid_depth - ask_depth) / depth_total
+    age_seconds = max(0.0, (now - exchange_ts.astimezone(UTC)).total_seconds())
+    quality = _book_quality_score(
+        spread_bps=spread_bps,
+        imbalance=imbalance,
+        age_seconds=age_seconds,
+    )
+    return {
+        "last_price": mid_price,
+        "last_price_at": exchange_ts,
+        "last_price_ts": exchange_ts,
+        "last_price_source": "live_order_book_mid",
+        "is_price_stale": age_seconds > 30,
+        "price_staleness_seconds": int(age_seconds),
+        "quote_status": "stale" if age_seconds > 30 else "live",
+        "spread": spread_abs,
+        "spread_abs": spread_abs,
+        "spread_bps": spread_bps,
+        "mid_price": mid_price,
+        "market_quality": quality,
+        "best_bid": best_bid_price,
+        "best_ask": best_ask_price,
+        "bid_depth_lots": bid_depth,
+        "ask_depth_lots": ask_depth,
+        "book_imbalance": imbalance,
+        "order_book_source": "tbank_order_book",
+        "order_book_ts": exchange_ts,
+        "order_book_stale": age_seconds > 30,
+        "order_book_summary": {
+            "source": "tbank_order_book",
+            "depth_levels": len(bids) + len(asks),
+            "best_bid_qty_lots": str(best_bid_qty),
+            "best_ask_qty_lots": str(best_ask_qty),
+            "bid_depth_lots": str(bid_depth),
+            "ask_depth_lots": str(ask_depth),
+            "book_imbalance": str(imbalance) if imbalance is not None else None,
+            "spread_bps": str(spread_bps) if spread_bps is not None else None,
+            "exchange_ts": exchange_ts.isoformat(),
+            "received_ts": now.isoformat(),
+            "age_seconds": round(age_seconds, 3),
+            "is_stale": age_seconds > 30,
+        },
+        "quote_payload": {
+            "source": "tbank_order_book",
+            "price_staleness_seconds": int(age_seconds),
+            "order_book_stale": age_seconds > 30,
+        },
+    }
+
+
+def _price_levels(value: object, *, reverse: bool) -> list[tuple[Decimal, Decimal]]:
+    if not isinstance(value, list):
+        return []
+    levels: list[tuple[Decimal, Decimal]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        price = _decimal_or_none(item.get("price"))
+        qty = _decimal_or_none(item.get("quantity_lots") or item.get("quantity"))
+        if price is None or qty is None:
+            continue
+        levels.append((price, qty))
+    return sorted(levels, key=lambda item: item[0], reverse=reverse)
+
+
+def _book_quality_score(
+    *,
+    spread_bps: Decimal | None,
+    imbalance: Decimal | None,
+    age_seconds: float,
+) -> Decimal | None:
+    if spread_bps is None:
+        return None
+    spread_penalty = min(spread_bps / Decimal("100"), Decimal("0.70"))
+    imbalance_penalty = (
+        min(abs(imbalance) * Decimal("0.20"), Decimal("0.20"))
+        if imbalance is not None
+        else Decimal("0")
+    )
+    freshness_penalty = Decimal("0.25") if age_seconds > 30 else Decimal("0")
+    score = Decimal("1") - spread_penalty - imbalance_penalty - freshness_penalty
+    return max(Decimal("0"), min(Decimal("1"), score)).quantize(Decimal("0.0001"))
+
+
+def _readonly_tbank_gateway() -> Any:
+    from trade_core.infra.tbank import TBankBrokerConfig, TBankBrokerGateway, TBankEnvironment
+
+    raw_environment = os.environ.get(
+        "TBANK_READONLY_ENVIRONMENT",
+        os.environ.get("TBANK_ENVIRONMENT", TBankEnvironment.LIVE.value),
+    )
+    config = TBankBrokerConfig.from_env().with_environment(TBankEnvironment(raw_environment))
+    try:
+        return TBankBrokerGateway(config=config)
+    except TypeError:
+        return TBankBrokerGateway()
+
+
 def _preflight_broker_gateway() -> Any:
     try:
-        from trade_core.infra.tbank import TBankBrokerGateway
-
-        return TBankBrokerGateway()
+        return _readonly_tbank_gateway()
     except Exception:
         return _UnavailableReadonlyBrokerGateway()
 
@@ -1632,6 +1939,15 @@ def _default_preflight_instruments() -> str:
     return os.getenv("TRADING_INSTRUMENTS", "SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR")
 
 
+def _requested_instruments_csv(value: object) -> str:
+    if isinstance(value, (list, tuple)):
+        instruments = [str(item).strip() for item in value if str(item).strip()]
+        return ",".join(instruments) if instruments else _default_preflight_instruments()
+    if isinstance(value, str) and value.strip():
+        return value
+    return _default_preflight_instruments()
+
+
 def _mask_account_id(account_id: str | None) -> str | None:
     if not account_id:
         return None
@@ -1645,6 +1961,27 @@ def _reason_from_exception(exc: Exception, *, default: str) -> str:
     if text and " " not in text and len(text) <= 96:
         return text
     return default
+
+
+def _decimal_or_none(value: object) -> Decimal | None:
+    if value is None:
+        return None
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return None
+
+
+def _datetime_or_none(value: object) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _read_service(request: Request) -> Iterator[BffReadService]:
@@ -1864,8 +2201,6 @@ def _dashboard_payload(app: FastAPI) -> dict[str, object]:
             "open_orders": service.open_orders(),
             "positions": service.positions(),
             "signals": service.current_signals(),
-            "blockers": service.blocker_analytics(limit=5),
-            "candidate_funnel": service.candidate_funnel(),
         }
 
 

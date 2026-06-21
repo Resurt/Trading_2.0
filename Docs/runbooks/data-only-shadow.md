@@ -163,17 +163,20 @@ The dashboard Start button is not a blind start command. It first calls:
 GET /session/preflight?instruments=SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR&mode=data_shadow
 ```
 
-If `market_open=false`, the UI shows `blocked_by_preflight`, the `reason_code` and
-`next_session_at` when available. It does not submit Start automatically. Direct
-API calls to `POST /robot/start` are also guarded and return a rejected
-`RobotCommandResponse` instead of starting streams.
+If `market_open=false`, the UI shows `blocked_by_preflight`/`rejected`, the
+`reason_code` and `next_session_at` when available. The frontend still calls
+`POST /robot/start` once after preflight so the API can persist a rejected
+`robot_command` and audit event for traceability. The API returns HTTP 200 with
+`accepted=false`; trade-core does not start streams.
 
 The Start button must show an animated progress state while preflight/start is in
 flight. A disabled button without command feedback is a UI bug. The command strip
 must show the current phase, operator message, reason code and next session time when
 available.
 
-Stop remains a controlled operator command and shows its result in the command status strip.
+Stop remains a controlled operator command. In data-only mode it stops/cancels market
+stream tasks, moves collector state to `stopped_by_operator`, and shows the result in
+the command status strip.
 
 ## Broker balance visibility
 
@@ -189,11 +192,20 @@ only. It writes masked `broker_balance` payloads for `/portfolio/summary` and
 the card with `balance_degraded=true` and `balance_degraded_reason_code`.
 
 The dashboard auto-refreshes balance through readonly `POST /portfolio/refresh` while
-open. The manual CLI remains useful for morning preflight and troubleshooting.
+open. The API container needs the readonly T-Bank token mounted for this path. If
+`GetAccounts` is empty/unavailable but `TRADING_ACCOUNT_ID` is configured, the refresh
+may still call readonly `get_portfolio`/`get_positions` for that account and only expose
+the masked account id. The manual CLI remains useful for morning preflight and troubleshooting.
 
 ## Dashboard quotes
 
 The Live Dashboard must show the core universe prices even when live collection is not
-running. `/market/overview` uses live order-book mid price when available and falls
-back to the latest stored `1m` candle close when the market is closed or order book
-samples have not been collected yet.
+running. `GET /market/overview` is a fast local read-model endpoint and must return one
+row per core universe instrument without calling the broker. It uses fresh
+`order_book_summary` mid when available, then stored `market_candle`/previous-close
+fallbacks, and exposes `last_price_source`, `quote_status`, `is_price_stale` and
+timestamp.
+
+Readonly broker quote refresh is explicit: `POST /market/quotes/refresh` may call
+T-Invest `GetLastPrices`/`GetOrderBook` with bounded timeouts. Temporary request
+failures must not clear already displayed frontend quotes.

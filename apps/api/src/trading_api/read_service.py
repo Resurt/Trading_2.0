@@ -62,6 +62,7 @@ from trading_common.db.models import (
     OrderBookSummary,
     OrderIntent,
     PositionSnapshot,
+    RobotCommand,
     RollingPerformanceCube,
     SessionRun,
     SignalCandidate,
@@ -227,6 +228,7 @@ class BffReadService:
                 select(BrokerOrder)
                 .where(
                     BrokerOrder.broker_status.not_in(TERMINAL_ORDER_STATUSES),
+                    BrokerOrder.broker_status.not_like("pseudo%"),
                     BrokerOrder.last_observed_at >= since,
                 )
                 .order_by(BrokerOrder.last_observed_at.desc())
@@ -274,32 +276,89 @@ class BffReadService:
 
     def market_overview(self) -> MarketOverviewResponse:
         instruments = _dashboard_universe_from_env()
+        current_session = self.current_session()
         overviews = [
             MarketInstrumentOverview(
-                **self._market_instrument_payload(instrument_id)
+                **self._market_instrument_payload(
+                    instrument_id,
+                    current_session=current_session,
+                )
             )
             for instrument_id in instruments
         ]
         return MarketOverviewResponse(generated_at=datetime.now(tz=UTC), instruments=overviews)
 
-    def _market_instrument_payload(self, instrument_id: str) -> JsonPayload:
+    def _market_instrument_payload(
+        self,
+        instrument_id: str,
+        *,
+        current_session: SessionSnapshotResponse,
+    ) -> JsonPayload:
+        now = datetime.now(tz=UTC)
+        registry = self._instrument_registry_row(instrument_id)
         summary = self._latest_order_book_summary(instrument_id)
         candle = self._latest_market_candle(instrument_id)
-        last_price = summary.mid_price if summary and summary.mid_price is not None else None
-        last_price_at = summary.ts_utc if last_price is not None and summary is not None else None
-        last_price_source = "live_order_book" if last_price is not None else None
-        quote_status = "live" if last_price is not None else "unavailable"
-        if last_price is None and candle is not None:
-            last_price = candle.close_price
-            last_price_at = candle.close_ts_utc
-            last_price_source = "last_candle"
-            quote_status = "last_close"
+        previous_close = self._previous_close(instrument_id, current_session.trading_date)
+        price_candidates: list[tuple[datetime, Decimal, str]] = []
+        order_book_stale = True
+        order_book_age = None
+        if summary is not None:
+            order_book_age = _age_seconds(summary.ts_utc, now=now)
+            order_book_stale = order_book_age is None or order_book_age > 30
+            if summary.mid_price is not None:
+                price_candidates.append(
+                    (summary.ts_utc, summary.mid_price, "live_order_book_mid")
+                )
+        if candle is not None:
+            price_candidates.append(
+                (candle.close_ts_utc, candle.close_price, "latest_market_candle_close")
+            )
+        if not price_candidates and previous_close is not None:
+            price_candidates.append((now, previous_close, "previous_close"))
+
+        last_price_at: datetime | None = None
+        last_price: Decimal | None = None
+        last_price_source: str | None = None
+        if price_candidates:
+            last_price_at, last_price, last_price_source = max(
+                price_candidates,
+                key=lambda item: item[0],
+            )
+        price_staleness_seconds = _age_seconds(last_price_at, now=now)
+        is_price_stale = (
+            True
+            if last_price_at is None
+            else _is_price_stale(
+                source=last_price_source,
+                timestamp=last_price_at,
+                current_session=current_session,
+                now=now,
+            )
+        )
+        quote_status = _quote_status(
+            source=last_price_source,
+            is_stale=is_price_stale,
+            has_price=last_price is not None,
+        )
+        change_abs = (
+            last_price - previous_close
+            if last_price is not None and previous_close is not None
+            else None
+        )
+        change_bps: Decimal | None = None
+        if (
+            change_abs is not None
+            and previous_close is not None
+            and previous_close != Decimal("0")
+        ):
+            change_bps = change_abs / previous_close * Decimal("10000")
 
         order_book_summary: JsonPayload = {}
         recent_market_trades: list[JsonPayload] = []
         if summary is not None:
             recent_market_trades = _payload_list(summary.summary_payload, "recent_market_trades")
             order_book_summary = {
+                "source": "live_order_book",
                 "depth_levels": summary.depth_levels,
                 "best_bid_qty_lots": _optional_str(summary.best_bid_qty_lots),
                 "best_ask_qty_lots": _optional_str(summary.best_ask_qty_lots),
@@ -308,9 +367,15 @@ class BffReadService:
                 "book_imbalance": _optional_str(summary.book_imbalance),
                 "spread_bps": _optional_str(summary.spread_bps),
                 "ts_utc": summary.ts_utc.isoformat(),
+                "exchange_ts": summary.exchange_ts.isoformat()
+                if summary.exchange_ts is not None
+                else summary.ts_utc.isoformat(),
+                "age_seconds": order_book_age,
+                "is_stale": order_book_stale,
             }
         elif candle is not None:
             order_book_summary = {
+                "source": "latest_market_candle_close",
                 "last_candle_open": str(candle.open_price),
                 "last_candle_high": str(candle.high_price),
                 "last_candle_low": str(candle.low_price),
@@ -321,19 +386,58 @@ class BffReadService:
 
         return {
             "instrument_id": instrument_id,
+            "ticker": (
+                registry.ticker
+                if registry is not None
+                else _ticker_from_instrument_id(instrument_id)
+            ),
             "last_price": last_price,
             "last_price_at": last_price_at,
+            "last_price_ts": last_price_at,
             "last_price_source": last_price_source,
+            "is_price_stale": is_price_stale,
+            "price_staleness_seconds": price_staleness_seconds,
+            "previous_close": previous_close,
+            "change_abs": change_abs,
+            "change_bps": change_bps,
+            "session_type": current_session.session_type,
+            "broker_trading_status": current_session.broker_trading_status,
+            "api_trade_available": current_session.session_phase == "continuous_trading",
             "quote_status": quote_status,
             "last_candle_timeframe": candle.timeframe if candle is not None else None,
             "spread": summary.spread_abs if summary is not None else None,
+            "spread_abs": summary.spread_abs if summary is not None else None,
+            "spread_bps": summary.spread_bps if summary is not None else None,
             "mid_price": summary.mid_price if summary is not None else None,
             "market_quality": summary.market_quality_score if summary is not None else None,
             "best_bid": summary.best_bid_price if summary is not None else None,
             "best_ask": summary.best_ask_price if summary is not None else None,
+            "bid_depth_lots": summary.bid_depth_lots if summary is not None else None,
+            "ask_depth_lots": summary.ask_depth_lots if summary is not None else None,
+            "book_imbalance": summary.book_imbalance if summary is not None else None,
+            "order_book_source": "live_order_book" if summary is not None else None,
+            "order_book_ts": summary.ts_utc if summary is not None else None,
+            "order_book_stale": order_book_stale,
             "recent_market_trades": recent_market_trades,
             "order_book_summary": order_book_summary,
+            "quote_payload": {
+                "source": last_price_source or "unavailable",
+                "reason_code": "no_price_source_available" if last_price is None else None,
+                "price_staleness_seconds": price_staleness_seconds,
+                "order_book_stale": order_book_stale,
+            },
         }
+
+    def _instrument_registry_row(self, instrument_id: str) -> InstrumentRegistry | None:
+        ticker = _ticker_from_instrument_id(instrument_id)
+        return self._session.execute(
+            select(InstrumentRegistry)
+            .where(
+                (InstrumentRegistry.instrument_id == instrument_id)
+                | (InstrumentRegistry.ticker == ticker)
+            )
+            .limit(1)
+        ).scalars().first()
 
     def _latest_order_book_summary(self, instrument_id: str) -> OrderBookSummary | None:
         return self._session.execute(
@@ -361,6 +465,15 @@ class BffReadService:
             .order_by(MarketCandle.open_ts_utc.desc())
             .limit(1)
         ).scalars().first()
+
+    def _previous_close(self, instrument_id: str, trading_date: date | None) -> Decimal | None:
+        stmt = select(MarketCandle).where(MarketCandle.instrument_id == instrument_id)
+        if trading_date is not None:
+            stmt = stmt.where(MarketCandle.trading_date < trading_date)
+        candle = self._session.execute(
+            stmt.order_by(MarketCandle.close_ts_utc.desc()).limit(1)
+        ).scalars().first()
+        return candle.close_price if candle is not None else None
 
     def latest_microstructure(
         self,
@@ -428,6 +541,10 @@ class BffReadService:
         summary = self.microstructure_summary(lookback_minutes=60)
         latest = self.latest_microstructure(limit=1)
         enabled = _bool_env(os.environ.get("TRADING_DATA_ONLY_SHADOW"))
+        command = self._latest_robot_command()
+        result_payload = command.result_payload if command is not None else {}
+        preflight_payload = _preflight_payload_from_command(command)
+        collector_state = _collector_state_from_command(command, stream_alive=False)
         last_message_age_seconds: Decimal | None = None
         if summary.latest_ts_utc is not None:
             age_seconds = max(
@@ -435,12 +552,30 @@ class BffReadService:
                 Decimal(str((datetime.now(tz=UTC) - summary.latest_ts_utc).total_seconds())),
             )
             last_message_age_seconds = age_seconds.quantize(Decimal("0.001"))
+        stream_alive = (
+            last_message_age_seconds is not None
+            and last_message_age_seconds <= Decimal("30")
+        )
+        collector_state = _collector_state_from_command(command, stream_alive=stream_alive)
+        warnings = []
+        if enabled and collector_state in {"collecting", "starting"} and not stream_alive:
+            warnings.append("collector_no_recent_samples")
+        if enabled and command is None:
+            warnings.append("collector_waiting_for_operator_start")
         return DataShadowStatusResponse(
             enabled=enabled,
+            collector_state=collector_state,
             strategy_trading_disabled=enabled,
             real_orders_disabled=True,
-            stream_alive=last_message_age_seconds is not None
-            and last_message_age_seconds <= Decimal("30"),
+            market_open=_bool_payload_value(preflight_payload, "market_open"),
+            market_closed_expected=_bool_payload_value(
+                preflight_payload,
+                "market_closed_expected",
+            ),
+            reason_code=_str_payload_value(preflight_payload, "reason_code")
+            or (command.reason_code if command is not None else None),
+            next_session_at=_next_session_from_preflight(preflight_payload),
+            stream_alive=stream_alive,
             last_message_age_seconds=last_message_age_seconds,
             candles_received=None,
             order_book_snapshots=summary.snapshots_count,
@@ -448,13 +583,28 @@ class BffReadService:
             avg_spread_bps=summary.avg_spread_bps,
             p95_spread_bps=summary.p95_spread_bps,
             avg_market_quality_score=summary.avg_market_quality_score,
-            current_session=latest[0].session_type if latest else None,
+            current_session=latest[0].session_type
+            if latest
+            else _str_payload_value(preflight_payload, "session_type"),
+            started_at=_datetime_payload_value(result_payload, "started_at"),
+            stopped_at=_datetime_payload_value(result_payload, "stopped_at"),
+            last_command_id=command.command_id if command is not None else None,
+            last_command_status=command.status if command is not None else None,
+            last_command_reason_code=command.reason_code if command is not None else None,
+            instruments=_dashboard_universe_from_env(),
+            stream_batches=_stream_batches_from_instruments(_dashboard_universe_from_env()),
+            warnings=warnings,
             warning=(
                 "Strategy trading disabled: data-only shadow mode"
                 if enabled
                 else "Data-only shadow mode is disabled"
             ),
         )
+
+    def _latest_robot_command(self) -> RobotCommand | None:
+        return self._session.execute(
+            select(RobotCommand).order_by(RobotCommand.requested_at.desc()).limit(1)
+        ).scalars().first()
 
     def hourly_reports(
         self,
@@ -1120,6 +1270,7 @@ class BffReadService:
             self._session.execute(
                 select(func.count(BrokerOrder.broker_order_id)).where(
                     BrokerOrder.broker_status.not_in(TERMINAL_ORDER_STATUSES),
+                    BrokerOrder.broker_status.not_like("pseudo%"),
                     BrokerOrder.last_observed_at >= since,
                 )
             ).scalar_one()
@@ -1622,6 +1773,116 @@ def _canonical_moex_instrument(instrument_id: str) -> str:
     if ":" in value:
         return value
     return f"MOEX:{value}"
+
+
+def _ticker_from_instrument_id(instrument_id: str) -> str:
+    value = instrument_id.strip()
+    return value.split(":", 1)[1] if ":" in value else value
+
+
+def _age_seconds(value: datetime | None, *, now: datetime) -> int | None:
+    if value is None:
+        return None
+    return max(0, int((now - value.astimezone(UTC)).total_seconds()))
+
+
+def _is_price_stale(
+    *,
+    source: str | None,
+    timestamp: datetime,
+    current_session: SessionSnapshotResponse,
+    now: datetime,
+) -> bool:
+    age = _age_seconds(timestamp, now=now)
+    if age is None:
+        return True
+    if source == "live_order_book_mid":
+        return age > 30
+    if source == "previous_close":
+        return True
+    if current_session.trading_date is not None and timestamp.date() < current_session.trading_date:
+        return True
+    if current_session.session_phase == "continuous_trading":
+        return age > 180
+    return age > 86_400
+
+
+def _quote_status(
+    *,
+    source: str | None,
+    is_stale: bool,
+    has_price: bool,
+) -> str:
+    if not has_price:
+        return "unavailable"
+    if source == "previous_close":
+        return "previous_close"
+    return "stale" if is_stale else "live"
+
+
+def _collector_state_from_command(command: RobotCommand | None, *, stream_alive: bool) -> str:
+    if command is None:
+        return "stopped"
+    payload = command.result_payload if isinstance(command.result_payload, dict) else {}
+    raw_state = payload.get("collector_state")
+    if isinstance(raw_state, str) and raw_state:
+        if raw_state == "collecting" and not stream_alive:
+            return "collecting"
+        return raw_state
+    if command.status == "rejected":
+        return "preflight_blocked"
+    if command.status in {"requested", "accepted"}:
+        if command.command_type in {"start", "resume"}:
+            return "starting"
+        if command.command_type in {"stop", "pause", "emergency_stop"}:
+            return "stopping"
+    if command.command_type in {"stop", "pause", "emergency_stop"} and command.status == "applied":
+        return "stopped_by_operator"
+    if command.command_type in {"start", "resume"} and command.status == "applied":
+        return "collecting" if stream_alive else "collecting"
+    if command.status == "failed":
+        return "degraded"
+    return "stopped"
+
+
+def _next_session_from_command(command: RobotCommand | None) -> datetime | None:
+    return _next_session_from_preflight(_preflight_payload_from_command(command))
+
+
+def _preflight_payload_from_command(command: RobotCommand | None) -> JsonPayload:
+    if command is None:
+        return {}
+    payload = command.payload if isinstance(command.payload, dict) else {}
+    preflight = payload.get("preflight_result")
+    return preflight if isinstance(preflight, dict) else {}
+
+
+def _next_session_from_preflight(preflight: JsonPayload) -> datetime | None:
+    return _coerce_datetime(preflight.get("next_session_at"))
+
+
+def _bool_payload_value(payload: JsonPayload, key: str) -> bool | None:
+    value = payload.get(key)
+    return value if isinstance(value, bool) else None
+
+
+def _str_payload_value(payload: JsonPayload, key: str) -> str | None:
+    value = payload.get(key)
+    return value if isinstance(value, str) else None
+
+
+def _datetime_payload_value(payload: JsonPayload, key: str) -> datetime | None:
+    return _coerce_datetime(payload.get(key))
+
+
+def _stream_batches_from_instruments(
+    instruments: list[str],
+    batch_size: int = 4,
+) -> list[JsonPayload]:
+    return [
+        {"batch": index // batch_size + 1, "instruments": instruments[index : index + batch_size]}
+        for index in range(0, len(instruments), batch_size)
+    ]
 
 
 def _money_balance_from_payload(

@@ -11,6 +11,7 @@ import type {
   CorporateActionResponse,
   CounterfactualResponse,
   DailyReportResponse,
+  DashboardSnapshotPayload,
   DataShadowStatusResponse,
   DividendSyncStatusResponse,
   DailyReportRunRequest,
@@ -44,24 +45,28 @@ import type {
   WebSocketTicketResponse,
 } from "./types";
 
-const DEFAULT_API_BASE_URL = "http://localhost:8000";
-const DEFAULT_WS_BASE_URL = "ws://localhost:8000";
+const DEFAULT_API_BASE_URL = "/api";
 const DEFAULT_RUNTIME_MODE = "historical_replay";
 const DEFAULT_API_AUTH_MODE = "dev";
 
-export const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? DEFAULT_API_BASE_URL;
-export const wsBaseUrl = import.meta.env.VITE_WS_BASE_URL ?? DEFAULT_WS_BASE_URL;
-export const runtimeMode =
-  import.meta.env.VITE_TRADING_RUNTIME_MODE ?? import.meta.env.VITE_RUNTIME_MODE ?? DEFAULT_RUNTIME_MODE;
+function defaultWsBaseUrl(): string {
+  if (typeof window === "undefined") {
+    return "ws://localhost:5173";
+  }
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${window.location.host}`;
+}
+
+function configuredValue(value: string | undefined): string | null {
+  return value && value.trim().length > 0 ? value.trim() : null;
+}
 
 type FrontendRuntimeConfig = {
   apiAuthMode?: string;
   apiBearerToken?: string;
   apiActor?: string;
-};
-
-type ApiRequestInit = RequestInit & {
-  timeoutMs?: number;
+  apiBaseUrl?: string;
+  wsBaseUrl?: string;
 };
 
 type GlobalWithRuntimeConfig = typeof globalThis & {
@@ -69,6 +74,21 @@ type GlobalWithRuntimeConfig = typeof globalThis & {
 };
 
 const runtimeConfig = (globalThis as GlobalWithRuntimeConfig).__TRADING_FRONTEND_CONFIG__ ?? {};
+
+export const apiBaseUrl =
+  configuredValue(runtimeConfig.apiBaseUrl) ??
+  configuredValue(import.meta.env.VITE_API_BASE_URL) ??
+  DEFAULT_API_BASE_URL;
+export const wsBaseUrl =
+  configuredValue(runtimeConfig.wsBaseUrl) ??
+  configuredValue(import.meta.env.VITE_WS_BASE_URL) ??
+  defaultWsBaseUrl();
+export const runtimeMode =
+  import.meta.env.VITE_TRADING_RUNTIME_MODE ?? import.meta.env.VITE_RUNTIME_MODE ?? DEFAULT_RUNTIME_MODE;
+
+type ApiRequestInit = RequestInit & {
+  timeoutMs?: number;
+};
 export const apiAuthMode =
   runtimeConfig.apiAuthMode ?? import.meta.env.VITE_API_AUTH_MODE ?? DEFAULT_API_AUTH_MODE;
 export const apiActor =
@@ -159,6 +179,8 @@ export const apiClient = {
   authStatus: () => requestJson<AuthStatusResponse>("/auth/status"),
   wsTicket: (role: ApiRole = "observer") =>
     requestJson<WebSocketTicketResponse>("/auth/ws-ticket", { method: "POST" }, role),
+  dashboardState: () =>
+    requestJson<DashboardSnapshotPayload>("/dashboard/state", { timeoutMs: 15000 }),
   robotStatus: () => requestJson<RobotStatusResponse>("/robot/status", { timeoutMs: 10000 }),
   currentSession: () =>
     requestJson<SessionSnapshotResponse>("/session/current", { timeoutMs: 8000 }),
@@ -166,6 +188,11 @@ export const apiClient = {
     requestJson<SessionPreflightResponse>(withQuery("/session/preflight", query), {
       timeoutMs: 12000,
     }),
+  sessionPreflightFast: (query: Record<string, QueryValue> = {}) =>
+    requestJson<SessionPreflightResponse>(
+      withQuery("/session/preflight", { ...query, broker_checks: false }),
+      { timeoutMs: 5000 },
+    ),
   positions: () => requestJson<PositionResponse[]>("/positions"),
   portfolioSummary: () =>
     requestJson<PortfolioSummaryResponse>("/portfolio/summary", { timeoutMs: 10000 }),
@@ -178,8 +205,16 @@ export const apiClient = {
   openOrders: () => requestJson<OrderResponse[]>("/orders/open"),
   currentSignals: () =>
     requestJson<SignalResponse[]>("/signals/current", { timeoutMs: 8000 }),
-  marketOverview: () =>
-    requestJson<MarketOverviewResponse>("/market/overview", { timeoutMs: 10000 }),
+  marketOverview: (query: Record<string, QueryValue> = {}) =>
+    requestJson<MarketOverviewResponse>(withQuery("/market/overview", query), {
+      timeoutMs: 10000,
+    }),
+  refreshMarketQuotes: (query: Record<string, QueryValue> = {}) =>
+    requestJson<MarketOverviewResponse>(
+      withQuery("/market/quotes/refresh", query),
+      { method: "POST", timeoutMs: 15000 },
+      "observer",
+    ),
   latestMicrostructure: (query: Record<string, QueryValue>) =>
     requestJson<MarketMicrostructureSnapshotResponse[]>(
       withQuery("/market/microstructure/latest", query),

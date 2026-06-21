@@ -208,11 +208,14 @@ UI должен определить tokens:
 
 Pinia stores:
 
-- `robot` - `/robot/status`, `/session/current`, `/session/preflight`, `/signals/current`,
-  `/portfolio/refresh`, `/ws/dashboard`, start/stop commands and last command result.
-- `market` - `/market/overview`, `/ws/market`, selected instrument и top-of-book read model.
-- `portfolio` - `/positions`, `/orders/open`, `/ws/orders`.
-- `reports` - `/reports/hourly`, `/reports/daily`, `/reports/counterfactual`, `/reports/daily/run`, `/ws/reports`.
+- Live Dashboard bootstrap - one aggregated `GET /dashboard/state` snapshot.
+- `robot` - dashboard snapshot, `/session/preflight`, `/portfolio/refresh`,
+  `/ws/dashboard`, start/stop commands and last command result.
+- `market` - dashboard snapshot, `/market/overview`, `/ws/market`, selected instrument
+  и top-of-book read model.
+- `portfolio` - dashboard snapshot, `/positions`, `/orders/open`, `/ws/orders`.
+- `reports` - loaded on the Reports page only: `/reports/hourly`, `/reports/daily`,
+  `/reports/counterfactual`, `/reports/daily/run`, `/ws/reports`.
 
 Live widgets:
 
@@ -252,10 +255,10 @@ Current Live Dashboard blocks:
 - Balance card
 - session type, phase, broker status and micro-session
 - cockpit-style connection chips with human labels, not raw `unknown` / `loading` codes
-- quote grid for the core universe: SBER, GAZP, LKOH, YDEX, TATN, GMKN, OZON, VTBR
+- quote table for the core universe: SBER, GAZP, LKOH, YDEX, TATN, GMKN, OZON, VTBR
 - Data-only Shadow Status
-- market overview and order book summary
-- positions and active orders
+- selected instrument panel with price, bid/ask, mid, spread, depth, imbalance and book quality
+- order book summary and market trades tape when data exists
 - current signal and blocker reason
 - recent risk events
 - stream health
@@ -275,23 +278,34 @@ Balance card:
 Start/Stop command feedback:
 
 - Start first calls `GET /session/preflight` with the core data-only universe.
-- If `market_open=false`, Start shows `blocked_by_preflight`, `reason_code` and
-  `next_session_at` when present, and does not silently submit a start command.
+- If `market_open=false`, Start shows rejected/preflight-blocked state, `reason_code`
+  and `next_session_at` when present. The frontend still calls `POST /robot/start`
+  once so the API persists a rejected `robot_command`/audit event; trade-core does
+  not start streams.
 - If `market_open=true`, Start submits the data-only start command and shows the
   returned `RobotCommandResponse`.
 - During Start, the button shows an animated progress state and the command strip shows
   the current phase (`checking_preflight`, `start_requesting`, etc.).
-- Stop always submits controlled stop and shows `Остановка запрошена`,
-  `Остановлено` or an error reason in the top command result strip.
+- Stop always submits controlled stop and shows requested/stopped/error result in
+  the command status panel.
 - The latest command state is visible as `lastCommandStatus`, `lastCommandMessage`,
   `lastCommandReasonCode`, `lastCommandAt` and `lastCommandNextSessionAt`.
 
 Quotes:
 
-- `/market/overview` populates `last_price`, `last_price_at`, `last_price_source`,
-  `quote_status` and `last_candle_timeframe`.
-- If live order book is unavailable, the dashboard shows the latest known candle close
-  instead of an empty market panel.
+- `GET /market/overview` is fast and local. It must return all eight core universe
+  rows without synchronous broker calls.
+- Quote rows show `last_price`, `last_price_at`, `last_price_source`,
+  `quote_status`, `is_price_stale`, `price_staleness_seconds`, spread bps, bid/ask,
+  depth, imbalance and book quality where available.
+- Source priority is fresh order-book mid, explicit readonly T-Bank quote refresh,
+  latest known candle close, previous close, then unavailable.
+- `POST /market/quotes/refresh` is the explicit readonly broker refresh path for
+  `GetLastPrices`/`GetOrderBook`.
+- If a refresh request times out, the dashboard keeps the last good quote instead of
+  clearing the quote grid.
+- Stale candles/order books remain visible with timestamp and stale badge, never as
+  current live prices.
 - Balance, session state and current/last prices must be visible without starting
   strategy shadow or live trading.
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -136,18 +137,23 @@ class BrokerBalanceRefreshService:
         )
 
     async def _resolve_account(self, account_id: str | None) -> tuple[str, JsonPayload]:
+        configured_account_id = account_id or _configured_account_id()
         response = await self._broker_gateway.get_accounts(AccountsRequest())
         accounts = response.data.get("accounts")
         if not isinstance(accounts, list):
             msg = "broker_accounts_payload_unavailable"
             raise RuntimeError(msg)
         normalized: list[JsonPayload] = [dict(item) for item in accounts if isinstance(item, dict)]
-        if account_id:
+        if configured_account_id:
             selected_account = next(
-                (item for item in normalized if str(item.get("account_id") or "") == account_id),
-                {"account_id": account_id},
+                (
+                    item
+                    for item in normalized
+                    if str(item.get("account_id") or "") == configured_account_id
+                ),
+                {"account_id": configured_account_id},
             )
-            return account_id, dict(selected_account)
+            return configured_account_id, dict(selected_account)
         selected_existing = next(
             (item for item in normalized if str(item.get("account_id") or "").strip()),
             None,
@@ -222,6 +228,14 @@ def _string_or_none(value: object) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _configured_account_id() -> str | None:
+    for key in ("TRADING_ACCOUNT_ID", "TINVEST_ACCOUNT_ID", "TBANK_ACCOUNT_ID"):
+        value = os.environ.get(key, "").strip()
+        if value:
+            return value
+    return None
 
 
 def _reason_from_exception(exc: Exception, *, default: str) -> str:

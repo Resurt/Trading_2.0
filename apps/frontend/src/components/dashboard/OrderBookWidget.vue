@@ -13,10 +13,17 @@ const bidQty = computed(() => props.instrument?.order_book_summary.best_bid_qty_
 const askQty = computed(() => props.instrument?.order_book_summary.best_ask_qty_lots ?? null);
 const bidDepth = computed(() => props.instrument?.order_book_summary.bid_depth_lots ?? null);
 const askDepth = computed(() => props.instrument?.order_book_summary.ask_depth_lots ?? null);
+const hasBook = computed(
+  () =>
+    props.instrument?.best_bid !== null &&
+    props.instrument?.best_bid !== undefined &&
+    props.instrument?.best_ask !== null &&
+    props.instrument?.best_ask !== undefined,
+);
 </script>
 
 <template>
-  <div v-if="instrument" class="order-book-widget">
+  <div v-if="instrument && hasBook" class="order-book-widget">
     <div class="book-side book-side--bid">
       <span>Bid</span>
       <strong>{{ formatDecimal(instrument.best_bid, 2) }}</strong>
@@ -44,7 +51,7 @@ const askDepth = computed(() => props.instrument?.order_book_summary.ask_depth_l
   <EmptyState
     v-else
     title="Стакан пока не получен"
-    detail="Если рынок закрыт, показывается последняя цена из свечей; live стакан появится после запуска data-only сбора."
+    detail="Показывается последняя цена. Bid, ask, mid, spread и качество появятся после успешного read-only GetOrderBook или live data-only потока."
     tone="warn"
   />
 </template>

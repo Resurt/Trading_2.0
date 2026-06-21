@@ -3,11 +3,11 @@ import { createPinia, setActivePinia } from "pinia";
 import { nextTick } from "vue";
 import { describe, expect, it } from "vitest";
 
-import LiveDashboardView from "../views/LiveDashboardView.vue";
 import { useMarketStore } from "../stores/market";
 import { usePortfolioStore } from "../stores/portfolio";
 import { useReportsStore } from "../stores/reports";
 import { useRobotStore } from "../stores/robot";
+import LiveDashboardView from "../views/LiveDashboardView.vue";
 
 function mountWithStores() {
   const pinia = createPinia();
@@ -66,32 +66,26 @@ function mountWithStores() {
   market.overview = {
     generated_at: "2026-06-13T07:10:00Z",
     instruments: [
-      {
-        instrument_id: "MOEX:SBER",
-        last_price: "100.05",
-        last_price_at: "2026-06-13T07:10:00Z",
-        last_price_source: "live_order_book",
-        quote_status: "live",
-        last_candle_timeframe: "1m",
-        spread: "0.1",
-        mid_price: "100.05",
-        market_quality: "0.92",
-        best_bid: "100",
-        best_ask: "100.1",
-        recent_market_trades: [],
-        order_book_summary: {
-          best_bid_qty_lots: "10",
-          best_ask_qty_lots: "12",
-          bid_depth_lots: "100",
-          ask_depth_lots: "120",
-        },
-      },
+      quoteFixture("MOEX:SBER", "SBER", "100.05", "live", "live_order_book_mid"),
+      quoteFixture("MOEX:GAZP", "GAZP", "104.49", "stale", "latest_market_candle_close"),
+      quoteFixture("MOEX:LKOH", "LKOH", "4377", "stale", "latest_market_candle_close"),
+      quoteFixture("MOEX:YDEX", "YDEX", "3912", "stale", "latest_market_candle_close"),
+      quoteFixture("MOEX:TATN", "TATN", "535.3", "stale", "latest_market_candle_close"),
+      quoteFixture("MOEX:GMKN", "GMKN", "131.7", "stale", "latest_market_candle_close"),
+      quoteFixture("MOEX:OZON", "OZON", "3710.5", "stale", "latest_market_candle_close"),
+      quoteFixture("MOEX:VTBR", "VTBR", "75.44", "previous_close", "previous_close"),
     ],
   };
+  market.selectedInstrumentId = "MOEX:SBER";
   market.dataShadowStatus = {
     enabled: true,
+    collector_state: "collecting",
     strategy_trading_disabled: true,
     real_orders_disabled: true,
+    market_open: true,
+    market_closed_expected: false,
+    reason_code: "market_open",
+    next_session_at: null,
     stream_alive: true,
     last_message_age_seconds: "1.2",
     candles_received: null,
@@ -101,54 +95,19 @@ function mountWithStores() {
     p95_spread_bps: "12.0",
     avg_market_quality_score: "0.88",
     current_session: "weekday_main",
+    started_at: "2026-06-13T07:10:00Z",
+    stopped_at: null,
+    last_command_id: "command-1",
+    last_command_status: "applied",
+    last_command_reason_code: "data_only_collection_started",
+    instruments: ["MOEX:SBER"],
+    stream_batches: [{ batch: 1, instruments: ["MOEX:SBER"] }],
+    warnings: [],
     warning: "Strategy trading disabled: data-only shadow mode",
   };
-  portfolio.positions = [
-    {
-      instrument_id: "MOEX:SBER",
-      account_id: "acc",
-      position_side: "long",
-      qty_lots: 10,
-      avg_price: "99",
-      market_price: "100",
-      unrealized_pnl: "10",
-      realised_pnl: "0",
-      snapshot_ts: "2026-06-13T07:10:00Z",
-    },
-  ];
-  portfolio.openOrders = [
-    {
-      order_intent_id: "intent-1",
-      request_order_id: "request-1",
-      exchange_order_id: "exchange-1",
-      instrument_id: "MOEX:SBER",
-      side: "buy",
-      order_type: "limit",
-      lot_qty: 10,
-      intended_price: "100",
-      broker_status: "working",
-      cancel_reason_code: null,
-      reject_reason_code: null,
-      last_observed_at: "2026-06-13T07:10:00Z",
-    },
-  ];
-  reports.hourlyReports = [
-    {
-      hourly_report_id: "hourly-1",
-      trading_date: "2026-06-13",
-      session_type: "weekday_main",
-      micro_session_id: "2026-06-13:weekday_main:1000",
-      strategy_id: "baseline",
-      instrument_id: "MOEX:SBER",
-      timeframe: "5m",
-      realised_pnl: "10",
-      commission: "1",
-      signal_count: 1,
-      blocked_count: 1,
-      fill_ratio: "0.5",
-      payload: {},
-    },
-  ];
+  portfolio.positions = [];
+  portfolio.openOrders = [];
+  reports.hourlyReports = [];
 
   return mount(LiveDashboardView, {
     global: {
@@ -158,23 +117,23 @@ function mountWithStores() {
 }
 
 describe("LiveDashboardView", () => {
-  it("renders live widgets with machine-readable reason codes", () => {
+  it("renders operator dashboard with quote table and readable status", () => {
     const wrapper = mountWithStores();
 
     expect(wrapper.find('[data-testid="live-dashboard"]').exists()).toBe(true);
-    expect(wrapper.text()).toContain("MOEX:SBER");
+    expect(wrapper.text()).toContain("Котировки core universe");
+    expect(wrapper.text()).toContain("8 инструментов");
+    expect(wrapper.text()).toContain("Сессия MOEX");
+    expect(wrapper.text()).toContain("Data-only сбор");
+    expect(wrapper.text()).toContain("real orders, pseudo-orders");
+    expect(wrapper.text()).toContain("acc***001");
+    expect(wrapper.text()).toContain("Broker balance получен");
     expect(wrapper.text()).toContain("spread_too_wide");
     expect(wrapper.text()).toContain("spread above configured threshold");
-    expect(wrapper.text()).toContain("Котировки core universe");
-    expect(wrapper.text()).toContain("Сессия MOEX");
-    expect(wrapper.text()).toContain("request-1");
-    expect(wrapper.text()).toContain("Соединения");
-    expect(wrapper.text()).toContain("отключена; заявки не выставляются");
-    expect(wrapper.text()).toContain("acc***001");
-    expect(wrapper.text()).toContain("Баланс обновляется автоматически");
+    expect(wrapper.text()).not.toContain("request-1");
   });
 
-  it("renders degraded balance state", async () => {
+  it("renders degraded balance state with refresh guidance", async () => {
     const wrapper = mountWithStores();
     const robot = useRobotStore();
 
@@ -188,5 +147,68 @@ describe("LiveDashboardView", () => {
 
     expect(wrapper.text()).toContain("Счёт не получен");
     expect(wrapper.text()).toContain("Нет сохранённых данных счёта");
+    expect(wrapper.text()).toContain("Обновить");
+  });
+
+  it("updates selected instrument panel when a quote row is clicked", async () => {
+    const wrapper = mountWithStores();
+
+    await wrapper.findAll(".quote-table tbody tr")[1].trigger("click");
+    await nextTick();
+
+    const market = useMarketStore();
+    expect(market.selectedInstrumentId).toBe("MOEX:GAZP");
+    expect(wrapper.text()).toContain("GAZP / stale");
   });
 });
+
+function quoteFixture(
+  instrumentId: string,
+  ticker: string,
+  price: string,
+  quoteStatus: string,
+  source: string,
+) {
+  const live = quoteStatus === "live";
+  return {
+    instrument_id: instrumentId,
+    ticker,
+    last_price: price,
+    last_price_at: live ? "2026-06-13T07:10:00Z" : "2026-06-11T20:50:00Z",
+    last_price_ts: live ? "2026-06-13T07:10:00Z" : "2026-06-11T20:50:00Z",
+    last_price_source: source,
+    is_price_stale: !live,
+    price_staleness_seconds: live ? 1 : 172800,
+    previous_close: "99.00",
+    change_abs: "1.05",
+    change_bps: "106.1",
+    session_type: live ? "weekday_main" : "weekend",
+    broker_trading_status: live ? "normal_trading" : "closed",
+    api_trade_available: live,
+    quote_status: quoteStatus,
+    last_candle_timeframe: "1m",
+    spread: live ? "0.1" : null,
+    spread_abs: live ? "0.1" : null,
+    spread_bps: live ? "10.0" : null,
+    mid_price: live ? price : null,
+    market_quality: live ? "0.92" : null,
+    best_bid: live ? "100" : null,
+    best_ask: live ? "100.1" : null,
+    bid_depth_lots: live ? "100" : null,
+    ask_depth_lots: live ? "120" : null,
+    book_imbalance: live ? "-0.09" : null,
+    order_book_source: live ? "tbank_order_book" : null,
+    order_book_ts: live ? "2026-06-13T07:10:00Z" : null,
+    order_book_stale: !live,
+    recent_market_trades: [],
+    order_book_summary: live
+      ? {
+          best_bid_qty_lots: "10",
+          best_ask_qty_lots: "12",
+          bid_depth_lots: "100",
+          ask_depth_lots: "120",
+        }
+      : {},
+    quote_payload: {},
+  };
+}

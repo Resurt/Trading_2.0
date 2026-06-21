@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -19,6 +20,9 @@ from trade_core.broker_gateway import (
     DividendsRequest,
     InstrumentRef,
     InstrumentResolveRequest,
+    RequestMetadata,
+    StreamEvent,
+    TradingSchedulesRequest,
 )
 from trade_core.market_data import (
     Bar,
@@ -145,6 +149,67 @@ class FailingRecoveryGateway(SafeNoopBrokerGateway):
         raise RuntimeError("gap backfill failed")
 
 
+class RecordingScheduleGateway(SafeNoopBrokerGateway):
+    def __init__(self) -> None:
+        super().__init__()
+        self.trading_schedule_requests: list[TradingSchedulesRequest] = []
+
+    async def trading_schedules(
+        self,
+        request: TradingSchedulesRequest,
+        metadata: RequestMetadata | None = None,
+    ) -> BrokerUnaryResponse:
+        self.trading_schedule_requests.append(request)
+        return await super().trading_schedules(request, metadata)
+
+
+class RecordingStreamGateway(SafeNoopBrokerGateway):
+    def __init__(self, *, now: datetime | None = None) -> None:
+        super().__init__(now=now)
+        self.market_stream_names: list[str] = []
+        self.order_stream_accounts: list[str] = []
+
+    async def resolve_instruments(
+        self,
+        request: InstrumentResolveRequest,
+        metadata: RequestMetadata | None = None,
+    ) -> BrokerUnaryResponse:
+        del metadata
+        return BrokerUnaryResponse(
+            method_name="ResolveInstruments",
+            data={
+                "instruments": [
+                    {
+                        "instrument_id": f"uid-{ticker.lower()}",
+                        "instrument_uid": f"uid-{ticker.lower()}",
+                        "ticker": ticker,
+                        "class_code": request.class_code,
+                        "figi": f"figi-{ticker.lower()}",
+                        "name": ticker,
+                        "lot_size": 10,
+                        "min_price_increment": "0.01",
+                        "currency": "RUB",
+                        "api_trade_available": True,
+                        "short_available": False,
+                        "supports_weekend": True,
+                    }
+                    for ticker in request.tickers
+                ]
+            },
+            headers={},
+        )
+
+    async def stream_market_data(self, stream_name: str) -> AsyncIterator[StreamEvent]:
+        self.market_stream_names.append(stream_name)
+        if False:
+            yield StreamEvent(stream_name=stream_name, event_type="noop", payload={})
+
+    async def stream_orders(self, account_id: str) -> AsyncIterator[StreamEvent]:
+        self.order_stream_accounts.append(account_id)
+        if False:
+            yield StreamEvent(stream_name="OrderStateStream", event_type="noop", payload={})
+
+
 class ResolvingGateway(SafeNoopBrokerGateway):
     def __init__(self, *, now: datetime | None = None) -> None:
         super().__init__(now=now)
@@ -220,6 +285,19 @@ def test_runtime_starts_historical_replay_without_tokens(
     asyncio.run(runtime.shutdown())
 
 
+def test_refresh_trading_schedule_does_not_request_past_day(tmp_path: Path) -> None:
+    now = msk(2026, 6, 21, 11, 30)
+    gateway = RecordingScheduleGateway()
+    runtime = build_runtime(tmp_path, gateway=gateway)
+
+    asyncio.run(runtime.refresh_trading_schedule(now=now))
+
+    assert gateway.trading_schedule_requests
+    request = gateway.trading_schedule_requests[0]
+    assert request.from_ == now
+    assert request.to == now + timedelta(days=1)
+
+
 def test_data_only_shadow_closed_bar_does_not_evaluate_strategy(tmp_path: Path) -> None:
     runtime = TradeCoreRuntime(
         config=replace(runtime_config(tmp_path), data_only_shadow_enabled=True),
@@ -277,6 +355,112 @@ def test_data_only_shadow_runtime_does_not_subscribe_strategy_handler(tmp_path: 
     assert runtime.market_event_bus.subscribers_for(MarketEventType.BAR_CLOSED) == 0
 
     asyncio.run(runtime.shutdown())
+
+
+def test_data_only_shadow_runtime_waits_for_operator_start_and_stops(tmp_path: Path) -> None:
+    gateway = RecordingStreamGateway(now=msk(2026, 6, 21, 11, 30))
+    runtime = TradeCoreRuntime(
+        config=replace(runtime_config(tmp_path), data_only_shadow_enabled=True),
+        launch_policy=LaunchModePolicy.from_mode(RuntimeMode.SHADOW),
+        database=DatabaseService(runtime_config(tmp_path).database_url or ""),
+        broker_gateway=cast(BrokerGateway, gateway),
+    )
+
+    async def run() -> None:
+        await runtime.start()
+        await asyncio.sleep(0)
+        assert gateway.market_stream_names == []
+        assert gateway.order_stream_accounts == []
+        assert runtime.stats.stream_tasks_started == 0
+
+        with runtime.database.session_scope() as session:
+            RobotCommandRepository(session).create(
+                command_type="start",
+                requested_by="desk-operator",
+                requested_role="operator",
+                requested_at=datetime.now(tz=UTC),
+                payload={
+                    "mode": "data_shadow",
+                    "trading_disabled": True,
+                    "data_only_shadow": True,
+                    "preflight_result": {
+                        "market_open": True,
+                        "market_closed_expected": False,
+                        "reason_code": "market_open",
+                    },
+                },
+            )
+        assert await runtime.process_robot_commands_async() == 1
+        await asyncio.sleep(0)
+        assert gateway.market_stream_names == list(runtime.config.stream_names)
+        assert gateway.order_stream_accounts == []
+        assert runtime.stats.stream_tasks_started == len(runtime.config.stream_names)
+        assert runtime.stats.collector_state == "collecting"
+
+        with runtime.database.session_scope() as session:
+            RobotCommandRepository(session).create(
+                command_type="stop",
+                requested_by="desk-operator",
+                requested_role="operator",
+                requested_at=datetime.now(tz=UTC),
+                payload={
+                    "mode": "data_shadow",
+                    "trading_disabled": True,
+                    "data_only_shadow": True,
+                },
+            )
+        assert await runtime.process_robot_commands_async() == 1
+        assert runtime.stats.stream_tasks_started == 0
+        assert runtime.stats.collector_state == "stopped_by_operator"
+        await runtime.shutdown()
+
+    asyncio.run(run())
+
+
+def test_data_only_shadow_start_command_closed_market_does_not_create_orders(
+    tmp_path: Path,
+) -> None:
+    gateway = RecordingStreamGateway(now=msk(2026, 6, 21, 22, 0))
+    runtime = TradeCoreRuntime(
+        config=replace(runtime_config(tmp_path), data_only_shadow_enabled=True),
+        launch_policy=LaunchModePolicy.from_mode(RuntimeMode.SHADOW),
+        database=DatabaseService(runtime_config(tmp_path).database_url or ""),
+        broker_gateway=cast(BrokerGateway, gateway),
+    )
+
+    async def run() -> None:
+        await runtime.start()
+        with runtime.database.session_scope() as session:
+            RobotCommandRepository(session).create(
+                command_type="start",
+                requested_by="desk-operator",
+                requested_role="operator",
+                requested_at=datetime.now(tz=UTC),
+                payload={
+                    "mode": "data_shadow",
+                    "trading_disabled": True,
+                    "data_only_shadow": True,
+                    "preflight_result": {
+                        "market_open": False,
+                        "market_closed_expected": True,
+                        "reason_code": "market_closed_expected",
+                    },
+                },
+            )
+        assert await runtime.process_robot_commands_async() == 1
+        assert runtime.stats.collector_state == "preflight_blocked"
+        assert runtime.stats.stream_tasks_started == 0
+        assert gateway.market_stream_names == []
+        assert gateway.order_stream_accounts == []
+        assert gateway.post_order_calls == []
+        assert gateway.cancel_order_calls == []
+        with runtime.database.session_factory() as session:
+            assert session.scalar(select(func.count()).select_from(SignalCandidate)) == 0
+            assert session.scalar(select(func.count()).select_from(OrderIntent)) == 0
+            assert session.scalar(select(func.count()).select_from(BrokerOrder)) == 0
+        await runtime.shutdown()
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("mode", [RuntimeMode.HISTORICAL_REPLAY, RuntimeMode.SHADOW])

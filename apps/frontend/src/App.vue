@@ -14,17 +14,15 @@ import {
   Square,
 } from "@lucide/vue";
 
-import StatusPill from "./components/ui/StatusPill.vue";
+import { apiClient } from "./api/client";
 import { useMarketStore } from "./stores/market";
 import { usePortfolioStore } from "./stores/portfolio";
-import { useReportsStore } from "./stores/reports";
 import { useRobotStore } from "./stores/robot";
-import { compactDateTime, countdownFromMicroSession } from "./utils/format";
+import { compactDateTime } from "./utils/format";
 
 const robot = useRobotStore();
 const market = useMarketStore();
 const portfolio = usePortfolioStore();
-const reports = useReportsStore();
 
 const navItems = [
   { to: "/", label: "Live Dashboard", icon: LayoutDashboard },
@@ -54,18 +52,32 @@ function startButtonLabel(): string {
   return robot.commandPhase === "preflight" ? "Проверка" : "Запуск";
 }
 
+async function bootstrapDashboard(): Promise<void> {
+  try {
+    const snapshot = await apiClient.dashboardState();
+    robot.applyDashboardSnapshot(snapshot);
+    if (snapshot.data?.market) {
+      market.applyOverview(snapshot.data.market);
+    }
+    portfolio.applySnapshot({
+      positions: snapshot.data?.positions,
+      open_orders: snapshot.data?.open_orders,
+    });
+  } catch {
+    await Promise.allSettled([
+      robot.fetchInitialSnapshot(),
+      market.fetchOverview(),
+      portfolio.fetchSnapshot(),
+    ]);
+  }
+}
+
 onMounted(() => {
-  void Promise.allSettled([
-    robot.fetchInitialSnapshot(),
-    market.fetchOverview(),
-    market.fetchDataShadowStatus(),
-    portfolio.fetchSnapshot(),
-    reports.fetchReports(),
-  ]);
+  void bootstrapDashboard();
+  void market.fetchDataShadowStatus();
   void robot.connectDashboardSocket();
   void market.connectMarketSocket();
   void portfolio.connectOrdersSocket();
-  void reports.connectReportsSocket();
   robot.startBalancePolling();
   market.startMarketPolling();
 });
@@ -99,24 +111,6 @@ onUnmounted(() => {
         <span class="connection-chip" :class="`connection-chip--${portfolio.liveConnection}`">
           <span class="connection-chip__dot" />
           {{ connectionText("Портфель", portfolio.liveConnection) }}
-        </span>
-        <span class="micro-countdown">
-          {{ robot.status.micro_session_id ?? "нет окна сбора" }}
-          <b>{{ countdownFromMicroSession(robot.status.micro_session_id) }}</b>
-        </span>
-        <span
-          v-if="robot.lastCommandStatus"
-          class="command-result"
-          :class="{ 'command-result--active': robot.commandLoading }"
-          data-testid="command-result"
-        >
-          <span v-if="robot.commandLoading" class="inline-spinner" aria-hidden="true" />
-          <StatusPill :code="robot.lastCommandStatus" compact />
-          <span>{{ robot.lastCommandMessage }}</span>
-          <code v-if="robot.lastCommandReasonCode">{{ robot.lastCommandReasonCode }}</code>
-          <small v-if="robot.lastCommandNextSessionAt">
-            next {{ compactDateTime(robot.lastCommandNextSessionAt) }}
-          </small>
         </span>
       </div>
 

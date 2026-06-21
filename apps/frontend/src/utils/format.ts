@@ -1,15 +1,24 @@
 import type { JsonPayload } from "../api/types";
 
 export function formatMoney(value: string | number | null | undefined, currency = "RUB"): string {
-  const numeric = Number(value ?? 0);
+  if (value === null || value === undefined || value === "") {
+    return "Нет данных";
+  }
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return "Нет данных";
+  }
   return new Intl.NumberFormat("ru-RU", {
     style: "currency",
     currency,
     maximumFractionDigits: 2,
-  }).format(Number.isFinite(numeric) ? numeric : 0);
+  }).format(numeric);
 }
 
 export function formatDecimal(value: string | number | null | undefined, digits = 2): string {
+  if (value === null || value === undefined || value === "") {
+    return "Нет данных";
+  }
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) {
     return "Нет данных";
@@ -21,6 +30,9 @@ export function formatDecimal(value: string | number | null | undefined, digits 
 }
 
 export function formatPercentRatio(value: string | number | null | undefined): string {
+  if (value === null || value === undefined || value === "") {
+    return "Нет данных";
+  }
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) {
     return "Нет данных";
@@ -80,7 +92,7 @@ export function stringifyValue(value: unknown): string {
 
 export function countdownFromMicroSession(microSessionId: string | null | undefined): string {
   if (!microSessionId) {
-    return "Нет активной micro-session";
+    return "Нет активного окна сбора";
   }
   const now = new Date();
   const minutes = 60 - now.getMinutes() - 1;

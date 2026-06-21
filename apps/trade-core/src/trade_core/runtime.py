@@ -266,6 +266,12 @@ class TradeCoreRuntimeStats:
     open_orders: int = 0
     data_only_shadow_enabled: bool = False
     active_positions: int = 0
+    collector_state: str = "stopped"
+    collector_started_at: datetime | None = None
+    collector_stopped_at: datetime | None = None
+    last_command_id: str | None = None
+    last_command_status: str | None = None
+    last_command_reason_code: str | None = None
 
 
 class SafeNoopBrokerGateway:
@@ -595,7 +601,9 @@ class TradeCoreRuntime:
         self.runtime_id = uuid4()
         self.stats = TradeCoreRuntimeStats()
         self.stats.data_only_shadow_enabled = self.config.data_only_shadow_enabled
-        self.robot_control_state = "running"
+        self.robot_control_state = "stopped" if self.config.data_only_shadow_enabled else "running"
+        if self.config.data_only_shadow_enabled:
+            self.stats.collector_state = "stopped"
 
         self._session: Session | None = None
         self._session_state_store: SqlAlchemySessionStateStore | None = None
@@ -748,13 +756,12 @@ class TradeCoreRuntime:
             on_failure=self._mark_stream_recovery_degraded,
         )
         self._install_broker_gap_recovery_hook()
-        self._stream_tasks = await self.market_data_subscription_service.start(
-            MarketDataSubscriptionConfig(
-                market_stream_names=self.config.stream_names,
-                account_id=self.config.account_id,
-            )
-        )
-        self.stats.stream_tasks_started = len(self._stream_tasks)
+        if self.config.data_only_shadow_enabled:
+            self.stats.collector_state = "stopped"
+            self.stats.stream_tasks_started = 0
+            self.metrics.set_market_stream_alive(False, stream_type="market_data")
+        else:
+            await self._start_market_streams(account_id=self.config.account_id)
         self.stats.started = True
         self.flush_domain_events()
         log_event(
@@ -768,6 +775,35 @@ class TradeCoreRuntime:
             stream_tasks=self.stats.stream_tasks_started,
             data_only_shadow_enabled=self.config.data_only_shadow_enabled,
         )
+
+    async def _start_market_streams(self, *, account_id: str | None) -> None:
+        """Start broker market streams once; order stream is optional in data-only."""
+
+        if self._stream_tasks:
+            return
+        self._stream_tasks = await self.market_data_subscription_service.start(
+            MarketDataSubscriptionConfig(
+                market_stream_names=self.config.stream_names,
+                account_id=account_id,
+            )
+        )
+        self.stats.stream_tasks_started = len(self._stream_tasks)
+        self.metrics.set_market_stream_alive(True, stream_type="market_data")
+
+    async def _stop_market_streams(self) -> None:
+        """Cancel currently running market streams and wait for clean shutdown."""
+
+        tasks = self._stream_tasks
+        if not tasks:
+            self.metrics.set_market_stream_alive(False, stream_type="market_data")
+            self.stats.stream_tasks_started = 0
+            return
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self._stream_tasks = ()
+        self.stats.stream_tasks_started = 0
+        self.metrics.set_market_stream_alive(False, stream_type="market_data")
 
     async def run_forever(self) -> None:
         """Run the runtime loop until `request_stop` or task cancellation."""
@@ -802,12 +838,7 @@ class TradeCoreRuntime:
     async def shutdown(self) -> None:
         """Cancel streams, flush events, write audit row and close resources."""
 
-        for task in self._stream_tasks:
-            task.cancel()
-        if self._stream_tasks:
-            await asyncio.gather(*self._stream_tasks, return_exceptions=True)
-        self._stream_tasks = ()
-        self.metrics.set_market_stream_alive(False, stream_type="market_data")
+        await self._stop_market_streams()
         self.metrics.set_data_only_shadow_enabled(False)
         if self.config.data_only_shadow_enabled:
             self._write_audit_event(
@@ -834,8 +865,8 @@ class TradeCoreRuntime:
 
         if not self.stats.started:
             await self.start()
+        await self.process_robot_commands_async()
         if not self.config.data_only_shadow_enabled:
-            await self.process_robot_commands_async()
             self._reload_strategy_config_if_changed()
         await self._sync_dividend_calendar_if_due()
         observed_at = _ensure_msk(now or datetime.now(tz=MSK))
@@ -899,7 +930,7 @@ class TradeCoreRuntime:
             response = await self.broker_gateway.trading_schedules(
                 TradingSchedulesRequest(
                     exchange=self.config.exchange,
-                    from_=now - timedelta(days=1),
+                    from_=now,
                     to=now + timedelta(days=1),
                 )
             )
@@ -1056,6 +1087,7 @@ class TradeCoreRuntime:
         for command in commands:
             now = datetime.now(tz=UTC)
             previous_state = self.robot_control_state
+            self.stats.last_command_id = str(command.command_id)
             repository.mark_accepted(command, accepted_at=now)
             try:
                 reason_code, result_payload = await self._apply_robot_command(command)
@@ -1070,6 +1102,8 @@ class TradeCoreRuntime:
                     reason_code=reason_code,
                     result_payload=result_payload,
                 )
+                self.stats.last_command_status = "applied"
+                self.stats.last_command_reason_code = reason_code
                 self._write_robot_command_audit(command=command, payload=result_payload)
                 processed += 1
             except Exception as exc:
@@ -1080,6 +1114,8 @@ class TradeCoreRuntime:
                     error=str(exc),
                     result_payload={"previous_robot_control_state": previous_state},
                 )
+                self.stats.last_command_status = "failed"
+                self.stats.last_command_reason_code = "runtime_command_failed"
                 self._write_robot_command_audit(
                     command=command,
                     payload={
@@ -1174,6 +1210,9 @@ class TradeCoreRuntime:
         return self.config.session_template
 
     async def _apply_robot_command(self, command: RobotCommand) -> tuple[str, JsonPayload]:
+        if self.config.data_only_shadow_enabled:
+            return await self._apply_data_only_robot_command(command)
+
         command_type = command.command_type
         if command_type in {"start", "resume"}:
             self.robot_control_state = "running"
@@ -1195,6 +1234,154 @@ class TradeCoreRuntime:
             return result
         msg = f"unsupported robot command: {command_type}"
         raise ValueError(msg)
+
+    async def _apply_data_only_robot_command(
+        self,
+        command: RobotCommand,
+    ) -> tuple[str, JsonPayload]:
+        command_type = command.command_type
+        if command_type in {"start", "resume"}:
+            return await self._start_data_only_collection(command)
+        if command_type in {"stop", "pause"}:
+            return await self._stop_data_only_collection(
+                command,
+                requested_state="stopped_by_operator"
+                if command_type == "stop"
+                else "stopped",
+                reason_code="data_only_collection_stopped"
+                if command_type == "stop"
+                else "data_only_collection_paused",
+            )
+        if command_type == "emergency_stop":
+            return await self._stop_data_only_collection(
+                command,
+                requested_state="emergency_stopped",
+                reason_code="data_only_collection_emergency_stopped",
+            )
+        msg = f"unsupported robot command: {command_type}"
+        raise ValueError(msg)
+
+    async def _start_data_only_collection(
+        self,
+        command: RobotCommand,
+    ) -> tuple[str, JsonPayload]:
+        payload = dict(command.payload or {})
+        preflight = payload.get("preflight_result")
+        market_open = isinstance(preflight, Mapping) and preflight.get("market_open") is True
+        reason_code = (
+            str(preflight.get("reason_code") or "market_closed_expected")
+            if isinstance(preflight, Mapping)
+            else "session_preflight_required"
+        )
+        if not market_open:
+            self.robot_control_state = "preflight_blocked"
+            self.stats.collector_state = "preflight_blocked"
+            self.stats.last_command_reason_code = reason_code
+            self._write_audit_event(
+                action="data_only_shadow_collection_preflight_blocked",
+                payload={
+                    "command_id": str(command.command_id),
+                    "reason_code": reason_code,
+                    "preflight_result": preflight if isinstance(preflight, Mapping) else None,
+                    "real_orders_disabled": True,
+                    "strategy_trading_disabled": True,
+                },
+            )
+            return (
+                reason_code,
+                {
+                    "collector_state": self.stats.collector_state,
+                    "accepted": False,
+                    "stream_tasks": 0,
+                    "real_orders_disabled": True,
+                    "strategy_trading_disabled": True,
+                },
+            )
+
+        if self._stream_tasks:
+            self.robot_control_state = "collecting"
+            self.stats.collector_state = "collecting"
+            return (
+                "data_only_collection_already_collecting",
+                {
+                    "collector_state": self.stats.collector_state,
+                    "stream_tasks": len(self._stream_tasks),
+                    "real_orders_disabled": True,
+                    "strategy_trading_disabled": True,
+                },
+            )
+
+        self.robot_control_state = "starting"
+        self.stats.collector_state = "starting"
+        now = datetime.now(tz=UTC)
+        await self._start_market_streams(account_id=None)
+        self.robot_control_state = "collecting"
+        self.stats.collector_state = "collecting"
+        self.stats.collector_started_at = now
+        self.stats.collector_stopped_at = None
+        self._write_audit_event(
+            action="data_only_shadow_collection_started",
+            payload={
+                "command_id": str(command.command_id),
+                "runtime_id": str(self.runtime_id),
+                "stream_tasks": len(self._stream_tasks),
+                "stream_names": list(self.config.stream_names),
+                "instruments": [instrument.instrument_id for instrument in self.config.instruments],
+                "real_orders_disabled": True,
+                "strategy_trading_disabled": True,
+                "preflight_result": preflight if isinstance(preflight, Mapping) else None,
+            },
+        )
+        return (
+            "data_only_collection_started",
+            {
+                "collector_state": self.stats.collector_state,
+                "started_at": now.isoformat(),
+                "stream_tasks": len(self._stream_tasks),
+                "stream_names": list(self.config.stream_names),
+                "instruments": [instrument.instrument_id for instrument in self.config.instruments],
+                "real_orders_disabled": True,
+                "strategy_trading_disabled": True,
+            },
+        )
+
+    async def _stop_data_only_collection(
+        self,
+        command: RobotCommand,
+        *,
+        requested_state: str,
+        reason_code: str,
+    ) -> tuple[str, JsonPayload]:
+        self.robot_control_state = "stopping"
+        self.stats.collector_state = "stopping"
+        previous_task_count = len(self._stream_tasks)
+        await self._stop_market_streams()
+        now = datetime.now(tz=UTC)
+        self.robot_control_state = requested_state
+        self.stats.collector_state = requested_state
+        self.stats.collector_stopped_at = now
+        self._write_audit_event(
+            action="data_only_shadow_collection_stopped",
+            payload={
+                "command_id": str(command.command_id),
+                "runtime_id": str(self.runtime_id),
+                "reason_code": reason_code,
+                "previous_stream_tasks": previous_task_count,
+                "real_orders_disabled": True,
+                "strategy_trading_disabled": True,
+            },
+        )
+        return (
+            reason_code,
+            {
+                "collector_state": self.stats.collector_state,
+                "stopped_at": now.isoformat(),
+                "previous_stream_tasks": previous_task_count,
+                "stream_tasks": 0,
+                "real_orders_disabled": True,
+                "strategy_trading_disabled": True,
+            },
+        )
 
     async def _apply_emergency_stop(self, command: RobotCommand) -> tuple[str, JsonPayload]:
         del command

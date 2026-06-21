@@ -1,7 +1,6 @@
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { useRobotStore } from "../stores/robot";
 import type {
   RobotCommandResponse,
   RobotStatusResponse,
@@ -9,16 +8,20 @@ import type {
   SessionSnapshotResponse,
   SignalResponse,
 } from "../api/types";
+import { useRobotStore } from "../stores/robot";
 
 const apiClientMock = vi.hoisted(() => ({
+  dashboardState: vi.fn(),
   robotStatus: vi.fn(),
   currentSession: vi.fn(),
   currentSignals: vi.fn(),
   portfolioSummary: vi.fn(),
   sessionPreflight: vi.fn(),
+  sessionPreflightFast: vi.fn(),
   startRobot: vi.fn(),
   stopRobot: vi.fn(),
   refreshPortfolio: vi.fn(),
+  dataShadowStatus: vi.fn(),
 }));
 
 vi.mock("../api/client", () => ({
@@ -30,7 +33,11 @@ describe("robot store", () => {
   beforeEach(() => {
     setActivePinia(createPinia());
     Object.values(apiClientMock).forEach((mock) => mock.mockReset());
+    apiClientMock.dashboardState.mockRejectedValue(new Error("dashboard down"));
     apiClientMock.portfolioSummary.mockResolvedValue(portfolioFixture());
+    apiClientMock.sessionPreflight.mockResolvedValue(preflightFixture(true));
+    apiClientMock.sessionPreflightFast.mockResolvedValue(preflightFixture(true));
+    apiClientMock.dataShadowStatus.mockResolvedValue(dataShadowStatusFixture("stopped"));
   });
 
   it("preserves robot status and balance when signals snapshot fails", async () => {
@@ -74,8 +81,16 @@ describe("robot store", () => {
     expect(robot.error).toContain("session_snapshot_unavailable");
   });
 
-  it("blocks start on closed market preflight without sending start command", async () => {
-    apiClientMock.sessionPreflight.mockResolvedValue(preflightFixture(false));
+  it("persists rejected start command on closed market preflight", async () => {
+    apiClientMock.sessionPreflightFast.mockResolvedValue(preflightFixture(false));
+    apiClientMock.startRobot.mockResolvedValue({
+      ...commandFixture("start", "rejected"),
+      accepted: false,
+      reason_code: "market_closed_expected",
+      preflight_result: preflightFixture(false),
+      message: "Рынок закрыт. Data-only сбор не запущен.",
+    });
+    apiClientMock.dataShadowStatus.mockResolvedValue(dataShadowStatusFixture("preflight_blocked"));
     apiClientMock.robotStatus.mockResolvedValue(statusFixture());
     apiClientMock.currentSession.mockResolvedValue(sessionFixture());
     apiClientMock.currentSignals.mockResolvedValue([]);
@@ -83,8 +98,8 @@ describe("robot store", () => {
 
     await robot.startRobot();
 
-    expect(apiClientMock.startRobot).not.toHaveBeenCalled();
-    expect(robot.lastCommandStatus).toBe("blocked_by_preflight");
+    expect(apiClientMock.startRobot).toHaveBeenCalledTimes(1);
+    expect(robot.lastCommandStatus).toBe("rejected");
     expect(robot.lastCommandMessage).toContain("Рынок закрыт");
     expect(robot.lastCommandReasonCode).toBe("market_closed_expected");
   });
@@ -100,7 +115,7 @@ describe("robot store", () => {
 
     expect(apiClientMock.stopRobot).toHaveBeenCalledTimes(1);
     expect(robot.lastCommandStatus).toBe("requested");
-    expect(robot.lastCommandMessage).toContain("Остановка запрошена");
+    expect(robot.lastCommandMessage).toContain("Команда stop отправлена");
   });
 });
 
@@ -213,5 +228,36 @@ function commandFixture(command: string, status: string): RobotCommandResponse {
     payload: {},
     preflight_result: null,
     message: command === "stop" ? "Остановка запрошена" : "Команда принята",
+  };
+}
+
+function dataShadowStatusFixture(collectorState: string) {
+  return {
+    enabled: true,
+    collector_state: collectorState,
+    strategy_trading_disabled: true,
+    real_orders_disabled: true,
+    market_open: collectorState !== "preflight_blocked",
+    market_closed_expected: collectorState === "preflight_blocked",
+    reason_code: collectorState === "preflight_blocked" ? "market_closed_expected" : "market_open",
+    next_session_at: collectorState === "preflight_blocked" ? "2026-06-21T10:00:00+03:00" : null,
+    stream_alive: collectorState === "collecting",
+    last_message_age_seconds: null,
+    candles_received: null,
+    order_book_snapshots: 0,
+    market_microstructure_snapshots: 0,
+    avg_spread_bps: null,
+    p95_spread_bps: null,
+    avg_market_quality_score: null,
+    current_session: "weekend",
+    started_at: null,
+    stopped_at: null,
+    last_command_id: "command-1",
+    last_command_status: collectorState === "preflight_blocked" ? "rejected" : "applied",
+    last_command_reason_code: collectorState === "preflight_blocked" ? "market_closed_expected" : "market_open",
+    instruments: ["MOEX:SBER"],
+    stream_batches: [],
+    warnings: [],
+    warning: "Strategy trading disabled: data-only shadow mode",
   };
 }

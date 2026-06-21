@@ -1132,8 +1132,16 @@ New structured events/payloads:
 - `market_closed_expected`: closed market by broker/fallback schedule, with `next_session_at`.
 - `data_only_shadow_preflight`: preflight-only smoke result before stream startup.
 - `balance_refresh`: broker account/portfolio read model update; full account id must not be logged.
+- `market_quotes_refresh`: explicit readonly T-Invest `GetLastPrices`/`GetOrderBook`
+  refresh for dashboard quotes; no order methods are allowed.
 - `robot_command_rejected_preflight`: API rejected a Start command because preflight did
   not return `market_open=true`; payload includes `reason_code` and `preflight_result`.
+- `data_only_shadow_collection_started`: trade-core applied Start in data-only mode and
+  started market streams after `market_open=true` preflight.
+- `data_only_shadow_collection_stopped`: trade-core applied Stop/Pause/Emergency Stop
+  and stopped market streams without order actions.
+- `data_only_shadow_collection_preflight_blocked`: trade-core received Start without
+  an open-market preflight and did not start streams.
 - `intraday_analytics_rebuild`: rebuild of `intraday_session_analytics`.
 - `calibration_observatory_run`: diagnostic run for rolling cube, regime and candidate proposals.
 

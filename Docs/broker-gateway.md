@@ -306,6 +306,7 @@ Portfolio/account visibility uses readonly methods:
 - `get_accounts`
 - `get_portfolio`
 - `get_positions`
+- `get_last_prices` and `get_order_book` for explicit dashboard quote refresh
 
 `scripts/run_broker_balance_refresh.py` and `POST /portfolio/refresh` use only those
 readonly methods. They write a `broker_balance` payload into the portfolio read model
@@ -317,3 +318,9 @@ Balance read models must mask account ids and must not log secrets or full accou
 Balance refresh must never call `PostOrder`, `CancelOrder`, `post_stop_order` or any
 order-changing method. It is operator visibility only and does not imply permission
 to trade in data-only mode.
+
+The API container must mount the readonly T-Bank token when it serves dashboard
+balance and quote refresh endpoints. `GET /market/overview` is local DB/read-model
+only and must not call the broker. `POST /market/quotes/refresh` is the explicit
+bounded readonly `GetLastPrices`/`GetOrderBook` path; if it fails, the frontend keeps
+the last good quote and the local overview remains available.

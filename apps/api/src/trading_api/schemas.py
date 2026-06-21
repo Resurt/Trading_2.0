@@ -178,18 +178,37 @@ class SignalResponse(BaseModel):
 
 class MarketInstrumentOverview(BaseModel):
     instrument_id: str
+    ticker: str | None = None
     last_price: Decimal | None = None
     last_price_at: datetime | None = None
+    last_price_ts: datetime | None = None
     last_price_source: str | None = None
+    is_price_stale: bool = True
+    price_staleness_seconds: int | None = None
+    previous_close: Decimal | None = None
+    change_abs: Decimal | None = None
+    change_bps: Decimal | None = None
+    session_type: str | None = None
+    broker_trading_status: str | None = None
+    api_trade_available: bool | None = None
     quote_status: str = "unavailable"
     last_candle_timeframe: str | None = None
     spread: Decimal | None = None
+    spread_abs: Decimal | None = None
+    spread_bps: Decimal | None = None
     mid_price: Decimal | None = None
     market_quality: Decimal | None = None
     best_bid: Decimal | None = None
     best_ask: Decimal | None = None
+    bid_depth_lots: Decimal | None = None
+    ask_depth_lots: Decimal | None = None
+    book_imbalance: Decimal | None = None
+    order_book_source: str | None = None
+    order_book_ts: datetime | None = None
+    order_book_stale: bool = True
     recent_market_trades: list[JsonPayload] = Field(default_factory=list)
     order_book_summary: JsonPayload = Field(default_factory=dict)
+    quote_payload: JsonPayload = Field(default_factory=dict)
 
 
 class MarketOverviewResponse(BaseModel):
@@ -240,8 +259,13 @@ class MarketMicrostructureSummaryResponse(BaseModel):
 
 class DataShadowStatusResponse(BaseModel):
     enabled: bool
+    collector_state: str = "stopped"
     strategy_trading_disabled: bool
     real_orders_disabled: bool
+    market_open: bool | None = None
+    market_closed_expected: bool | None = None
+    reason_code: str | None = None
+    next_session_at: datetime | None = None
     stream_alive: bool
     last_message_age_seconds: Decimal | None = None
     candles_received: int | None = None
@@ -251,6 +275,14 @@ class DataShadowStatusResponse(BaseModel):
     p95_spread_bps: Decimal | None = None
     avg_market_quality_score: Decimal | None = None
     current_session: str | None = None
+    started_at: datetime | None = None
+    stopped_at: datetime | None = None
+    last_command_id: UUID | None = None
+    last_command_status: str | None = None
+    last_command_reason_code: str | None = None
+    instruments: list[str] = Field(default_factory=list)
+    stream_batches: list[JsonPayload] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
     warning: str | None = None
 
 

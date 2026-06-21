@@ -299,9 +299,11 @@ python scripts/run_data_only_shadow_smoke.py --instruments SBER,GAZP,LKOH,YDEX,T
 ```
 
 The dashboard Start action calls `/session/preflight` first. If `market_open=false`,
-the UI shows `blocked_by_preflight` and does not submit a start command. Direct
-`POST /robot/start` calls are also guarded by API preflight and return a rejected
-command response when the market is closed or unavailable.
+the UI shows a rejected/preflight-blocked command with `reason_code` and
+`next_session_at`. The frontend then calls `POST /robot/start` once so the API can
+persist a rejected `robot_command`/audit event; trade-core does not start streams.
+Direct `POST /robot/start` calls are also guarded by API preflight and return
+`accepted=false` when the market is closed or unavailable.
 
 The Start button must show an animated preflight/start progress state, not a silent
 disabled button. The command strip shows the phase, message, reason code and next
@@ -314,14 +316,22 @@ state for operator visibility and never enables trading:
 python scripts/run_broker_balance_refresh.py --json-output
 ```
 
-The Live Dashboard auto-refreshes broker balance through readonly `/portfolio/refresh`
-while the page is open. If T-Invest does not return an account or times out, the card
-shows a human-readable degraded reason instead of using raw `api_snapshot_unavailable`
-as the main operator text.
+The Live Dashboard bootstraps from one aggregated `/dashboard/state` snapshot and then
+uses app-level WebSockets (`/ws/dashboard`, `/ws/market`, `/ws/orders`) plus bounded
+fallback polling. Frontend containers should use same-origin `/api` and `/ws` so the
+browser does not fan out directly to `localhost:8000`.
 
-The Live Dashboard also shows quotes for the core universe. `/market/overview` prefers
-live order-book mid price and falls back to the latest stored `1m` candle close when
-the market is closed or no live book has been collected yet.
+The Live Dashboard auto-refreshes broker balance through readonly `/portfolio/refresh`
+while the page is open. The API container must have the readonly T-Bank token mounted;
+if `GetAccounts` is unavailable but `TRADING_ACCOUNT_ID` is set, refresh can still use
+that account id and only render the masked form.
+
+The Live Dashboard also shows quotes for the core universe. `GET /market/overview` is
+a fast local read-model endpoint: it always returns one row per core instrument, shows
+source/freshness/stale status, and does not call T-Invest. Explicit readonly broker
+quote refresh is `POST /market/quotes/refresh`, which may call `GetLastPrices` and
+`GetOrderBook` with bounded timeouts. Temporary request failures must not clear
+already displayed quotes.
 
 Runbook: `Docs/runbooks/data-only-shadow.md`.
 

@@ -113,6 +113,45 @@ class FakeDividendGateway:
         )
 
 
+class PastDividendGateway(FakeDividendGateway):
+    def __init__(self) -> None:
+        super().__init__()
+        self.trading_schedule_calls = 0
+
+    async def get_dividends(
+        self,
+        request: DividendsRequest,
+        metadata: object | None = None,
+    ) -> BrokerUnaryResponse:
+        del metadata
+        last_buy_date = datetime.now(tz=UTC).date() - timedelta(days=1)
+        return BrokerUnaryResponse(
+            method_name="GetDividends",
+            data={
+                "instrument_id": request.instrument.instrument_id,
+                "dividends": [
+                    {
+                        "instrument_id": request.instrument.instrument_id,
+                        "record_date": (last_buy_date + timedelta(days=2)).isoformat(),
+                        "last_buy_date": last_buy_date.isoformat(),
+                        "amount_per_share": "1.00",
+                        "currency": "RUB",
+                    }
+                ],
+            },
+            headers={},
+        )
+
+    async def trading_schedules(
+        self,
+        request: TradingSchedulesRequest,
+        metadata: object | None = None,
+    ) -> BrokerUnaryResponse:
+        del request, metadata
+        self.trading_schedule_calls += 1
+        raise AssertionError("Past dividend ex-date inference must not call TradingSchedules")
+
+
 class ResolvingDividendGateway(FakeDividendGateway):
     def __init__(self) -> None:
         super().__init__()
@@ -288,6 +327,32 @@ def test_tbank_dividend_sync_creates_api_import_events_and_future_windows() -> N
         assert len(special_days) == 1
         assert special_days[0].special_day_type == "future_dividend_risk_window"
         assert special_days[0].trade_policy == "shadow_only"
+    engine.dispose()
+
+
+def test_dividend_sync_skips_broker_schedule_for_past_last_buy_date() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        _seed_instrument(session)
+        gateway = PastDividendGateway()
+        result = asyncio.run(
+            DividendSyncService(
+                session=session,
+                broker_gateway=cast(BrokerGateway, gateway),
+            ).run(
+                DividendSyncConfig(
+                    instruments=("SBER",),
+                    from_date=datetime.now(tz=UTC).date() - timedelta(days=10),
+                    to_date=datetime.now(tz=UTC).date(),
+                )
+            )
+        )
+
+        event = session.execute(select(CorporateActionEventRow)).scalar_one()
+        assert result.status == "completed"
+        assert event.action_payload["ex_date_inference_source"] == "fallback_next_weekday"
+        assert gateway.trading_schedule_calls == 0
     engine.dispose()
 
 

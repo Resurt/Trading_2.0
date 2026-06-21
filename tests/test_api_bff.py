@@ -640,14 +640,19 @@ def test_robot_status_and_market_overview(
     assert status["balance"]["balance_degraded"] is False
     assert "account-1" not in str(status["balance"])
     assert market["instruments"][0]["instrument_id"] == "MOEX:SBER"
+    assert len(market["instruments"]) == 8
     assert market["instruments"][0]["last_price"] == "100.05000000"
-    assert market["instruments"][0]["last_price_source"] == "live_order_book"
-    assert market["instruments"][0]["quote_status"] == "live"
+    assert market["instruments"][0]["last_price_source"] == "live_order_book_mid"
+    assert market["instruments"][0]["quote_status"] == "stale"
+    assert market["instruments"][0]["is_price_stale"] is True
     assert market["instruments"][0]["mid_price"] == "100.05000000"
+    assert market["instruments"][0]["spread_bps"] == "9.9950"
     assert latest_microstructure[0]["source"] == "data_only_shadow"
     assert latest_microstructure[0]["spread_bps"] == "9.9950"
     assert microstructure_summary["snapshots_count"] == 1
     assert data_shadow_status["real_orders_disabled"] is True
+    assert data_shadow_status["collector_state"] in {"stopped", "collecting", "starting"}
+    assert data_shadow_status["instruments"][:2] == ["MOEX:SBER", "MOEX:GAZP"]
     assert "Strategy trading disabled" in data_shadow_status["warning"]
 
 
@@ -668,7 +673,7 @@ def test_portfolio_summary_degrades_when_balance_missing(tmp_path: Path) -> None
 def test_market_overview_uses_latest_candle_when_order_book_missing(tmp_path: Path) -> None:
     database = DatabaseService(f"sqlite+pysqlite:///{tmp_path / 'quotes-fallback.db'}")
     Base.metadata.create_all(database.engine)
-    now = utc(2026, 6, 20, 18)
+    now = utc(2026, 6, 19, 18)
     with database.session_scope() as session:
         session.add(
             InstrumentRegistry(
@@ -713,8 +718,29 @@ def test_market_overview_uses_latest_candle_when_order_book_missing(tmp_path: Pa
 
     assert market["instruments"][0]["instrument_id"] == "MOEX:SBER"
     assert market["instruments"][0]["last_price"] == "312.42000000"
-    assert market["instruments"][0]["last_price_source"] == "last_candle"
-    assert market["instruments"][0]["quote_status"] == "last_close"
+    assert market["instruments"][0]["last_price_source"] == "latest_market_candle_close"
+    assert market["instruments"][0]["quote_status"] in {"live", "stale"}
+    assert market["instruments"][0]["is_price_stale"] is True
+
+
+def test_market_overview_is_local_read_model_not_broker_call(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import trade_core.infra.tbank as tbank_module
+
+    class FailingGateway:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+            raise AssertionError("GET /market/overview must not construct broker gateway")
+
+    monkeypatch.setattr(tbank_module, "TBankBrokerGateway", FailingGateway)
+    client = make_client(tmp_path)
+
+    market = client.get("/market/overview").json()
+
+    assert len(market["instruments"]) == 8
+    assert {row["instrument_id"] for row in market["instruments"]} >= {"MOEX:SBER", "MOEX:GAZP"}
 
 
 def test_portfolio_refresh_masks_account_id_and_updates_summary(
