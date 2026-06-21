@@ -66,7 +66,7 @@ function mountWithStores() {
   market.overview = {
     generated_at: "2026-06-13T07:10:00Z",
     instruments: [
-      quoteFixture("MOEX:SBER", "SBER", "100.05", "live", "live_order_book_mid"),
+      quoteFixture("MOEX:SBER", "SBER", "100.05", "live", "live_exchange_order_book"),
       quoteFixture("MOEX:GAZP", "GAZP", "104.49", "stale", "latest_market_candle_close"),
       quoteFixture("MOEX:LKOH", "LKOH", "4377", "stale", "latest_market_candle_close"),
       quoteFixture("MOEX:YDEX", "YDEX", "3912", "stale", "latest_market_candle_close"),
@@ -182,6 +182,16 @@ function quoteFixture(
   return {
     instrument_id: instrumentId,
     ticker,
+    class_code: "TQBR",
+    board: "TQBR",
+    exchange: "MOEX",
+    venue_type: live ? "official_exchange" : "stale_local",
+    trading_mode: live ? "standard_exchange" : "exchange_closed",
+    official_exchange_open: live,
+    official_exchange_closed: !live && quoteStatus !== "previous_close",
+    quote_source: source,
+    quote_allowed_for_data_collection: live,
+    quote_allowed_for_display: true,
     last_price: price,
     last_price_at: live ? "2026-06-13T07:10:00Z" : "2026-06-11T20:50:00Z",
     last_price_ts: live ? "2026-06-13T07:10:00Z" : "2026-06-11T20:50:00Z",
@@ -199,19 +209,36 @@ function quoteFixture(
     spread: live ? "0.1" : null,
     spread_abs: live ? "0.1" : null,
     spread_bps: live ? "10.0" : null,
+    spread_abs_rub: live ? "0.1" : null,
+    spread_units_validated: true,
     mid_price: live ? price : null,
     market_quality: live ? "0.92" : null,
+    market_quality_score: live ? "0.92" : null,
+    display_market_quality_score: live ? "0.92" : null,
+    calibration_market_quality_score: live ? "0.92" : null,
+    market_quality_label: live ? "good" : "unknown",
+    market_quality_components: live
+      ? {
+          spread_score: "0.65",
+          final_display_score: "0.92",
+          final_calibration_score: "0.92",
+        }
+      : {},
     best_bid: live ? "100" : null,
     best_ask: live ? "100.1" : null,
     bid_depth_lots: live ? "100" : null,
     ask_depth_lots: live ? "120" : null,
     book_imbalance: live ? "-0.09" : null,
-    order_book_source: live ? "tbank_order_book" : null,
+    order_book_source: live ? "live_exchange_order_book" : null,
     order_book_ts: live ? "2026-06-13T07:10:00Z" : null,
+    order_book_age_ms: live ? 500 : null,
     order_book_stale: !live,
     order_book_summary: live
       ? {
-          source: "tbank_order_book",
+          source: "live_exchange_order_book",
+          venue_type: "official_exchange",
+          quote_allowed_for_data_collection: true,
+          include_in_calibration: true,
           bids: [
             { price: "100.00", quantity_lots: "10" },
             { price: "99.98", quantity_lots: "30" },
@@ -224,6 +251,8 @@ function quoteFixture(
           best_ask_qty_lots: "12",
           bid_depth_lots: "100",
           ask_depth_lots: "120",
+          spread_abs_rub: "0.1",
+          spread_bps: "10.0",
         }
       : {},
     recent_market_trades: live
@@ -236,6 +265,10 @@ function quoteFixture(
           },
         ]
       : [],
+    market_trades_source: live ? "order_book_summary_payload" : "no_market_trades_samples",
+    market_trades_age_ms: live ? 500 : null,
+    reason_code: live ? null : "stale_price_fallback",
+    warning: live ? null : "stale_price_fallback",
     quote_payload: {},
   };
 }

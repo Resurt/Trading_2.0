@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 
 from trade_core.market_data.bars import BarEngine
 from trade_core.market_data.event_bus import MarketEventBus
@@ -108,8 +109,13 @@ class MarketDataPipeline:
         )
         if self._store is not None:
             context = self._session_context_provider(order_book.instrument_id)
+            payload = dict(order_book.payload)
+            payload["recent_market_trades"] = self._read_models.recent_trades(
+                order_book.instrument_id
+            )[:20]
+            enriched_order_book = replace(order_book, payload=payload)
             self._store.save_order_book_summary(
-                order_book=order_book,
+                order_book=enriched_order_book,
                 market_state=market_state,
                 context=context,
             )

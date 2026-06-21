@@ -237,3 +237,20 @@ This mode is for data collection only:
 - no `CancelOrder`.
 
 Use `scripts/run_data_shadow_summary_report.py` for spread/depth/quality summaries.
+## Venue And Quality Semantics
+
+Market data rows carry `venue_type`, `official_exchange_open`, and
+`include_in_calibration`. Official MOEX exchange samples may be used for calibration.
+Broker OTC/indicative and stale local fallback rows are display-only unless a future
+operator workflow explicitly opts into separate OTC analysis.
+
+Spread units are separate: `spread_abs`/`spread_abs_rub` are RUB and `spread_bps` is
+`spread_abs / mid_price * 10000`. Market quality is component-based and stores
+`spread_score`, `depth_score`, `touch_depth_score`, `depth_concentration_score`,
+`imbalance_score`, `freshness_score`, `venue_score`, `trade_tape_score`,
+`final_display_score`, and `final_calibration_score`.
+
+Display quality describes the current visible book. Calibration quality is zero/not
+applicable when the official exchange is closed or the venue is not `official_exchange`.
+The initial model is heuristic and must be calibrated after 10-20 official exchange
+trading days of microstructure collection.

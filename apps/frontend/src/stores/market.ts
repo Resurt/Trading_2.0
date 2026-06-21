@@ -54,6 +54,7 @@ export const useMarketStore = defineStore("market", () => {
   const liveConnection = ref<ConnectionState>("idle");
   let marketSocket: WebSocket | null = null;
   let marketPollTimer: number | null = null;
+  let quoteRefreshTimer: number | null = null;
 
   const currentInstrument = computed<MarketInstrumentOverview | null>(() => {
     if (overview.value.instruments.length === 0) {
@@ -84,8 +85,10 @@ export const useMarketStore = defineStore("market", () => {
 
   const quoteRows = computed(() => overview.value.instruments);
 
-  async function fetchOverview(): Promise<void> {
-    loading.value = true;
+  async function fetchOverview(options: { silent?: boolean } = {}): Promise<void> {
+    if (!options.silent) {
+      loading.value = true;
+    }
     error.value = null;
     try {
       applyOverview(await apiClient.marketOverview());
@@ -93,9 +96,13 @@ export const useMarketStore = defineStore("market", () => {
         selectedInstrumentId.value = overview.value.instruments[0].instrument_id;
       }
     } catch (unknownError) {
-      error.value = unknownError instanceof Error ? unknownError.message : "Market overview failed";
+      if (overview.value.instruments.length === 0) {
+        error.value = unknownError instanceof Error ? unknownError.message : "Market overview failed";
+      }
     } finally {
-      loading.value = false;
+      if (!options.silent) {
+        loading.value = false;
+      }
     }
   }
 
@@ -133,7 +140,6 @@ export const useMarketStore = defineStore("market", () => {
       dataShadowStatus.value = await apiClient.dataShadowStatus();
     } catch (unknownError) {
       error.value = unknownError instanceof Error ? unknownError.message : "Data shadow status failed";
-      dataShadowStatus.value = EMPTY_DATA_SHADOW_STATUS;
     }
   }
 
@@ -167,22 +173,20 @@ export const useMarketStore = defineStore("market", () => {
     };
   }
 
-  function startMarketPolling(intervalMs = 15_000): void {
+  function startMarketPolling(intervalMs = 5_000, quoteRefreshIntervalMs = 30_000): void {
     if (marketPollTimer !== null) {
       return;
     }
     void refreshQuotes();
-    window.setTimeout(() => {
-      void fetchOverview();
-    }, 1500);
+    void fetchOverview({ silent: true });
     void fetchDataShadowStatus();
     marketPollTimer = window.setInterval(() => {
-      void refreshQuotes();
-      window.setTimeout(() => {
-        void fetchOverview();
-      }, 1500);
+      void fetchOverview({ silent: true });
       void fetchDataShadowStatus();
     }, intervalMs);
+    quoteRefreshTimer = window.setInterval(() => {
+      void refreshQuotes();
+    }, quoteRefreshIntervalMs);
   }
 
   function stopMarketPolling(): void {
@@ -191,6 +195,10 @@ export const useMarketStore = defineStore("market", () => {
     }
     window.clearInterval(marketPollTimer);
     marketPollTimer = null;
+    if (quoteRefreshTimer !== null) {
+      window.clearInterval(quoteRefreshTimer);
+      quoteRefreshTimer = null;
+    }
   }
 
   return {
@@ -243,12 +251,26 @@ function quoteSnapshotFields(instrument: MarketInstrumentOverview): Partial<Mark
     change_abs: instrument.change_abs,
     change_bps: instrument.change_bps,
     quote_status: instrument.quote_status,
+    quote_source: instrument.quote_source,
+    quote_allowed_for_data_collection: instrument.quote_allowed_for_data_collection,
+    quote_allowed_for_display: instrument.quote_allowed_for_display,
+    venue_type: instrument.venue_type,
+    trading_mode: instrument.trading_mode,
+    official_exchange_open: instrument.official_exchange_open,
+    official_exchange_closed: instrument.official_exchange_closed,
     last_candle_timeframe: instrument.last_candle_timeframe,
     spread: instrument.spread,
     spread_abs: instrument.spread_abs,
     spread_bps: instrument.spread_bps,
+    spread_abs_rub: instrument.spread_abs_rub,
+    spread_units_validated: instrument.spread_units_validated,
     mid_price: instrument.mid_price,
     market_quality: instrument.market_quality,
+    market_quality_score: instrument.market_quality_score,
+    display_market_quality_score: instrument.display_market_quality_score,
+    calibration_market_quality_score: instrument.calibration_market_quality_score,
+    market_quality_label: instrument.market_quality_label,
+    market_quality_components: instrument.market_quality_components,
     best_bid: instrument.best_bid,
     best_ask: instrument.best_ask,
     bid_depth_lots: instrument.bid_depth_lots,
@@ -256,8 +278,13 @@ function quoteSnapshotFields(instrument: MarketInstrumentOverview): Partial<Mark
     book_imbalance: instrument.book_imbalance,
     order_book_source: instrument.order_book_source,
     order_book_ts: instrument.order_book_ts,
+    order_book_age_ms: instrument.order_book_age_ms,
     order_book_stale: instrument.order_book_stale,
     recent_market_trades: instrument.recent_market_trades,
+    market_trades_source: instrument.market_trades_source,
+    market_trades_age_ms: instrument.market_trades_age_ms,
+    reason_code: instrument.reason_code,
+    warning: instrument.warning,
     order_book_summary: instrument.order_book_summary,
     quote_payload: instrument.quote_payload,
   };
@@ -268,6 +295,15 @@ function shouldKeepPreviousQuote(
   next: MarketInstrumentOverview,
 ): boolean {
   if (!previous.last_price) {
+    return false;
+  }
+  if (next.official_exchange_closed !== previous.official_exchange_closed) {
+    return false;
+  }
+  if (next.quote_source === "broker_quote_exchange_closed") {
+    return false;
+  }
+  if (!isQuoteSnapshotStillFresh(previous)) {
     return false;
   }
   if (!next.last_price) {
@@ -284,11 +320,34 @@ function shouldKeepPreviousQuote(
   return quoteTimestamp(previous.last_price_at) > quoteTimestamp(next.last_price_at);
 }
 
+function isQuoteSnapshotStillFresh(instrument: MarketInstrumentOverview): boolean {
+  if (
+    ![
+      "live_order_book_mid",
+      "tbank_last_price",
+      "live_exchange_order_book",
+      "live_exchange_last_price",
+      "broker_quote_exchange_closed",
+      "broker_otc_order_book",
+      "broker_indicative_quote",
+    ].includes(instrument.last_price_source ?? "")
+  ) {
+    return true;
+  }
+  return Date.now() - quoteTimestamp(instrument.last_price_at) <= 60_000;
+}
+
 function quoteSourcePriority(source: string | null): number {
-  if (source === "live_order_book_mid") {
+  if (source === "live_exchange_order_book" || source === "live_order_book_mid") {
+    return 6;
+  }
+  if (source === "live_exchange_last_price") {
+    return 5;
+  }
+  if (source === "broker_quote_exchange_closed" || source === "broker_otc_order_book") {
     return 4;
   }
-  if (source === "tbank_last_price") {
+  if (source === "broker_indicative_quote" || source === "tbank_last_price") {
     return 3;
   }
   if (source === "latest_market_candle_close") {

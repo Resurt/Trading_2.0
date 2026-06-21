@@ -254,7 +254,8 @@ Current Live Dashboard blocks:
 
 - Balance card
 - session type, phase, broker status and micro-session
-- cockpit-style connection chips with human labels, not raw `unknown` / `loading` codes
+- one cockpit-style broker/API connection chip with a human label, not repeated
+  `panel/quotes/portfolio` chips in several places
 - compact quote cards for the core universe: SBER, GAZP, LKOH, YDEX, TATN, GMKN, OZON, VTBR
 - Data-only Shadow Status
 - selected instrument panel with price, bid/ask, mid, spread, depth, imbalance and book quality
@@ -305,6 +306,13 @@ Quotes:
 - A successful readonly `GetOrderBook` response is treated as fresh by broker
   response receipt time; the exchange timestamp remains visible only as a
   diagnostic field.
+- Successful readonly quote refresh rows are cached briefly by the API, so a later
+  `/market/overview` or dashboard snapshot cannot immediately replace live broker
+  quotes with older candle fallback rows.
+- Polling model while the dashboard is open: local `/market/overview` and
+  `/runtime/data-shadow/status` every 5 seconds, readonly broker
+  `/market/quotes/refresh` no more often than every 30 seconds, and
+  `/portfolio/refresh` every 20 seconds.
 - If a refresh request times out, the dashboard keeps the last good quote instead of
   clearing the quote grid.
 - The quote grid is card-based and must not require horizontal scrolling for the
@@ -334,3 +342,18 @@ Analytics pages:
 - Historical Data: candle quality, instrument registry, dividend/special-day state and replay links.
 - Intraday Analytics: session tabs for morning/main/evening/weekend, per-session summary, hour/micro-session rows and instrument x timeframe x side table.
 - Calibration Center: Run Diagnostics, diagnosis, rolling performance cube, filters, market regime summary, top/dead contours, warnings and candidate config proposals.
+## Market Source Display
+
+The Live Dashboard must not show broker OTC/indicative quotes as MOEX live. Top-level
+status separates official MOEX session, broker quote availability, data-only collection,
+and trading-disabled state. Quote cards show source, venue, freshness, spread in
+`bps / RUB`, and whether the row is eligible for calibration.
+
+When MOEX is officially closed and broker quotes are available, the UI displays a
+broker/indicative badge and a closed-exchange reason. Stale candle fallback remains
+visible with timestamp and stale badge, but is never labelled live.
+
+The selected instrument panel shows venue type, quote source, bid/ask/mid, spread,
+depth, imbalance, display quality, calibration quality, order-book age, and trade tape
+status. `/ws/market` is the primary live path; REST polling is fallback and must not
+clear last good data on timeout.

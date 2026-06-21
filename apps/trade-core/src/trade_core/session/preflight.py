@@ -16,6 +16,7 @@ from trade_core.broker_gateway import (
     TradingStatusRequest,
 )
 from trade_core.session.models import ScheduleWindow, TradingSchedule
+from trade_core.session.moex_calendar import MoexCalendarService
 from trading_common.enums import SessionPhase, SessionType
 
 JsonPayload = dict[str, Any]
@@ -46,6 +47,21 @@ class TradingSessionPreflightResult:
     session_phase: str
     broker_trading_status: str
     api_trade_available: bool
+    official_exchange_open: bool
+    official_exchange_closed: bool
+    official_exchange_reason_code: str | None
+    official_exchange_source: str | None
+    broker_stream_available: bool
+    broker_otc_or_indicative_available: bool
+    api_trade_available_raw: bool
+    api_trade_available_for_exchange: bool
+    quote_source_allowed_for_data_collection: bool
+    data_only_collection_allowed: bool
+    streams_for_display_allowed: bool
+    streams_for_calibration_allowed: bool
+    venue_type: str
+    trading_mode: str
+    broker_availability_ignored_because_official_exchange_closed: bool
     next_session_at: datetime | None
     next_session_type: str | None
     current_window_start_at: datetime | None
@@ -67,6 +83,25 @@ class TradingSessionPreflightResult:
             "session_phase": self.session_phase,
             "broker_trading_status": self.broker_trading_status,
             "api_trade_available": self.api_trade_available,
+            "official_exchange_open": self.official_exchange_open,
+            "official_exchange_closed": self.official_exchange_closed,
+            "official_exchange_reason_code": self.official_exchange_reason_code,
+            "official_exchange_source": self.official_exchange_source,
+            "broker_stream_available": self.broker_stream_available,
+            "broker_otc_or_indicative_available": self.broker_otc_or_indicative_available,
+            "api_trade_available_raw": self.api_trade_available_raw,
+            "api_trade_available_for_exchange": self.api_trade_available_for_exchange,
+            "quote_source_allowed_for_data_collection": (
+                self.quote_source_allowed_for_data_collection
+            ),
+            "data_only_collection_allowed": self.data_only_collection_allowed,
+            "streams_for_display_allowed": self.streams_for_display_allowed,
+            "streams_for_calibration_allowed": self.streams_for_calibration_allowed,
+            "venue_type": self.venue_type,
+            "trading_mode": self.trading_mode,
+            "broker_availability_ignored_because_official_exchange_closed": (
+                self.broker_availability_ignored_because_official_exchange_closed
+            ),
             "next_session_at": (
                 self.next_session_at.isoformat() if self.next_session_at else None
             ),
@@ -92,8 +127,14 @@ class TradingSessionPreflightResult:
 class TradingSessionPreflightService:
     """Evaluate broker calendar/status before any live data-only smoke."""
 
-    def __init__(self, broker_gateway: BrokerGateway) -> None:
+    def __init__(
+        self,
+        broker_gateway: BrokerGateway,
+        *,
+        moex_calendar: MoexCalendarService | None = None,
+    ) -> None:
         self._broker_gateway = broker_gateway
+        self._moex_calendar = moex_calendar or MoexCalendarService()
 
     async def run(
         self,
@@ -101,6 +142,11 @@ class TradingSessionPreflightService:
     ) -> TradingSessionPreflightResult:
         cfg = config or TradingSessionPreflightConfig()
         now_msk = _ensure_msk(cfg.now or datetime.now(tz=MSK))
+        official_decision = self._moex_calendar.decision(
+            now_msk.date(),
+            market="stock",
+            now_msk=now_msk,
+        )
         schedule, source, warnings = await self._schedule(cfg, now_msk)
         current_window = schedule.active_window(now_msk)
         next_window = _next_window(schedule, now_msk)
@@ -118,8 +164,14 @@ class TradingSessionPreflightService:
             if status_values
             else "unknown"
         )
-        api_trade_available = any(
+        api_trade_available_raw = any(
             item.get("api_trade_available") is True for item in per_instrument.values()
+        )
+        broker_otc_or_indicative_available = _broker_otc_or_indicative_available(
+            status_values
+        )
+        broker_stream_available = bool(status_values) and (
+            api_trade_available_raw or broker_otc_or_indicative_available
         )
         status_unavailable = bool(cfg.instruments) and not status_values
 
@@ -140,28 +192,93 @@ class TradingSessionPreflightService:
             else now_msk.date()
         )
 
-        market_open = (
+        exchange_session_open_by_schedule = (
             current_window is not None
             and session_phase == "continuous_trading"
-            and (api_trade_available or not cfg.instruments)
+            and (api_trade_available_raw or not cfg.instruments)
             and not status_unavailable
         )
+        broker_exchange_status_available = (
+            bool(status_values) and not broker_otc_or_indicative_available
+        )
+        official_exchange_closed = official_decision.official_exchange_closed
+        official_exchange_open = (
+            not official_exchange_closed
+            and exchange_session_open_by_schedule
+            and (broker_exchange_status_available or not cfg.instruments)
+            and (
+                official_decision.official_exchange_open
+                or official_decision.reason_code
+                in {"no_local_override", "default_weekday_calendar"}
+            )
+        )
+        api_trade_available_for_exchange = (
+            (api_trade_available_raw or not cfg.instruments)
+            and official_exchange_open
+            and not official_exchange_closed
+        )
+        market_open = official_exchange_open and api_trade_available_for_exchange
         market_closed_expected = not market_open and (
             current_window is None
             or session_phase in {"closed", "break"}
-            or (bool(status_values) and not api_trade_available)
+            or (bool(status_values) and not api_trade_available_for_exchange)
+            or official_exchange_closed
         )
+        if official_exchange_closed:
+            session_phase = "closed"
+            market_closed_expected = True
         reason_code = _reason_code(
             market_open=market_open,
             current_window=current_window,
             now_msk=now_msk,
             status_unavailable=status_unavailable,
-            api_trade_available=api_trade_available,
+            api_trade_available=api_trade_available_for_exchange,
             status_values=status_values,
-            source=source,
+            source="official_moex_calendar_override" if official_exchange_closed else source,
         )
+        if official_exchange_closed:
+            reason_code = official_decision.reason_code
+        elif broker_otc_or_indicative_available and not official_exchange_open:
+            reason_code = "broker_otc_only"
+            market_closed_expected = True
         if reason_code == "broker_status_unavailable":
             market_closed_expected = False
+        quote_source_allowed_for_data_collection = market_open and official_exchange_open
+        data_only_collection_allowed = quote_source_allowed_for_data_collection
+        streams_for_calibration_allowed = quote_source_allowed_for_data_collection
+        streams_for_display_allowed = broker_stream_available or market_open
+        venue_type = _venue_type(
+            official_exchange_open=official_exchange_open,
+            official_exchange_closed=official_exchange_closed,
+            broker_otc_or_indicative_available=broker_otc_or_indicative_available,
+            broker_stream_available=broker_stream_available,
+            current_window=current_window,
+        )
+        trading_mode = _trading_mode(
+            market_open=market_open,
+            official_exchange_closed=official_exchange_closed,
+            venue_type=venue_type,
+            session_type=session_type,
+        )
+        if official_exchange_closed:
+            warnings = tuple(
+                dict.fromkeys(
+                    (
+                        *warnings,
+                        "official_exchange_closed_overrides_broker_status",
+                    )
+                )
+            )
+            source = "official_moex_calendar_override"
+            if official_decision.next_possible_session_at is not None:
+                next_window = ScheduleWindow(
+                    session_type=SessionType.WEEKDAY_MORNING,
+                    session_phase=SessionPhase.CONTINUOUS_TRADING,
+                    start_at=official_decision.next_possible_session_at,
+                    end_at=official_decision.next_possible_session_at + timedelta(hours=3),
+                    trading_date=official_decision.next_possible_session_at.date(),
+                    calendar_date=official_decision.next_possible_session_at.date(),
+                )
 
         return TradingSessionPreflightResult(
             market_open=market_open,
@@ -172,7 +289,28 @@ class TradingSessionPreflightService:
             session_type=session_type,
             session_phase=session_phase,
             broker_trading_status=broker_status,
-            api_trade_available=api_trade_available,
+            api_trade_available=api_trade_available_for_exchange,
+            official_exchange_open=official_exchange_open,
+            official_exchange_closed=official_exchange_closed,
+            official_exchange_reason_code=(
+                official_decision.reason_code if official_decision.is_exception_day else None
+            ),
+            official_exchange_source=official_decision.source,
+            broker_stream_available=broker_stream_available,
+            broker_otc_or_indicative_available=broker_otc_or_indicative_available,
+            api_trade_available_raw=api_trade_available_raw,
+            api_trade_available_for_exchange=api_trade_available_for_exchange,
+            quote_source_allowed_for_data_collection=(
+                quote_source_allowed_for_data_collection
+            ),
+            data_only_collection_allowed=data_only_collection_allowed,
+            streams_for_display_allowed=streams_for_display_allowed,
+            streams_for_calibration_allowed=streams_for_calibration_allowed,
+            venue_type=venue_type,
+            trading_mode=trading_mode,
+            broker_availability_ignored_because_official_exchange_closed=(
+                official_exchange_closed and (api_trade_available_raw or broker_stream_available)
+            ),
             next_session_at=next_window.start_at if next_window else None,
             next_session_type=(
                 _session_type_value(next_window.session_type) if next_window else None
@@ -324,6 +462,54 @@ def _status_payload(response: BrokerUnaryResponse, *, instrument_id: str) -> Jso
         "market_order_available": bool(response.data.get("market_order_available", False)),
         "source": response.method_name,
     }
+
+
+def _broker_otc_or_indicative_available(status_values: list[object]) -> bool:
+    normalized = [str(item).lower() for item in status_values]
+    return any(
+        "dealer" in item
+        or "otc" in item
+        or "indicative" in item
+        or item.startswith("dealer_")
+        for item in normalized
+    )
+
+
+def _venue_type(
+    *,
+    official_exchange_open: bool,
+    official_exchange_closed: bool,
+    broker_otc_or_indicative_available: bool,
+    broker_stream_available: bool,
+    current_window: ScheduleWindow | None,
+) -> str:
+    if official_exchange_open:
+        return "official_exchange"
+    if broker_otc_or_indicative_available:
+        return "broker_otc"
+    if broker_stream_available:
+        return "broker_indicative"
+    if current_window is None:
+        return "stale_local"
+    return "unknown"
+
+
+def _trading_mode(
+    *,
+    market_open: bool,
+    official_exchange_closed: bool,
+    venue_type: str,
+    session_type: str,
+) -> str:
+    if market_open and venue_type == "official_exchange":
+        return "weekend_exchange" if session_type == "weekend" else "standard_exchange"
+    if venue_type == "broker_otc":
+        return "broker_otc_only"
+    if venue_type == "broker_indicative":
+        return "indicative_only"
+    if official_exchange_closed:
+        return "exchange_closed"
+    return "unknown"
 
 
 def _reason_code(

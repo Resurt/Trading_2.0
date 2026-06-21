@@ -358,7 +358,7 @@ def test_data_only_shadow_runtime_does_not_subscribe_strategy_handler(tmp_path: 
 
 
 def test_data_only_shadow_runtime_waits_for_operator_start_and_stops(tmp_path: Path) -> None:
-    gateway = RecordingStreamGateway(now=msk(2026, 6, 21, 11, 30))
+    gateway = RecordingStreamGateway(now=msk(2026, 6, 13, 11, 30))
     runtime = TradeCoreRuntime(
         config=replace(runtime_config(tmp_path), data_only_shadow_enabled=True),
         launch_policy=LaunchModePolicy.from_mode(RuntimeMode.SHADOW),
@@ -386,6 +386,12 @@ def test_data_only_shadow_runtime_waits_for_operator_start_and_stops(tmp_path: P
                     "preflight_result": {
                         "market_open": True,
                         "market_closed_expected": False,
+                        "official_exchange_open": True,
+                        "official_exchange_closed": False,
+                        "venue_type": "official_exchange",
+                        "quote_source_allowed_for_data_collection": True,
+                        "data_only_collection_allowed": True,
+                        "streams_for_calibration_allowed": True,
                         "reason_code": "market_open",
                     },
                 },

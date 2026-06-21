@@ -41,6 +41,11 @@ const PHASE_LABELS: Record<string, string> = {
 
 const QUOTE_SOURCE_LABELS: Record<string, string> = {
   live_order_book_mid: "mid стакана",
+  live_exchange_order_book: "MOEX стакан",
+  live_exchange_last_price: "MOEX последняя цена",
+  broker_quote_exchange_closed: "брокерская котировка",
+  broker_otc_order_book: "внебиржевой стакан",
+  broker_indicative_quote: "индикативная котировка",
   tbank_last_price: "последняя цена T-Invest",
   latest_market_candle_close: "последняя свеча",
   previous_close: "предыдущее закрытие",
@@ -49,6 +54,8 @@ const QUOTE_SOURCE_LABELS: Record<string, string> = {
 
 const QUOTE_STATUS_LABELS: Record<string, string> = {
   live: "свежая",
+  broker_quote: "брокерская",
+  indicative: "индикативная",
   stale: "устарела",
   previous_close: "пред. закрытие",
   unavailable: "нет цены",
@@ -82,20 +89,28 @@ function quotePriority(instrument: MarketInstrumentOverview): number {
   if (instrument.quote_status === "live") {
     return 0;
   }
-  if (instrument.quote_status === "stale") {
+  if (instrument.quote_status === "broker_quote" || instrument.quote_status === "indicative") {
     return 1;
   }
-  if (instrument.quote_status === "previous_close") {
+  if (instrument.quote_status === "stale") {
     return 2;
   }
-  return 3;
+  if (instrument.quote_status === "previous_close") {
+    return 3;
+  }
+  return 4;
 }
 
 function toneFromQuote(instrument: MarketInstrumentOverview): "good" | "warn" | "muted" {
   if (instrument.quote_status === "live") {
     return "good";
   }
-  if (instrument.quote_status === "stale" || instrument.quote_status === "previous_close") {
+  if (
+    instrument.quote_status === "broker_quote" ||
+    instrument.quote_status === "indicative" ||
+    instrument.quote_status === "stale" ||
+    instrument.quote_status === "previous_close"
+  ) {
     return "warn";
   }
   return "muted";
@@ -155,6 +170,11 @@ function reasonLabel(reason: string | null | undefined): string {
     broker_accounts_empty: "T-Bank вернул пустой список счетов",
     broker_balance_timeout: "T-Bank не ответил вовремя",
     api_snapshot_unavailable: "snapshot API не получен",
+    moex_dsvd_cancelled_platform_update:
+      "официальная MOEX-сессия закрыта: ДСВД 20-21 июня отменена",
+    broker_otc_only: "доступны только брокерские внебиржевые котировки",
+    no_market_trades_samples: "лента сделок не пришла",
+    not_for_calibration: "не для калибровки",
   };
   return labels[reason ?? ""] ?? reason ?? "нет причины";
 }
@@ -259,7 +279,13 @@ function blockedCash(): string {
 }
 
 function sessionDetail(): string {
+  const preflight = robot.lastSessionPreflight;
   const date = robot.session.trading_date ?? robot.session.calendar_date ?? "нет даты";
+  if (preflight?.official_exchange_closed) {
+    return `${date} · официальная MOEX закрыта · ${reasonLabel(
+      preflight.official_exchange_reason_code ?? preflight.reason_code,
+    )}`;
+  }
   const marketOpen = market.dataShadowStatus.market_open;
   const openLabel = marketOpen === null ? "проверяю календарь" : marketOpen ? "рынок открыт" : "рынок закрыт";
   const reason = market.dataShadowStatus.reason_code ?? robot.lastCommandReasonCode;
@@ -267,6 +293,12 @@ function sessionDetail(): string {
 }
 
 function phaseDetail(): string {
+  const preflight = robot.lastSessionPreflight;
+  if (preflight?.official_exchange_closed) {
+    return `Выходная сессия отменена. Следующая биржевая сессия: ${compactDateTime(
+      preflight.next_session_at,
+    )}`;
+  }
   const expected = market.dataShadowStatus.market_closed_expected;
   if (expected === true) {
     return `По расписанию закрыто. Следующая сессия: ${compactDateTime(market.dataShadowStatus.next_session_at)}`;
@@ -345,6 +377,19 @@ function formatBps(value: string | null | undefined): string {
   return value === null || value === undefined ? "Нет данных" : `${formatDecimal(value, 1)} bps`;
 }
 
+function formatSpread(instrument: MarketInstrumentOverview | null): string {
+  if (!instrument?.spread_bps && !instrument?.spread_abs_rub && !instrument?.spread_abs) {
+    return "Нет данных";
+  }
+  return `${formatBps(instrument.spread_bps)} / ${formatPriceValue(
+    instrument.spread_abs_rub ?? instrument.spread_abs,
+  )} ₽`;
+}
+
+function formatPriceValue(value: string | null | undefined): string {
+  return formatDecimal(value, 2);
+}
+
 function formatLots(value: string | null | undefined): string {
   return value === null || value === undefined ? "Нет данных" : `${formatDecimal(value, 0)} лотов`;
 }
@@ -377,10 +422,37 @@ function quoteFreshness(instrument: MarketInstrumentOverview): string {
   if (instrument.quote_status === "live") {
     return `${timestamp} · свежая`;
   }
+  if (instrument.quote_status === "broker_quote") {
+    return `${timestamp} · брокерская, не для калибровки`;
+  }
+  if (instrument.quote_status === "indicative") {
+    return `${timestamp} · индикативная`;
+  }
   if (instrument.quote_status === "previous_close") {
     return `${timestamp} · пред. закрытие`;
   }
   return `${timestamp} · устарела`;
+}
+
+function venueLabel(value: string | null | undefined): string {
+  const labels: Record<string, string> = {
+    official_exchange: "официальная MOEX",
+    broker_otc: "брокерская / внебиржевая",
+    broker_indicative: "индикативная",
+    stale_local: "локальная история",
+    unknown: "источник уточняется",
+  };
+  return labels[value ?? "unknown"] ?? value ?? "источник уточняется";
+}
+
+function calibrationQualityLabel(instrument: MarketInstrumentOverview | null): string {
+  if (!instrument) {
+    return "Нет данных";
+  }
+  if (!instrument.quote_allowed_for_data_collection) {
+    return "не для калибровки";
+  }
+  return formatPercentRatio(instrument.calibration_market_quality_score);
 }
 
 function selectedInstrumentTitle(): string {
@@ -397,6 +469,9 @@ function orderBookReason(): string {
     return "instrument_unavailable";
   }
   if (instrument.order_book_source && !instrument.order_book_stale) {
+    if (instrument.official_exchange_closed) {
+      return "Стакан получен как брокерская котировка: официальная MOEX-сессия закрыта, в калибровку не идет.";
+    }
     return "Стакан свежий.";
   }
   if (instrument.order_book_stale && instrument.order_book_ts) {
@@ -474,50 +549,6 @@ function degradedFlagLabel(flag: string): string {
         <p class="eyebrow">operator panel</p>
         <h1>Live Dashboard</h1>
       </div>
-      <div class="heading-status">
-        <span class="connection-chip" :class="`connection-chip--${robot.liveConnection}`">
-          <span class="connection-chip__dot" />
-          Панель: {{ robot.liveConnection === "live" ? "онлайн" : robot.liveConnection === "loading" ? "подключение" : robot.liveConnection === "degraded" ? "нет связи" : "ожидание" }}
-        </span>
-        <span class="connection-chip" :class="`connection-chip--${market.liveConnection}`">
-          <span class="connection-chip__dot" />
-          Котировки: {{ market.liveConnection === "live" ? "онлайн" : market.liveConnection === "loading" ? "подключение" : market.liveConnection === "degraded" ? "нет связи" : "ожидание" }}
-        </span>
-        <span class="connection-chip" :class="`connection-chip--${portfolio.liveConnection}`">
-          <span class="connection-chip__dot" />
-          Портфель: {{ portfolio.liveConnection === "live" ? "онлайн" : portfolio.liveConnection === "loading" ? "подключение" : portfolio.liveConnection === "degraded" ? "нет связи" : "ожидание" }}
-        </span>
-      </div>
-    </div>
-
-    <div class="operator-status-grid" aria-label="dashboard data status">
-      <section class="operator-status-card" :class="`operator-status-card--${serviceTone(robot.error, robot.loading)}`">
-        <div class="operator-status-card__head">
-          <span class="operator-status-card__dot" />
-          <strong>Панель</strong>
-        </div>
-        <p>{{ dashboardStatusText() }}</p>
-      </section>
-      <section
-        class="operator-status-card"
-        :class="`operator-status-card--${serviceTone(market.error, market.loading, market.quoteRows.length > 0)}`"
-      >
-        <div class="operator-status-card__head">
-          <span class="operator-status-card__dot" />
-          <strong>Котировки</strong>
-        </div>
-        <p>{{ marketStatusText() }}</p>
-      </section>
-      <section
-        class="operator-status-card"
-        :class="`operator-status-card--${serviceTone(portfolio.error, robot.balanceRefreshLoading, !robot.status.balance.balance_degraded)}`"
-      >
-        <div class="operator-status-card__head">
-          <span class="operator-status-card__dot" />
-          <strong>Портфель</strong>
-        </div>
-        <p>{{ portfolioStatusText() }}</p>
-      </section>
     </div>
 
     <div
@@ -594,8 +625,8 @@ function degradedFlagLabel(flag: string): string {
               <span class="quote-card__freshness">{{ quoteFreshness(instrument) }}</span>
               <span class="quote-card__meta">
                 <small>bid/ask {{ formatDecimal(instrument.best_bid, 2) }} / {{ formatDecimal(instrument.best_ask, 2) }}</small>
-                <small>спред {{ formatBps(instrument.spread_bps) }}</small>
-                <small>стакан {{ formatPercentRatio(instrument.market_quality) }}</small>
+                <small>спред {{ formatSpread(instrument) }}</small>
+                <small>стакан {{ formatPercentRatio(instrument.display_market_quality_score) }}</small>
               </span>
               <small :class="`quote-change quote-change--${changeTone(instrument.change_bps)}`">
                 {{ formatChangeBps(instrument.change_bps) }}
@@ -635,10 +666,12 @@ function degradedFlagLabel(flag: string): string {
             />
             <MetricTile label="Bid / Ask" :value="`${formatDecimal(selectedInstrument?.best_bid, 2)} / ${formatDecimal(selectedInstrument?.best_ask, 2)}`" />
             <MetricTile label="Mid" :value="formatDecimal(selectedInstrument?.mid_price, 2)" :detail="formatBps(selectedInstrument?.spread_bps)" />
-            <MetricTile label="Спред" :value="formatDecimal(selectedInstrument?.spread_abs, 4)" :detail="formatBps(selectedInstrument?.spread_bps)" tone="info" />
+            <MetricTile label="Спред" :value="selectedInstrument ? formatSpread(selectedInstrument) : 'Нет данных'" detail="bps / ₽" tone="info" />
             <MetricTile label="Глубина" :value="`${formatLots(selectedInstrument?.bid_depth_lots)} / ${formatLots(selectedInstrument?.ask_depth_lots)}`" />
             <MetricTile label="Имбаланс" :value="formatDecimal(selectedInstrument?.book_imbalance, 3)" />
-            <MetricTile label="Качество стакана" :value="formatPercentRatio(selectedInstrument?.market_quality)" :tone="Number(selectedInstrument?.market_quality ?? 0) >= 0.7 ? 'good' : 'warn'" />
+            <MetricTile label="Качество стакана" :value="formatPercentRatio(selectedInstrument?.display_market_quality_score)" :detail="selectedInstrument?.market_quality_label ?? 'unknown'" :tone="Number(selectedInstrument?.display_market_quality_score ?? 0) >= 0.7 ? 'good' : 'warn'" />
+            <MetricTile label="Калибровка" :value="calibrationQualityLabel(selectedInstrument)" :detail="selectedInstrument?.quote_allowed_for_data_collection ? 'можно использовать' : 'display-only'" tone="warn" />
+            <MetricTile label="Источник" :value="venueLabel(selectedInstrument?.venue_type)" :detail="selectedInstrument ? sourceLabel(selectedInstrument.quote_source) : 'Нет данных'" />
             <MetricTile label="Статус стакана" :value="selectedInstrument?.order_book_stale ? 'устарел' : selectedInstrument?.order_book_source ? 'свежий' : 'нет стакана'" :detail="orderBookReason()" />
           </div>
 

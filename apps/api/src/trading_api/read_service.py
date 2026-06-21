@@ -13,6 +13,8 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from trade_core.session.moex_calendar import MSK, MoexCalendarDecision, MoexCalendarService
+from trading_api.market_quality import calculate_market_quality, calculate_spread_metrics
 from trading_api.schemas import (
     BlockerAnalyticsResponse,
     BlockerAnalyticsRow,
@@ -277,11 +279,18 @@ class BffReadService:
     def market_overview(self) -> MarketOverviewResponse:
         instruments = _dashboard_universe_from_env()
         current_session = self.current_session()
+        now_msk = datetime.now(tz=MSK)
+        official_decision = MoexCalendarService().decision(
+            now_msk.date(),
+            market="stock",
+            now_msk=now_msk,
+        )
         overviews = [
             MarketInstrumentOverview(
                 **self._market_instrument_payload(
                     instrument_id,
                     current_session=current_session,
+                    official_decision=official_decision,
                 )
             )
             for instrument_id in instruments
@@ -293,12 +302,20 @@ class BffReadService:
         instrument_id: str,
         *,
         current_session: SessionSnapshotResponse,
+        official_decision: MoexCalendarDecision,
     ) -> JsonPayload:
         now = datetime.now(tz=UTC)
         registry = self._instrument_registry_row(instrument_id)
         summary = self._latest_order_book_summary(instrument_id)
         candle = self._latest_market_candle(instrument_id)
         previous_close = self._previous_close(instrument_id, current_session.trading_date)
+        official_exchange_closed = official_decision.official_exchange_closed
+        official_exchange_open = (
+            not official_exchange_closed
+            and current_session.session_phase == "continuous_trading"
+        )
+        class_code = registry.class_code if registry is not None else "TQBR"
+        board = class_code
         price_candidates: list[tuple[datetime, Decimal, str]] = []
         order_book_stale = True
         order_book_age = None
@@ -306,8 +323,15 @@ class BffReadService:
             order_book_age = _age_seconds(summary.ts_utc, now=now)
             order_book_stale = order_book_age is None or order_book_age > 30
             if summary.mid_price is not None:
+                book_price_source = (
+                    "live_exchange_order_book"
+                    if official_exchange_open
+                    else "broker_quote_exchange_closed"
+                    if official_exchange_closed
+                    else "broker_indicative_quote"
+                )
                 price_candidates.append(
-                    (summary.ts_utc, summary.mid_price, "live_order_book_mid")
+                    (summary.ts_utc, summary.mid_price, book_price_source)
                 )
         if candle is not None:
             price_candidates.append(
@@ -340,6 +364,21 @@ class BffReadService:
             is_stale=is_price_stale,
             has_price=last_price is not None,
         )
+        venue_type = _venue_type_for_source(
+            source=last_price_source,
+            official_exchange_open=official_exchange_open,
+            official_exchange_closed=official_exchange_closed,
+        )
+        trading_mode = _trading_mode_for_context(
+            venue_type=venue_type,
+            official_exchange_open=official_exchange_open,
+            official_exchange_closed=official_exchange_closed,
+            session_type=current_session.session_type,
+        )
+        quote_allowed_for_data_collection = (
+            official_exchange_open and venue_type == "official_exchange"
+        )
+        quote_allowed_for_display = last_price is not None
         change_abs = (
             last_price - previous_close
             if last_price is not None and previous_close is not None
@@ -355,12 +394,70 @@ class BffReadService:
 
         order_book_summary: JsonPayload = {}
         recent_market_trades: list[JsonPayload] = []
+        spread_metrics = calculate_spread_metrics(
+            summary.best_bid_price if summary is not None else None,
+            summary.best_ask_price if summary is not None else None,
+        )
+        spread_abs = (
+            spread_metrics.spread_abs
+            if spread_metrics.spread_abs is not None
+            else summary.spread_abs
+            if summary is not None
+            else None
+        )
+        spread_bps = (
+            spread_metrics.spread_bps
+            if spread_metrics.spread_bps is not None
+            else summary.spread_bps
+            if summary is not None
+            else None
+        )
+        mid_price = (
+            spread_metrics.mid_price
+            if spread_metrics.mid_price is not None
+            else summary.mid_price
+            if summary is not None
+            else None
+        )
+        market_quality_components = calculate_market_quality(
+            spread_bps=spread_bps,
+            bid_depth_lots=summary.bid_depth_lots if summary is not None else None,
+            ask_depth_lots=summary.ask_depth_lots if summary is not None else None,
+            best_bid_qty_lots=summary.best_bid_qty_lots if summary is not None else None,
+            best_ask_qty_lots=summary.best_ask_qty_lots if summary is not None else None,
+            book_imbalance=summary.book_imbalance if summary is not None else None,
+            order_book_age_ms=(
+                int(order_book_age * 1000) if order_book_age is not None else None
+            ),
+            order_book_stale=order_book_stale,
+            venue_type=venue_type,
+            official_exchange_open=official_exchange_open,
+            trades_count=len(recent_market_trades),
+        )
         if summary is not None:
             recent_market_trades = _payload_list(summary.summary_payload, "recent_market_trades")
+            market_quality_components = calculate_market_quality(
+                spread_bps=spread_bps,
+                bid_depth_lots=summary.bid_depth_lots,
+                ask_depth_lots=summary.ask_depth_lots,
+                best_bid_qty_lots=summary.best_bid_qty_lots,
+                best_ask_qty_lots=summary.best_ask_qty_lots,
+                book_imbalance=summary.book_imbalance,
+                order_book_age_ms=(
+                    int(order_book_age * 1000) if order_book_age is not None else None
+                ),
+                order_book_stale=order_book_stale,
+                venue_type=venue_type,
+                official_exchange_open=official_exchange_open,
+                trades_count=len(recent_market_trades),
+            )
             bids = _payload_list(summary.summary_payload, "bids")
             asks = _payload_list(summary.summary_payload, "asks")
             order_book_summary = {
-                "source": "live_order_book",
+                "source": last_price_source or "unavailable",
+                "venue_type": venue_type,
+                "quote_allowed_for_data_collection": quote_allowed_for_data_collection,
+                "include_in_calibration": quote_allowed_for_data_collection,
                 "depth_levels": summary.depth_levels,
                 "bids": bids[:20],
                 "asks": asks[:20],
@@ -369,17 +466,23 @@ class BffReadService:
                 "bid_depth_lots": str(summary.bid_depth_lots),
                 "ask_depth_lots": str(summary.ask_depth_lots),
                 "book_imbalance": _optional_str(summary.book_imbalance),
-                "spread_bps": _optional_str(summary.spread_bps),
+                "spread_abs_rub": _optional_str(spread_abs),
+                "spread_bps": _optional_str(spread_bps),
                 "ts_utc": summary.ts_utc.isoformat(),
                 "exchange_ts": summary.exchange_ts.isoformat()
                 if summary.exchange_ts is not None
                 else summary.ts_utc.isoformat(),
                 "age_seconds": order_book_age,
+                "age_ms": int(order_book_age * 1000) if order_book_age is not None else None,
                 "is_stale": order_book_stale,
+                "market_quality_components": market_quality_components,
             }
         elif candle is not None:
             order_book_summary = {
                 "source": "latest_market_candle_close",
+                "venue_type": "stale_local",
+                "quote_allowed_for_data_collection": False,
+                "include_in_calibration": False,
                 "last_candle_open": str(candle.open_price),
                 "last_candle_high": str(candle.high_price),
                 "last_candle_low": str(candle.low_price),
@@ -395,6 +498,16 @@ class BffReadService:
                 if registry is not None
                 else _ticker_from_instrument_id(instrument_id)
             ),
+            "class_code": class_code,
+            "board": board,
+            "exchange": "MOEX",
+            "venue_type": venue_type,
+            "trading_mode": trading_mode,
+            "official_exchange_open": official_exchange_open,
+            "official_exchange_closed": official_exchange_closed,
+            "quote_source": last_price_source or "unavailable",
+            "quote_allowed_for_data_collection": quote_allowed_for_data_collection,
+            "quote_allowed_for_display": quote_allowed_for_display,
             "last_price": last_price,
             "last_price_at": last_price_at,
             "last_price_ts": last_price_at,
@@ -409,26 +522,75 @@ class BffReadService:
             "api_trade_available": current_session.session_phase == "continuous_trading",
             "quote_status": quote_status,
             "last_candle_timeframe": candle.timeframe if candle is not None else None,
-            "spread": summary.spread_abs if summary is not None else None,
-            "spread_abs": summary.spread_abs if summary is not None else None,
-            "spread_bps": summary.spread_bps if summary is not None else None,
-            "mid_price": summary.mid_price if summary is not None else None,
-            "market_quality": summary.market_quality_score if summary is not None else None,
+            "spread": spread_abs,
+            "spread_abs": spread_abs,
+            "spread_bps": spread_bps,
+            "spread_abs_rub": spread_abs,
+            "spread_units_validated": True,
+            "mid_price": mid_price,
+            "market_quality": market_quality_components.get(
+                "display_market_quality_score"
+            ),
+            "market_quality_score": market_quality_components.get(
+                "display_market_quality_score"
+            ),
+            "display_market_quality_score": market_quality_components.get(
+                "display_market_quality_score"
+            ),
+            "calibration_market_quality_score": market_quality_components.get(
+                "calibration_market_quality_score"
+            ),
+            "market_quality_label": str(
+                market_quality_components.get("market_quality_label", "unknown")
+            ),
+            "market_quality_components": market_quality_components,
             "best_bid": summary.best_bid_price if summary is not None else None,
             "best_ask": summary.best_ask_price if summary is not None else None,
             "bid_depth_lots": summary.bid_depth_lots if summary is not None else None,
             "ask_depth_lots": summary.ask_depth_lots if summary is not None else None,
             "book_imbalance": summary.book_imbalance if summary is not None else None,
-            "order_book_source": "live_order_book" if summary is not None else None,
+            "order_book_source": last_price_source if summary is not None else None,
             "order_book_ts": summary.ts_utc if summary is not None else None,
+            "order_book_age_ms": (
+                int(order_book_age * 1000) if order_book_age is not None else None
+            ),
             "order_book_stale": order_book_stale,
             "recent_market_trades": recent_market_trades,
+            "market_trades_source": (
+                "order_book_summary_payload"
+                if recent_market_trades
+                else "no_market_trades_samples"
+            ),
+            "market_trades_age_ms": None,
+            "reason_code": (
+                official_decision.reason_code
+                if official_exchange_closed
+                else "no_price_source_available"
+                if last_price is None
+                else None
+            ),
+            "warning": (
+                "broker_quote_not_for_calibration"
+                if official_exchange_closed and summary is not None
+                else "stale_price_fallback"
+                if is_price_stale and last_price is not None
+                else None
+            ),
             "order_book_summary": order_book_summary,
             "quote_payload": {
                 "source": last_price_source or "unavailable",
+                "quote_source": last_price_source or "unavailable",
+                "venue_type": venue_type,
+                "trading_mode": trading_mode,
+                "official_exchange_open": official_exchange_open,
+                "official_exchange_closed": official_exchange_closed,
+                "quote_allowed_for_data_collection": quote_allowed_for_data_collection,
+                "quote_allowed_for_display": quote_allowed_for_display,
+                "include_in_calibration": quote_allowed_for_data_collection,
                 "reason_code": "no_price_source_available" if last_price is None else None,
                 "price_staleness_seconds": price_staleness_seconds,
                 "order_book_stale": order_book_stale,
+                "market_quality_components": market_quality_components,
             },
         }
 
@@ -542,18 +704,30 @@ class BffReadService:
         )
 
     def data_shadow_status(self) -> DataShadowStatusResponse:
-        summary = self.microstructure_summary(lookback_minutes=60)
-        latest = self.latest_microstructure(limit=1)
+        since = datetime.now(tz=UTC) - timedelta(minutes=60)
+        count, latest_ts, avg_spread, avg_quality = self._session.execute(
+            select(
+                func.count(MarketMicrostructureSnapshot.snapshot_id),
+                func.max(MarketMicrostructureSnapshot.ts_utc),
+                func.avg(MarketMicrostructureSnapshot.spread_bps),
+                func.avg(MarketMicrostructureSnapshot.market_quality_score),
+            ).where(MarketMicrostructureSnapshot.ts_utc >= since)
+        ).one()
+        latest_session = self._session.execute(
+            select(MarketMicrostructureSnapshot.session_type)
+            .order_by(MarketMicrostructureSnapshot.ts_utc.desc())
+            .limit(1)
+        ).scalar_one_or_none()
         enabled = _bool_env(os.environ.get("TRADING_DATA_ONLY_SHADOW"))
         command = self._latest_robot_command()
         result_payload = command.result_payload if command is not None else {}
         preflight_payload = _preflight_payload_from_command(command)
         collector_state = _collector_state_from_command(command, stream_alive=False)
         last_message_age_seconds: Decimal | None = None
-        if summary.latest_ts_utc is not None:
+        if latest_ts is not None:
             age_seconds = max(
                 Decimal("0"),
-                Decimal(str((datetime.now(tz=UTC) - summary.latest_ts_utc).total_seconds())),
+                Decimal(str((datetime.now(tz=UTC) - latest_ts).total_seconds())),
             )
             last_message_age_seconds = age_seconds.quantize(Decimal("0.001"))
         stream_alive = (
@@ -582,14 +756,12 @@ class BffReadService:
             stream_alive=stream_alive,
             last_message_age_seconds=last_message_age_seconds,
             candles_received=None,
-            order_book_snapshots=summary.snapshots_count,
-            market_microstructure_snapshots=summary.snapshots_count,
-            avg_spread_bps=summary.avg_spread_bps,
-            p95_spread_bps=summary.p95_spread_bps,
-            avg_market_quality_score=summary.avg_market_quality_score,
-            current_session=latest[0].session_type
-            if latest
-            else _str_payload_value(preflight_payload, "session_type"),
+            order_book_snapshots=int(count or 0),
+            market_microstructure_snapshots=int(count or 0),
+            avg_spread_bps=_decimal_or_none(avg_spread),
+            p95_spread_bps=None,
+            avg_market_quality_score=_decimal_or_none(avg_quality),
+            current_session=latest_session or _str_payload_value(preflight_payload, "session_type"),
             started_at=_datetime_payload_value(result_payload, "started_at"),
             stopped_at=_datetime_payload_value(result_payload, "stopped_at"),
             last_command_id=command.command_id if command is not None else None,
@@ -1800,7 +1972,14 @@ def _is_price_stale(
     age = _age_seconds(timestamp, now=now)
     if age is None:
         return True
-    if source == "live_order_book_mid":
+    if source in {
+        "live_order_book_mid",
+        "live_exchange_order_book",
+        "live_exchange_last_price",
+        "broker_quote_exchange_closed",
+        "broker_otc_order_book",
+        "broker_indicative_quote",
+    }:
         return age > 30
     if source == "previous_close":
         return True
@@ -1821,7 +2000,51 @@ def _quote_status(
         return "unavailable"
     if source == "previous_close":
         return "previous_close"
+    if source in {"broker_quote_exchange_closed", "broker_otc_order_book"}:
+        return "broker_quote"
+    if source == "broker_indicative_quote":
+        return "indicative"
     return "stale" if is_stale else "live"
+
+
+def _venue_type_for_source(
+    *,
+    source: str | None,
+    official_exchange_open: bool,
+    official_exchange_closed: bool,
+) -> str:
+    if (
+        source in {"live_exchange_order_book", "live_exchange_last_price"}
+        and official_exchange_open
+    ):
+        return "official_exchange"
+    if source in {"broker_quote_exchange_closed", "broker_otc_order_book"}:
+        return "broker_otc"
+    if source == "broker_indicative_quote":
+        return "broker_indicative"
+    if source in {"latest_market_candle_close", "previous_close"}:
+        return "stale_local"
+    if official_exchange_closed:
+        return "unknown"
+    return "unknown"
+
+
+def _trading_mode_for_context(
+    *,
+    venue_type: str,
+    official_exchange_open: bool,
+    official_exchange_closed: bool,
+    session_type: str | None,
+) -> str:
+    if official_exchange_open and venue_type == "official_exchange":
+        return "weekend_exchange" if session_type == "weekend" else "standard_exchange"
+    if official_exchange_closed and venue_type == "broker_otc":
+        return "broker_otc_only"
+    if official_exchange_closed and venue_type == "broker_indicative":
+        return "indicative_only"
+    if official_exchange_closed:
+        return "exchange_closed"
+    return "unknown"
 
 
 def _collector_state_from_command(command: RobotCommand | None, *, stream_alive: bool) -> str:
@@ -2194,6 +2417,14 @@ def _decimal_avg(values: list[Decimal]) -> Decimal | None:
     if not values:
         return None
     return (sum(values, Decimal("0")) / Decimal(len(values))).quantize(Decimal("0.0001"))
+
+
+def _decimal_or_none(value: object) -> Decimal | None:
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return value.quantize(Decimal("0.0001"))
+    return Decimal(str(value)).quantize(Decimal("0.0001"))
 
 
 def _decimal_percentile(values: list[Decimal], percentile: float) -> Decimal | None:

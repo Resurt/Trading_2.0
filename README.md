@@ -304,6 +304,8 @@ the UI shows a rejected/preflight-blocked command with `reason_code` and
 persist a rejected `robot_command`/audit event; trade-core does not start streams.
 Direct `POST /robot/start` calls are also guarded by API preflight and return
 `accepted=false` when the market is closed or unavailable.
+The API keeps a short 30-second server-side preflight cache so the Start request can
+reuse the fresh dashboard preflight result instead of repeating a slow broker status pass.
 
 The Start button must show an animated preflight/start progress state, not a silent
 disabled button. The command strip shows the phase, message, reason code and next
@@ -333,7 +335,14 @@ source/freshness/stale status, and does not call T-Invest. Explicit readonly bro
 quote refresh is `POST /market/quotes/refresh`, which may call `GetLastPrices` and
 `GetOrderBook` with bounded timeouts. Temporary request failures must not clear
 already displayed quotes; if the readonly gateway is unavailable, refresh falls back
-to the local overview instead of blocking the dashboard.
+to the local overview instead of blocking the dashboard. A successful readonly quote
+refresh is cached briefly by the API, so the next `/market/overview` and dashboard
+snapshot do not overwrite live broker quotes with old candle fallback rows.
+
+Dashboard polling is intentionally split: local market overview and data-only status
+poll every 5 seconds, readonly broker quote refresh no more often than every 30
+seconds, and broker balance refresh every 60 seconds. Polling is silent and must not
+clear the last good balance or quote rows on timeout.
 
 Runbook: `Docs/runbooks/data-only-shadow.md`.
 
@@ -342,3 +351,26 @@ Runbook: `Docs/runbooks/data-only-shadow.md`.
 When code changes affect runtime behavior, API contracts, database schema, frontend surfaces or operator workflows, docs must be updated in the same change. If code changes but docs do not, the final response must explain why docs were not affected.
 
 Current documentation index: `Docs/README.md`.
+
+## Market Source Semantics
+
+Official MOEX calendar status is the top-level gate for data-only calibration collection.
+Broker availability is not the same thing as an official exchange session: T-Invest may
+return broker/OTC/indicative quotes while MOEX is officially closed. Those quotes may be
+displayed on the Live Dashboard, but they are tagged as `broker_quote_exchange_closed`,
+`broker_otc_order_book`, or `broker_indicative_quote` and are excluded from calibration by
+default.
+
+The local MOEX calendar includes the 2026-06-20 and 2026-06-21 DSV(D) cancellation for
+stock and derivatives markets due to the planned trading/clearing platform update. This
+override is a local fixture, not an internet dependency. Start is blocked with
+`moex_dsvd_cancelled_platform_update` on those dates.
+
+Spread units are explicit: `spread_abs`/`spread_abs_rub` are RUB, while
+`spread_bps = (best_ask - best_bid) / mid_price * 10000`. Market quality is split into
+display quality and calibration quality. Display quality describes the visible book;
+calibration quality is zero/not applicable when the venue is not `official_exchange`.
+
+The frontend uses `/ws/market` as the primary live market update path and REST polling as
+a fallback. Failed refreshes must not clear the last good quotes; stale/local candle
+fallbacks must show source and timestamp.

@@ -136,6 +136,21 @@ class SessionPreflightResponse(BaseModel):
     session_phase: str
     broker_trading_status: str
     api_trade_available: bool
+    official_exchange_open: bool = False
+    official_exchange_closed: bool = False
+    official_exchange_reason_code: str | None = None
+    official_exchange_source: str | None = None
+    broker_stream_available: bool = False
+    broker_otc_or_indicative_available: bool = False
+    api_trade_available_raw: bool = False
+    api_trade_available_for_exchange: bool = False
+    quote_source_allowed_for_data_collection: bool = False
+    data_only_collection_allowed: bool = False
+    streams_for_display_allowed: bool = False
+    streams_for_calibration_allowed: bool = False
+    venue_type: str = "unknown"
+    trading_mode: str = "unknown"
+    broker_availability_ignored_because_official_exchange_closed: bool = False
     next_session_at: datetime | None = None
     next_session_type: str | None = None
     current_window_start_at: datetime | None = None
@@ -179,6 +194,16 @@ class SignalResponse(BaseModel):
 class MarketInstrumentOverview(BaseModel):
     instrument_id: str
     ticker: str | None = None
+    class_code: str | None = None
+    board: str | None = None
+    exchange: str = "MOEX"
+    venue_type: str = "unknown"
+    trading_mode: str = "unknown"
+    official_exchange_open: bool = False
+    official_exchange_closed: bool = False
+    quote_source: str = "unavailable"
+    quote_allowed_for_data_collection: bool = False
+    quote_allowed_for_display: bool = False
     last_price: Decimal | None = None
     last_price_at: datetime | None = None
     last_price_ts: datetime | None = None
@@ -196,8 +221,15 @@ class MarketInstrumentOverview(BaseModel):
     spread: Decimal | None = None
     spread_abs: Decimal | None = None
     spread_bps: Decimal | None = None
+    spread_abs_rub: Decimal | None = None
+    spread_units_validated: bool = True
     mid_price: Decimal | None = None
     market_quality: Decimal | None = None
+    market_quality_score: Decimal | None = None
+    display_market_quality_score: Decimal | None = None
+    calibration_market_quality_score: Decimal | None = None
+    market_quality_label: str = "unknown"
+    market_quality_components: JsonPayload = Field(default_factory=dict)
     best_bid: Decimal | None = None
     best_ask: Decimal | None = None
     bid_depth_lots: Decimal | None = None
@@ -205,8 +237,13 @@ class MarketInstrumentOverview(BaseModel):
     book_imbalance: Decimal | None = None
     order_book_source: str | None = None
     order_book_ts: datetime | None = None
+    order_book_age_ms: int | None = None
     order_book_stale: bool = True
     recent_market_trades: list[JsonPayload] = Field(default_factory=list)
+    market_trades_source: str | None = None
+    market_trades_age_ms: int | None = None
+    reason_code: str | None = None
+    warning: str | None = None
     order_book_summary: JsonPayload = Field(default_factory=dict)
     quote_payload: JsonPayload = Field(default_factory=dict)
 

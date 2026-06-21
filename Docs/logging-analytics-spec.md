@@ -1133,7 +1133,9 @@ New structured events/payloads:
 - `data_only_shadow_preflight`: preflight-only smoke result before stream startup.
 - `balance_refresh`: broker account/portfolio read model update; full account id must not be logged.
 - `market_quotes_refresh`: explicit readonly T-Invest `GetLastPrices`/`GetOrderBook`
-  refresh for dashboard quotes; no order methods are allowed.
+  refresh for dashboard quotes; no order methods are allowed. Payload should include
+  `instrument_count`, `live_rows`, `stale_rows`, `cache_ttl_seconds`, timeout/fallback
+  reason when present, and whether `/market/overview` cache overlay was updated.
 - `robot_command_rejected_preflight`: API rejected a Start command because preflight did
   not return `market_open=true`; payload includes `reason_code` and `preflight_result`.
 - `data_only_shadow_collection_started`: trade-core applied Start in data-only mode and
@@ -1150,3 +1152,14 @@ Required payload fields for preflight: `market_open`, `market_closed_expected`, 
 Required balance payload fields: `total_portfolio_value_rub`, `available_cash_rub`, `blocked_cash_rub`, `expected_yield_rub`, `free_collateral_rub`, `account_id_masked`, `balance_currency`, `last_balance_refresh_at`, `balance_freshness_seconds`, `balance_degraded`, `balance_degraded_reason_code`.
 
 Intraday analytics and Calibration Center payloads remain diagnostic-only. Candidate config proposal events must state that configs are draft/proposal only and are not applied automatically.
+## Market Source And Quality Events
+
+Market-source payloads must include official exchange and venue context:
+`official_exchange_open`, `official_exchange_closed`, `venue_type`, `trading_mode`,
+`quote_source`, `quote_allowed_for_data_collection`, and `include_in_calibration`.
+Broker OTC/indicative quotes are display-only by default and must not silently enter
+calibration reports.
+
+Order-book analytics store spread in separate units: `spread_abs_rub` and `spread_bps`.
+Quality payloads store display and calibration scores plus transparent components. Trade
+tape absence is logged as `no_market_trades_samples`; it is not hidden.

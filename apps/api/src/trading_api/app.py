@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import Callable, Iterator
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Annotated, Any, cast
 from uuid import UUID, uuid4
@@ -32,6 +32,7 @@ from trading_api.auth import (
     build_ws_ticket_manager,
     require_role,
 )
+from trading_api.market_quality import calculate_market_quality, calculate_spread_metrics
 from trading_api.read_service import BffReadService
 from trading_api.report_tasks import CeleryReportTaskClient, ReportTaskClient
 from trading_api.robot_control import RobotControlService
@@ -51,6 +52,7 @@ from trading_api.schemas import (
     DataShadowStatusResponse,
     HourlyReportResponse,
     IntradayAnalyticsSnapshotResponse,
+    MarketInstrumentOverview,
     MarketMicrostructureSnapshotResponse,
     MarketMicrostructureSummaryResponse,
     MarketOverviewResponse,
@@ -209,15 +211,24 @@ def create_fastapi_app(
                 if item.strip()
             ],
         }
-        if not preflight.market_open:
+        if not preflight.data_only_collection_allowed:
+            if preflight.official_exchange_closed:
+                message = (
+                    "Официальная сессия MOEX закрыта: ДСВД 20-21 июня отменена. "
+                    "Брокерские котировки могут отображаться только как "
+                    "внебиржевые/индикативные. Data-only сбор для калибровки "
+                    "не запущен."
+                )
+            else:
+                message = (
+                    "Рынок закрыт. Data-only сбор не запущен. "
+                    f"Причина: {preflight.reason_code}."
+                )
             return control.reject(
                 command=RobotCommand.START,
                 auth=allowed_auth,
                 reason_code=preflight.reason_code,
-                message=(
-                    "Рынок закрыт. Data-only сбор не запущен. "
-                    f"Причина: {preflight.reason_code}."
-                ),
+                message=message,
                 payload=command_payload,
             )
         response = control.request(
@@ -272,7 +283,7 @@ def create_fastapi_app(
         require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
         payload = _dashboard_payload(cast(FastAPI, request.app))
         try:
-            preflight = await _run_dashboard_session_preflight()
+            preflight = await _run_dashboard_session_preflight(request)
             payload["session_preflight"] = preflight.model_dump(mode="json")
         except Exception as exc:
             payload["session_preflight_error"] = _reason_from_exception(
@@ -296,7 +307,7 @@ def create_fastapi_app(
         del mode
         require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
         if not broker_checks:
-            return await _run_dashboard_session_preflight()
+            return await _run_dashboard_session_preflight(request)
         return await _run_session_preflight(request, instruments=instruments)
 
     @app.get("/positions", response_model=list[PositionResponse], tags=["portfolio"])
@@ -343,12 +354,13 @@ def create_fastapi_app(
 
     @app.get("/market/overview", response_model=MarketOverviewResponse, tags=["market"])
     def market_overview(
+        request: Request,
         service: ReadServiceDep,
         refresh: Annotated[bool, Query()] = True,
         instruments: Annotated[str | None, Query()] = None,
     ) -> MarketOverviewResponse:
         del refresh, instruments
-        return service.market_overview()
+        return _market_overview_with_cached_quotes(request.app, service.market_overview())
 
     @app.post("/market/quotes/refresh", response_model=MarketOverviewResponse, tags=["market"])
     async def market_quotes_refresh(
@@ -358,11 +370,13 @@ def create_fastapi_app(
         instruments: Annotated[str | None, Query()] = None,
     ) -> MarketOverviewResponse:
         require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
-        return await _market_overview_with_broker_quotes(
+        refreshed = await _market_overview_with_broker_quotes(
             request,
             overview=service.market_overview(),
             instruments=instruments or _default_preflight_instruments(),
         )
+        _store_market_quote_cache(request.app, refreshed)
+        return refreshed
 
     @app.get(
         "/market/microstructure/latest",
@@ -1542,13 +1556,19 @@ async def _run_session_preflight(
     gateway = cast(BrokerGateway, _preflight_broker_gateway())
     refs = _instrument_refs_for_preflight(_database_service(request), instruments)
     config = TradingSessionPreflightConfig(instruments=tuple(refs))
+    cache_key = _session_preflight_cache_key(refs)
+    cached = _cached_session_preflight(cast(FastAPI, request.app), cache_key)
+    if cached is not None:
+        return cached
     timeout_seconds = float(os.environ.get("TRADING_SESSION_PREFLIGHT_TIMEOUT_SECONDS", "8"))
     try:
         result = await asyncio.wait_for(
             TradingSessionPreflightService(gateway).run(config),
             timeout=timeout_seconds,
         )
-        return SessionPreflightResponse(**result.as_payload())
+        response = SessionPreflightResponse(**result.as_payload())
+        _store_session_preflight(cast(FastAPI, request.app), cache_key, response)
+        return response
     except TimeoutError:
         fallback_result = await TradingSessionPreflightService(
             cast(BrokerGateway, _UnavailableReadonlyBrokerGateway())
@@ -1560,16 +1580,26 @@ async def _run_session_preflight(
         "broker_preflight_timeout",
     ]
     payload["source"] = "fallback_preflight_timeout"
-    return SessionPreflightResponse(**payload)
+    response = SessionPreflightResponse(**payload)
+    _store_session_preflight(cast(FastAPI, request.app), cache_key, response)
+    return response
 
 
-async def _run_dashboard_session_preflight() -> SessionPreflightResponse:
+async def _run_dashboard_session_preflight(request: Request) -> SessionPreflightResponse:
     from trade_core.broker_gateway import BrokerGateway
     from trade_core.session.preflight import (
         TradingSessionPreflightConfig,
         TradingSessionPreflightService,
     )
 
+    app = cast(FastAPI, request.app)
+    refs = _instrument_refs_for_preflight(_database_service(request), None)
+    cached = _cached_session_preflight(
+        app,
+        _session_preflight_cache_key(refs),
+    )
+    if cached is not None:
+        return cached
     result = await TradingSessionPreflightService(
         cast(BrokerGateway, _UnavailableReadonlyBrokerGateway())
     ).run(TradingSessionPreflightConfig(instruments=()))
@@ -1581,6 +1611,53 @@ async def _run_dashboard_session_preflight() -> SessionPreflightResponse:
         "dashboard_calendar_only_no_broker_calls",
     ]
     return SessionPreflightResponse(**payload)
+
+
+def _session_preflight_cache_key(refs: list[Any]) -> str:
+    values = [
+        str(getattr(ref, "instrument_id", ref)).strip()
+        for ref in refs
+        if str(getattr(ref, "instrument_id", ref)).strip()
+    ]
+    return ",".join(sorted(values)) or "dashboard"
+
+
+def _session_preflight_cache_ttl_seconds() -> int:
+    raw = os.getenv("TRADING_SESSION_PREFLIGHT_CACHE_TTL_SECONDS", "30")
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 30
+
+
+def _session_preflight_cache(
+    app: FastAPI,
+) -> dict[str, tuple[SessionPreflightResponse, datetime]]:
+    cache = getattr(app.state, "session_preflight_cache", None)
+    if cache is None:
+        cache = {}
+        app.state.session_preflight_cache = cache
+    return cast(dict[str, tuple[SessionPreflightResponse, datetime]], cache)
+
+
+def _cached_session_preflight(app: FastAPI, key: str) -> SessionPreflightResponse | None:
+    cache = _session_preflight_cache(app)
+    item = cache.get(key)
+    if item is None:
+        return None
+    response, cached_at = item
+    if datetime.now(tz=UTC) - cached_at > timedelta(seconds=_session_preflight_cache_ttl_seconds()):
+        cache.pop(key, None)
+        return None
+    return response
+
+
+def _store_session_preflight(
+    app: FastAPI,
+    key: str,
+    response: SessionPreflightResponse,
+) -> None:
+    _session_preflight_cache(app)[key] = (response, datetime.now(tz=UTC))
 
 
 async def _run_broker_balance_refresh(
@@ -1685,9 +1762,18 @@ async def _market_overview_with_broker_quotes(
                     continue
                 prices_by_instrument[target_instrument_id] = item
 
+    context_by_instrument = {
+        instrument.instrument_id: {
+            "official_exchange_open": instrument.official_exchange_open,
+            "official_exchange_closed": instrument.official_exchange_closed,
+            "venue_type": instrument.venue_type,
+        }
+        for instrument in overview.instruments
+    }
     order_books_by_instrument = await _broker_order_books_by_instrument(
         gateway=gateway,
         refs=refs,
+        context_by_instrument=context_by_instrument,
     )
 
     refreshed = []
@@ -1711,16 +1797,51 @@ async def _market_overview_with_broker_quotes(
             refreshed.append(instrument)
             continue
         exchange_ts = _datetime_or_none(price_payload.get("exchange_ts"))
+        official_exchange_closed = instrument.official_exchange_closed
+        official_exchange_open = instrument.official_exchange_open
+        last_price_source = (
+            "live_exchange_last_price"
+            if official_exchange_open
+            else "broker_quote_exchange_closed"
+            if official_exchange_closed
+            else "broker_indicative_quote"
+        )
+        venue_type = (
+            "official_exchange"
+            if official_exchange_open
+            else "broker_otc"
+            if official_exchange_closed
+            else "broker_indicative"
+        )
         refreshed.append(
             instrument.model_copy(
                 update={
                     "last_price": price,
                     "last_price_at": exchange_ts or datetime.now(tz=UTC),
                     "last_price_ts": exchange_ts or datetime.now(tz=UTC),
-                    "last_price_source": "tbank_last_price",
+                    "last_price_source": last_price_source,
+                    "quote_source": last_price_source,
+                    "venue_type": venue_type,
+                    "quote_allowed_for_data_collection": official_exchange_open,
+                    "quote_allowed_for_display": True,
                     "is_price_stale": False,
                     "price_staleness_seconds": 0,
-                    "quote_status": "live",
+                    "quote_status": "live" if official_exchange_open else "broker_quote",
+                    "warning": (
+                        "broker_quote_not_for_calibration"
+                        if official_exchange_closed
+                        else None
+                    ),
+                    "quote_payload": {
+                        **instrument.quote_payload,
+                        "source": last_price_source,
+                        "quote_source": last_price_source,
+                        "venue_type": venue_type,
+                        "official_exchange_open": official_exchange_open,
+                        "official_exchange_closed": official_exchange_closed,
+                        "quote_allowed_for_data_collection": official_exchange_open,
+                        "include_in_calibration": official_exchange_open,
+                    },
                 }
             )
         )
@@ -1731,6 +1852,7 @@ async def _broker_order_books_by_instrument(
     *,
     gateway: Any,
     refs: list[Any],
+    context_by_instrument: dict[str, dict[str, object]],
 ) -> dict[str, dict[str, object]]:
     from trade_core.broker_gateway import OrderBookRequest
 
@@ -1745,7 +1867,15 @@ async def _broker_order_books_by_instrument(
             )
         except Exception:
             return instrument_id, None
-        return instrument_id, _order_book_overview_payload(response.data)
+        return instrument_id, _order_book_overview_payload(
+            response.data,
+            official_exchange_open=bool(
+                context_by_instrument.get(instrument_id, {}).get("official_exchange_open")
+            ),
+            official_exchange_closed=bool(
+                context_by_instrument.get(instrument_id, {}).get("official_exchange_closed")
+            ),
+        )
 
     results = await asyncio.gather(*(fetch(ref) for ref in refs))
     return {
@@ -1755,7 +1885,12 @@ async def _broker_order_books_by_instrument(
     }
 
 
-def _order_book_overview_payload(payload: dict[str, object]) -> dict[str, object] | None:
+def _order_book_overview_payload(
+    payload: dict[str, object],
+    *,
+    official_exchange_open: bool = False,
+    official_exchange_closed: bool = False,
+) -> dict[str, object] | None:
     bids = _price_levels(payload.get("bids"), reverse=True)
     asks = _price_levels(payload.get("asks"), reverse=False)
     if not bids or not asks:
@@ -1767,9 +1902,12 @@ def _order_book_overview_payload(payload: dict[str, object]) -> dict[str, object
     best_ask_price, best_ask_qty = asks[0]
     bid_depth = sum((qty for _, qty in bids[:5]), Decimal("0"))
     ask_depth = sum((qty for _, qty in asks[:5]), Decimal("0"))
-    mid_price = (best_bid_price + best_ask_price) / Decimal("2")
-    spread_abs = best_ask_price - best_bid_price
-    spread_bps = (spread_abs / mid_price * Decimal("10000")) if mid_price > 0 else None
+    spread_metrics = calculate_spread_metrics(best_bid_price, best_ask_price)
+    mid_price = spread_metrics.mid_price
+    spread_abs = spread_metrics.spread_abs
+    spread_bps = spread_metrics.spread_bps
+    if mid_price is None:
+        return None
     depth_total = bid_depth + ask_depth
     imbalance = None if depth_total == 0 else (bid_depth - ask_depth) / depth_total
     age_seconds = 0.0
@@ -1778,34 +1916,95 @@ def _order_book_overview_payload(payload: dict[str, object]) -> dict[str, object
         if exchange_ts is not None
         else None
     )
-    quality = _book_quality_score(
+    venue_type = (
+        "official_exchange"
+        if official_exchange_open
+        else "broker_otc"
+        if official_exchange_closed
+        else "broker_indicative"
+    )
+    quote_source = (
+        "live_exchange_order_book"
+        if official_exchange_open
+        else "broker_quote_exchange_closed"
+        if official_exchange_closed
+        else "broker_indicative_quote"
+    )
+    quality_components = calculate_market_quality(
         spread_bps=spread_bps,
-        imbalance=imbalance,
-        age_seconds=age_seconds,
+        bid_depth_lots=bid_depth,
+        ask_depth_lots=ask_depth,
+        best_bid_qty_lots=best_bid_qty,
+        best_ask_qty_lots=best_ask_qty,
+        book_imbalance=imbalance,
+        order_book_age_ms=int(age_seconds * 1000),
+        order_book_stale=False,
+        venue_type=venue_type,
+        official_exchange_open=official_exchange_open,
+        trades_count=0,
     )
     return {
+        "venue_type": venue_type,
+        "trading_mode": (
+            "standard_exchange"
+            if official_exchange_open
+            else "broker_otc_only"
+            if official_exchange_closed
+            else "indicative_only"
+        ),
+        "quote_source": quote_source,
+        "quote_allowed_for_data_collection": official_exchange_open,
+        "quote_allowed_for_display": True,
         "last_price": mid_price,
         "last_price_at": received_ts,
         "last_price_ts": received_ts,
-        "last_price_source": "live_order_book_mid",
+        "last_price_source": quote_source,
         "is_price_stale": False,
         "price_staleness_seconds": int(age_seconds),
-        "quote_status": "live",
+        "quote_status": "live" if official_exchange_open else "broker_quote",
         "spread": spread_abs,
         "spread_abs": spread_abs,
         "spread_bps": spread_bps,
+        "spread_abs_rub": spread_abs,
+        "spread_units_validated": True,
         "mid_price": mid_price,
-        "market_quality": quality,
+        "market_quality": quality_components.get("display_market_quality_score"),
+        "market_quality_score": quality_components.get("display_market_quality_score"),
+        "display_market_quality_score": quality_components.get(
+            "display_market_quality_score"
+        ),
+        "calibration_market_quality_score": quality_components.get(
+            "calibration_market_quality_score"
+        ),
+        "market_quality_label": quality_components.get(
+            "market_quality_label", "unknown"
+        ),
+        "market_quality_components": quality_components,
         "best_bid": best_bid_price,
         "best_ask": best_ask_price,
         "bid_depth_lots": bid_depth,
         "ask_depth_lots": ask_depth,
         "book_imbalance": imbalance,
-        "order_book_source": "tbank_order_book",
+        "order_book_source": quote_source,
         "order_book_ts": received_ts,
+        "order_book_age_ms": int(age_seconds * 1000),
         "order_book_stale": False,
+        "recent_market_trades": [],
+        "market_trades_source": "no_market_trades_samples",
+        "market_trades_age_ms": None,
+        "reason_code": (
+            "moex_dsvd_cancelled_platform_update"
+            if official_exchange_closed
+            else None
+        ),
+        "warning": (
+            "broker_quote_not_for_calibration" if official_exchange_closed else None
+        ),
         "order_book_summary": {
-            "source": "tbank_order_book",
+            "source": quote_source,
+            "venue_type": venue_type,
+            "quote_allowed_for_data_collection": official_exchange_open,
+            "include_in_calibration": official_exchange_open,
             "depth_levels": len(bids) + len(asks),
             "bids": [
                 {"price": str(price), "quantity_lots": str(quantity)}
@@ -1820,7 +2019,9 @@ def _order_book_overview_payload(payload: dict[str, object]) -> dict[str, object
             "bid_depth_lots": str(bid_depth),
             "ask_depth_lots": str(ask_depth),
             "book_imbalance": str(imbalance) if imbalance is not None else None,
+            "spread_abs_rub": str(spread_abs) if spread_abs is not None else None,
             "spread_bps": str(spread_bps) if spread_bps is not None else None,
+            "market_quality_components": quality_components,
             "exchange_ts": exchange_ts.isoformat() if exchange_ts is not None else None,
             "received_ts": received_ts.isoformat(),
             "age_seconds": round(age_seconds, 3),
@@ -1830,9 +2031,17 @@ def _order_book_overview_payload(payload: dict[str, object]) -> dict[str, object
             "is_stale": False,
         },
         "quote_payload": {
-            "source": "tbank_order_book",
+            "source": quote_source,
+            "quote_source": quote_source,
+            "venue_type": venue_type,
+            "official_exchange_open": official_exchange_open,
+            "official_exchange_closed": official_exchange_closed,
+            "quote_allowed_for_data_collection": official_exchange_open,
+            "quote_allowed_for_display": True,
+            "include_in_calibration": official_exchange_open,
             "price_staleness_seconds": int(age_seconds),
             "order_book_stale": False,
+            "market_quality_components": quality_components,
             "exchange_ts": exchange_ts.isoformat() if exchange_ts is not None else None,
             "exchange_age_seconds": round(exchange_age_seconds, 3)
             if exchange_age_seconds is not None
@@ -2212,6 +2421,60 @@ def _instrument_registry_payload(row: Any, resolved: bool) -> dict[str, Any]:
     }
 
 
+def _market_quote_cache(
+    app: FastAPI,
+) -> dict[str, tuple[MarketInstrumentOverview, datetime]]:
+    cache = getattr(app.state, "market_quote_refresh_cache", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        app.state.market_quote_refresh_cache = cache
+    return cast(dict[str, tuple[MarketInstrumentOverview, datetime]], cache)
+
+
+def _market_quote_cache_ttl_seconds() -> float:
+    return float(os.environ.get("MARKET_QUOTE_REFRESH_CACHE_TTL_SECONDS", "45"))
+
+
+def _store_market_quote_cache(app: FastAPI, overview: MarketOverviewResponse) -> None:
+    expires_at = datetime.now(tz=UTC) + timedelta(seconds=_market_quote_cache_ttl_seconds())
+    cache = _market_quote_cache(app)
+    cacheable_sources = {
+        "live_order_book_mid",
+        "tbank_last_price",
+        "live_exchange_order_book",
+        "live_exchange_last_price",
+        "broker_quote_exchange_closed",
+        "broker_otc_order_book",
+        "broker_indicative_quote",
+    }
+    for instrument in overview.instruments:
+        if instrument.last_price_source in cacheable_sources:
+            cache[instrument.instrument_id] = (instrument, expires_at)
+
+
+def _market_overview_with_cached_quotes(
+    app: FastAPI,
+    overview: MarketOverviewResponse,
+) -> MarketOverviewResponse:
+    cache = _market_quote_cache(app)
+    if not cache:
+        return overview
+    now = datetime.now(tz=UTC)
+    instruments: list[MarketInstrumentOverview] = []
+    for instrument in overview.instruments:
+        cached = cache.get(instrument.instrument_id)
+        if cached is None:
+            instruments.append(instrument)
+            continue
+        cached_instrument, expires_at = cached
+        if expires_at <= now:
+            cache.pop(instrument.instrument_id, None)
+            instruments.append(instrument)
+            continue
+        instruments.append(cached_instrument)
+    return MarketOverviewResponse(generated_at=now, instruments=instruments)
+
+
 def _dashboard_payload(app: FastAPI) -> dict[str, object]:
     database = _database_service_from_app(app)
     with database.session_scope() as session:
@@ -2221,7 +2484,7 @@ def _dashboard_payload(app: FastAPI) -> dict[str, object]:
         )
         return {
             "robot_status": status,
-            "market": service.market_overview(),
+            "market": _market_overview_with_cached_quotes(app, service.market_overview()),
             "open_orders": service.open_orders(),
             "positions": service.positions(),
             "signals": service.current_signals(),
@@ -2237,7 +2500,10 @@ def _orders_payload(app: FastAPI) -> dict[str, object]:
 def _market_payload(app: FastAPI) -> MarketOverviewResponse:
     database = _database_service_from_app(app)
     with database.session_scope() as session:
-        return BffReadService(session).market_overview()
+        return _market_overview_with_cached_quotes(
+            app,
+            BffReadService(session).market_overview(),
+        )
 
 
 def _reports_payload(app: FastAPI) -> dict[str, object]:

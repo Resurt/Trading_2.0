@@ -1268,12 +1268,18 @@ class TradeCoreRuntime:
         payload = dict(command.payload or {})
         preflight = payload.get("preflight_result")
         market_open = isinstance(preflight, Mapping) and preflight.get("market_open") is True
+        collection_allowed = (
+            isinstance(preflight, Mapping)
+            and preflight.get("data_only_collection_allowed") is True
+            and preflight.get("official_exchange_open") is True
+            and preflight.get("venue_type") == "official_exchange"
+        )
         reason_code = (
             str(preflight.get("reason_code") or "market_closed_expected")
             if isinstance(preflight, Mapping)
             else "session_preflight_required"
         )
-        if not market_open:
+        if not market_open or not collection_allowed:
             self.robot_control_state = "preflight_blocked"
             self.stats.collector_state = "preflight_blocked"
             self.stats.last_command_reason_code = reason_code
@@ -1285,6 +1291,12 @@ class TradeCoreRuntime:
                     "preflight_result": preflight if isinstance(preflight, Mapping) else None,
                     "real_orders_disabled": True,
                     "strategy_trading_disabled": True,
+                    "data_only_collection_allowed": collection_allowed,
+                    "streams_for_calibration_allowed": (
+                        preflight.get("streams_for_calibration_allowed")
+                        if isinstance(preflight, Mapping)
+                        else False
+                    ),
                 },
             )
             return (

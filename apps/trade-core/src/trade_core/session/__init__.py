@@ -15,6 +15,11 @@ from trade_core.session.models import (
     SessionSnapshot,
     TradingSchedule,
 )
+from trade_core.session.moex_calendar import (
+    MoexCalendarDecision,
+    MoexCalendarOverride,
+    MoexCalendarService,
+)
 from trade_core.session.persistence import (
     InMemorySessionStateStore,
     SessionStateStore,
@@ -35,6 +40,9 @@ __all__ = [
     "MicroSessionEvent",
     "MicroSessionState",
     "MicroSessionTickResult",
+    "MoexCalendarDecision",
+    "MoexCalendarOverride",
+    "MoexCalendarService",
     "OrderPermission",
     "OrderSessionPolicy",
     "ScheduleWindow",

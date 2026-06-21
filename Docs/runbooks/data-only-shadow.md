@@ -208,4 +208,28 @@ timestamp.
 
 Readonly broker quote refresh is explicit: `POST /market/quotes/refresh` may call
 T-Invest `GetLastPrices`/`GetOrderBook` with bounded timeouts. Temporary request
-failures must not clear already displayed frontend quotes.
+failures must not clear already displayed frontend quotes. Successful readonly quote
+refresh rows are cached briefly by the API and overlaid into subsequent
+`GET /market/overview` responses so a page reload does not fall back to stale candle
+rows immediately after a live broker refresh.
+
+Operator dashboard polling while open:
+
+- `/market/overview` and `/runtime/data-shadow/status`: every 5 seconds;
+- `/market/quotes/refresh`: no more often than every 30 seconds;
+- `/portfolio/refresh`: every 60 seconds.
+
+These polling paths are readonly. They must not call `PostOrder`, `CancelOrder`, create
+`signal_candidate`, create `order_intent`, or create `broker_order`.
+## Official MOEX Gate
+
+Data-only calibration collection is allowed only when preflight reports
+`official_exchange_open=true`, `venue_type=official_exchange`, and
+`data_only_collection_allowed=true`. Broker OTC or indicative quotes can be displayed on
+the dashboard, but they are not official exchange samples and are excluded from
+calibration by default.
+
+For 2026-06-20 and 2026-06-21 the local MOEX override returns
+`reason_code=moex_dsvd_cancelled_platform_update`, `market_open=false`, and
+`data_only_collection_allowed=false`. Start must be rejected and no calibration streams
+should run.

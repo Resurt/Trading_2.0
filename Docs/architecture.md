@@ -367,3 +367,20 @@ Dev fallback через env допустим только локально и б
 Trade-core now has `TradingSessionPreflightService` in `trade_core.session.preflight`. Live data-only smoke resolves instruments, checks dividend readiness when required, runs broker schedule/status preflight, and starts streams only when `market_open=true`. Weekend broker schedules remain `session_type=weekend`; fallback weekend rules are 10:00-19:00 MSK and are explicitly marked as fallback.
 
 Closed market with `market_closed_expected=true` is an expected data-collection state, not a strategy failure.
+## Official Exchange Vs Broker Quotes
+
+Official MOEX calendar status is a top-level gate before broker schedules or fallback
+time rules. Broker stream/API availability may mean broker OTC or indicative quotes are
+available, but it does not by itself mean that the official exchange session is open.
+
+The runtime and BFF distinguish:
+
+- `official_exchange`: official MOEX session, eligible for data-only calibration samples;
+- `broker_otc` / `broker_indicative`: display-only broker quotes, excluded from
+  calibration by default;
+- `stale_local`: local candle/previous-close fallback, always marked stale when old.
+
+The local calendar fixture marks 2026-06-20 and 2026-06-21 as cancelled DSV(D) days for
+stock and derivatives markets because of the planned MOEX trading/clearing platform
+update. The fixture is not an internet dependency and does not replace the general
+venue/source distinction.

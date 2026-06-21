@@ -37,6 +37,21 @@ export interface SessionPreflightResponse {
   session_phase: string;
   broker_trading_status: string;
   api_trade_available: boolean;
+  official_exchange_open: boolean;
+  official_exchange_closed: boolean;
+  official_exchange_reason_code: string | null;
+  official_exchange_source: string | null;
+  broker_stream_available: boolean;
+  broker_otc_or_indicative_available: boolean;
+  api_trade_available_raw: boolean;
+  api_trade_available_for_exchange: boolean;
+  quote_source_allowed_for_data_collection: boolean;
+  data_only_collection_allowed: boolean;
+  streams_for_display_allowed: boolean;
+  streams_for_calibration_allowed: boolean;
+  venue_type: string;
+  trading_mode: string;
+  broker_availability_ignored_because_official_exchange_closed: boolean;
   next_session_at: string | null;
   next_session_type: string | null;
   current_window_start_at: string | null;
@@ -132,6 +147,16 @@ export interface SignalResponse {
 export interface MarketInstrumentOverview {
   instrument_id: string;
   ticker: string | null;
+  class_code: string | null;
+  board: string | null;
+  exchange: string;
+  venue_type: string;
+  trading_mode: string;
+  official_exchange_open: boolean;
+  official_exchange_closed: boolean;
+  quote_source: string;
+  quote_allowed_for_data_collection: boolean;
+  quote_allowed_for_display: boolean;
   last_price: string | null;
   last_price_at: string | null;
   last_price_ts: string | null;
@@ -149,8 +174,15 @@ export interface MarketInstrumentOverview {
   spread: string | null;
   spread_abs: string | null;
   spread_bps: string | null;
+  spread_abs_rub: string | null;
+  spread_units_validated: boolean;
   mid_price: string | null;
   market_quality: string | null;
+  market_quality_score: string | null;
+  display_market_quality_score: string | null;
+  calibration_market_quality_score: string | null;
+  market_quality_label: string;
+  market_quality_components: JsonPayload;
   best_bid: string | null;
   best_ask: string | null;
   bid_depth_lots: string | null;
@@ -158,8 +190,13 @@ export interface MarketInstrumentOverview {
   book_imbalance: string | null;
   order_book_source: string | null;
   order_book_ts: string | null;
+  order_book_age_ms: number | null;
   order_book_stale: boolean;
   recent_market_trades: JsonPayload[];
+  market_trades_source: string | null;
+  market_trades_age_ms: number | null;
+  reason_code: string | null;
+  warning: string | null;
   order_book_summary: JsonPayload;
   quote_payload: JsonPayload;
 }

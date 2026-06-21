@@ -45,6 +45,19 @@ function connectionText(label: string, state: string): string {
   return `${label}: ${states[state] ?? state}`;
 }
 
+function brokerConnectionState(): string {
+  if ([robot.liveConnection, market.liveConnection, portfolio.liveConnection].includes("degraded")) {
+    return "degraded";
+  }
+  if ([robot.liveConnection, market.liveConnection, portfolio.liveConnection].includes("loading")) {
+    return "loading";
+  }
+  if ([robot.liveConnection, market.liveConnection, portfolio.liveConnection].includes("live")) {
+    return "live";
+  }
+  return "idle";
+}
+
 function startButtonLabel(): string {
   if (!robot.startLoading) {
     return "Старт";
@@ -59,6 +72,7 @@ async function bootstrapDashboard(): Promise<void> {
     if (snapshot.data?.market) {
       market.applyOverview(snapshot.data.market);
     }
+    void market.refreshQuotes();
     portfolio.applySnapshot({
       positions: snapshot.data?.positions,
       open_orders: snapshot.data?.open_orders,
@@ -66,7 +80,8 @@ async function bootstrapDashboard(): Promise<void> {
   } catch {
     await Promise.allSettled([
       robot.fetchInitialSnapshot(),
-      market.fetchOverview(),
+      market.refreshQuotes(),
+      market.fetchOverview({ silent: true }),
       portfolio.fetchSnapshot(),
     ]);
   }
@@ -100,17 +115,9 @@ onUnmounted(() => {
       </div>
 
       <div class="status-strip" aria-label="service status">
-        <span class="connection-chip" :class="`connection-chip--${robot.liveConnection}`">
+        <span class="connection-chip" :class="`connection-chip--${brokerConnectionState()}`">
           <span class="connection-chip__dot" />
-          {{ connectionText("Панель", robot.liveConnection) }}
-        </span>
-        <span class="connection-chip" :class="`connection-chip--${market.liveConnection}`">
-          <span class="connection-chip__dot" />
-          {{ connectionText("Котировки", market.liveConnection) }}
-        </span>
-        <span class="connection-chip" :class="`connection-chip--${portfolio.liveConnection}`">
-          <span class="connection-chip__dot" />
-          {{ connectionText("Портфель", portfolio.liveConnection) }}
+          {{ connectionText("Брокер/API", brokerConnectionState()) }}
         </span>
       </div>
 

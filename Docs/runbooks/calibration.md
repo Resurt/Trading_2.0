@@ -206,3 +206,12 @@ Clean calibration is also blocked if enabled instruments are unresolved in
 ## Data-only preflight before calibration evidence
 
 Calibration based on live microstructure must only use samples collected after data-only shadow preflight. If preflight returns `market_closed_expected`, no live samples are expected and the period must not be interpreted as robot failure. 10-20 trading days remain early evidence, not final truth, and must not hard-disable a contour by themselves.
+## Calibration Sample Eligibility
+
+Calibration uses official exchange data-only samples only. A broker quote shown while
+MOEX is officially closed is not a calibration sample unless a future explicit
+`include-broker-otc` workflow is introduced. Display quality can remain useful for the
+operator, but calibration quality is zero/not applicable outside `official_exchange`.
+
+The current market quality formula is a heuristic. Keep raw components so thresholds can
+be tuned after 10-20 official exchange trading days without losing evidence.

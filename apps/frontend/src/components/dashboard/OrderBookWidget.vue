@@ -41,6 +41,17 @@ const bookSource = computed(() => {
   }
   return props.instrument.order_book_source;
 });
+const bookSourceLabel = computed(() => {
+  const labels: Record<string, string> = {
+    live_exchange_order_book: "MOEX стакан",
+    broker_quote_exchange_closed: "брокерская котировка, биржа закрыта",
+    broker_otc_order_book: "внебиржевой стакан",
+    broker_indicative_quote: "индикативный стакан",
+    latest_market_candle_close: "последняя свеча",
+    no_order_book: "нет стакана",
+  };
+  return labels[bookSource.value] ?? bookSource.value;
+});
 
 function levelsFromSummary(
   key: "bids" | "asks",
@@ -141,7 +152,7 @@ function timeOnly(value: string | null | undefined): string {
     <header class="depth-ladder-header">
       <div>
         <h3>СТАКАН</h3>
-        <span>{{ instrument.ticker ?? instrument.instrument_id }} · {{ bookSource }}</span>
+        <span>{{ instrument.ticker ?? instrument.instrument_id }} · {{ bookSourceLabel }}</span>
       </div>
       <div class="depth-ladder-clock">
         <strong>{{ bookClock }}</strong>

@@ -240,7 +240,7 @@ export const useRobotStore = defineStore("robot", () => {
         mode: "data_shadow",
       });
       applySessionPreflight(preflight);
-      if (!preflight.market_open) {
+      if (!preflight.data_only_collection_allowed) {
         setCommandFromPreflight(preflight);
         commandPhase.value = "start_command";
         const response = await apiClient.startRobot({
@@ -338,7 +338,7 @@ export const useRobotStore = defineStore("robot", () => {
     }
   }
 
-  function startBalancePolling(intervalMs = 20_000): void {
+  function startBalancePolling(intervalMs = 60_000): void {
     if (balancePollTimer !== null) {
       return;
     }
@@ -369,8 +369,12 @@ export const useRobotStore = defineStore("robot", () => {
   }
 
   function setCommandFromPreflight(preflight: SessionPreflightResponse): void {
-    const nextSession = preflight.next_session_at ? ` Следующая сессия: ${preflight.next_session_at}.` : "";
-    const prefix = preflight.market_closed_expected
+    const nextSession = preflight.next_session_at
+      ? ` Следующая биржевая сессия: ${preflight.next_session_at}.`
+      : "";
+    const prefix = preflight.official_exchange_closed
+      ? "Официальная MOEX-сессия закрыта. Data-only сбор для калибровки не запущен."
+      : preflight.market_closed_expected
       ? `Рынок закрыт. Сессия: ${preflight.session_type}.`
       : `Preflight не разрешил старт. Сессия: ${preflight.session_type}.`;
     setCommandState({
@@ -447,6 +451,7 @@ export const useRobotStore = defineStore("robot", () => {
     snapshotWarnings,
     liveConnection,
     lastDashboardMessageAt,
+    lastSessionPreflight,
     lastCommandStatus,
     lastCommandMessage,
     lastCommandReasonCode,

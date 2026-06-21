@@ -180,3 +180,13 @@ Production, strategy shadow and live trading remain forbidden until both are tru
 - broker balance visibility is present on `/robot/status` and `/portfolio/summary`.
 
 `market_closed_expected` must not be treated as a strategy failure. A live data-only smoke must not start streams before session preflight. Production is forbidden without clean session calendar/preflight and balance visibility.
+## Official Exchange And Dashboard Gate
+
+Production/live modes remain forbidden until preflight cleanly distinguishes official
+MOEX exchange availability from broker OTC/indicative availability. Start must be blocked
+when `official_exchange_closed=true`; broker quotes may be displayed but must not enable
+data-only calibration or any trading action.
+
+Before any future live mode, the dashboard must show official session status, quote
+source/venue/freshness, spread units, balance or degraded reason, and explicit
+calibration eligibility.

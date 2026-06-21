@@ -181,6 +181,7 @@ def session_context() -> dict[str, object]:
 
 
 def preflight_response(*, market_open: bool, reason_code: str) -> SessionPreflightResponse:
+    official_exchange_closed = reason_code == "moex_dsvd_cancelled_platform_update"
     return SessionPreflightResponse(
         market_open=market_open,
         market_closed_expected=not market_open,
@@ -191,6 +192,25 @@ def preflight_response(*, market_open: bool, reason_code: str) -> SessionPreflig
         session_phase="closed" if not market_open else "continuous_trading",
         broker_trading_status="closed" if not market_open else "normal_trading",
         api_trade_available=market_open,
+        official_exchange_open=market_open and not official_exchange_closed,
+        official_exchange_closed=official_exchange_closed,
+        official_exchange_reason_code=reason_code if official_exchange_closed else None,
+        official_exchange_source=(
+            "official_moex_news_2026_06_17"
+            if official_exchange_closed
+            else "test_preflight"
+        ),
+        broker_stream_available=official_exchange_closed,
+        broker_otc_or_indicative_available=official_exchange_closed,
+        api_trade_available_raw=market_open or official_exchange_closed,
+        api_trade_available_for_exchange=market_open and not official_exchange_closed,
+        quote_source_allowed_for_data_collection=market_open and not official_exchange_closed,
+        data_only_collection_allowed=market_open and not official_exchange_closed,
+        streams_for_display_allowed=True,
+        streams_for_calibration_allowed=market_open and not official_exchange_closed,
+        venue_type="broker_otc" if official_exchange_closed else "official_exchange",
+        trading_mode="broker_otc_only" if official_exchange_closed else "standard_exchange",
+        broker_availability_ignored_because_official_exchange_closed=official_exchange_closed,
         next_session_at=utc(2026, 6, 21, 7) if not market_open else None,
         next_session_type="weekend" if not market_open else None,
         current_window_start_at=None,
@@ -678,11 +698,17 @@ def test_robot_status_and_market_overview(
     assert market["instruments"][0]["instrument_id"] == "MOEX:SBER"
     assert len(market["instruments"]) == 8
     assert market["instruments"][0]["last_price"] == "100.05000000"
-    assert market["instruments"][0]["last_price_source"] == "live_order_book_mid"
-    assert market["instruments"][0]["quote_status"] == "stale"
+    assert market["instruments"][0]["last_price_source"] == "broker_quote_exchange_closed"
+    assert market["instruments"][0]["quote_source"] == "broker_quote_exchange_closed"
+    assert market["instruments"][0]["venue_type"] == "broker_otc"
+    assert market["instruments"][0]["official_exchange_closed"] is True
+    assert market["instruments"][0]["quote_allowed_for_data_collection"] is False
+    assert market["instruments"][0]["quote_status"] == "broker_quote"
     assert market["instruments"][0]["is_price_stale"] is True
     assert market["instruments"][0]["mid_price"] == "100.05000000"
-    assert market["instruments"][0]["spread_bps"] == "9.9950"
+    assert Decimal(str(market["instruments"][0]["spread_bps"])).quantize(
+        Decimal("0.0001")
+    ) == Decimal("9.9950")
     assert market["instruments"][0]["order_book_summary"]["bids"][0]["price"] == "100"
     assert market["instruments"][0]["order_book_summary"]["asks"][0]["price"] == "100.1"
     assert latest_microstructure[0]["source"] == "data_only_shadow"
@@ -801,7 +827,7 @@ def test_market_quotes_refresh_falls_back_when_broker_gateway_unavailable(
     assert {row["instrument_id"] for row in market["instruments"]} >= {"MOEX:SBER", "MOEX:GAZP"}
 
 
-def test_market_quotes_refresh_marks_successful_order_book_refresh_live(
+def test_market_quotes_refresh_marks_successful_order_book_refresh_display_only_when_closed(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -815,13 +841,74 @@ def test_market_quotes_refresh_marks_successful_order_book_refresh_live(
     assert response.status_code == 200
     market = response.json()
     sber = next(row for row in market["instruments"] if row["instrument_id"] == "MOEX:SBER")
-    assert sber["last_price_source"] == "live_order_book_mid"
-    assert sber["quote_status"] == "live"
+    assert sber["last_price_source"] == "broker_quote_exchange_closed"
+    assert sber["quote_source"] == "broker_quote_exchange_closed"
+    assert sber["venue_type"] == "broker_otc"
+    assert sber["official_exchange_closed"] is True
+    assert sber["quote_allowed_for_data_collection"] is False
+    assert sber["quote_status"] == "broker_quote"
     assert sber["is_price_stale"] is False
     assert sber["order_book_stale"] is False
     assert sber["price_staleness_seconds"] == 0
     assert sber["order_book_summary"]["exchange_ts"] == "2026-06-21T10:00:00+00:00"
     assert sber["order_book_summary"]["exchange_age_seconds"] is not None
+
+
+def test_order_book_payload_on_official_closed_is_display_only_broker_quote() -> None:
+    app_module = importlib.import_module("trading_api.app")
+
+    payload = app_module._order_book_overview_payload(
+        {
+            "instrument_uid": "uid-sber",
+            "exchange_ts": "2026-06-21T10:00:00+00:00",
+            "bids": [{"price": "312.99", "quantity_lots": "20"}],
+            "asks": [{"price": "313.34", "quantity_lots": "10"}],
+        },
+        official_exchange_open=False,
+        official_exchange_closed=True,
+    )
+
+    assert payload is not None
+    assert payload["quote_source"] == "broker_quote_exchange_closed"
+    assert payload["venue_type"] == "broker_otc"
+    assert payload["trading_mode"] == "broker_otc_only"
+    assert payload["quote_allowed_for_data_collection"] is False
+    assert payload["warning"] == "broker_quote_not_for_calibration"
+    assert Decimal(str(payload["spread_abs"])) == Decimal("0.35")
+    assert Decimal(str(payload["spread_abs_rub"])) == Decimal("0.35")
+    assert Decimal(str(payload["spread_bps"])).quantize(Decimal("0.01")) == Decimal(
+        "11.18"
+    )
+    assert payload["market_quality_label"] == "not_for_calibration"
+    assert payload["calibration_market_quality_score"] == Decimal("0")
+    assert payload["order_book_summary"]["include_in_calibration"] is False
+    assert payload["market_trades_source"] == "no_market_trades_samples"
+
+
+def test_market_overview_uses_recent_readonly_quote_refresh_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app_module = importlib.import_module("trading_api.app")
+
+    monkeypatch.setattr(app_module, "_readonly_tbank_gateway", lambda: FakeQuoteGateway())
+    client = make_client(tmp_path)
+
+    refreshed = client.post("/market/quotes/refresh", headers={"X-API-Role": "observer"})
+    overview = client.get("/market/overview")
+
+    assert refreshed.status_code == 200
+    assert overview.status_code == 200
+    sber = next(
+        row for row in overview.json()["instruments"] if row["instrument_id"] == "MOEX:SBER"
+    )
+    assert sber["last_price_source"] == "broker_quote_exchange_closed"
+    assert sber["quote_source"] == "broker_quote_exchange_closed"
+    assert sber["quote_status"] == "broker_quote"
+    assert sber["quote_allowed_for_data_collection"] is False
+    assert sber["is_price_stale"] is False
+    assert sber["best_bid"] == "312.98"
+    assert sber["best_ask"] == "313.40"
 
 
 def test_portfolio_refresh_masks_account_id_and_updates_summary(

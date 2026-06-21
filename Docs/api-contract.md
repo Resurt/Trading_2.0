@@ -45,6 +45,11 @@ preflight `reason_code` and returns HTTP 200 with `accepted=false`,
 `status=rejected`, and `preflight_result`. The rejected command does not start
 runtime streams and does not enable live trading.
 
+The API keeps a short server-side preflight cache controlled by
+`TRADING_SESSION_PREFLIGHT_CACHE_TTL_SECONDS`, default 30 seconds. This lets
+`POST /robot/start` reuse the fresh `GET /session/preflight` result that the
+dashboard just received instead of issuing a second slow broker status pass.
+
 `RobotCommandResponse` includes:
 
 - `command_id`;
@@ -182,6 +187,11 @@ readonly gateway cannot be constructed, the endpoint returns the local
 When `GetOrderBook` succeeds, the quote is fresh by broker response receipt time;
 the original exchange timestamp is exposed only as diagnostic payload
 (`exchange_ts` / `exchange_age_seconds`).
+The API keeps successful readonly quote refresh rows in a short in-process cache
+(`MARKET_QUOTE_REFRESH_CACHE_TTL_SECONDS`, default 45 seconds). During that TTL,
+`GET /market/overview`, `/dashboard/state`, and `/ws/market` overlay the cached
+readonly broker rows on top of the local read model. This prevents the frontend from
+being immediately overwritten by an older candle fallback after a successful refresh.
 
 ## `/reports/daily/run`
 
@@ -342,3 +352,20 @@ and returns a degraded reason such as `broker_accounts_empty` or
 `per_instrument_status`.
 
 Anchor: data-only shadow endpoints are listed above and remain observer/read-only APIs.
+## Market Source Contract
+
+`GET /session/preflight` exposes both official exchange status and raw broker
+availability. `official_exchange_open=true` is required before data-only calibration
+collection may start. If `official_exchange_closed=true`, `/robot/start` returns
+`accepted=false`, `status=rejected`, and a concrete `reason_code` such as
+`moex_dsvd_cancelled_platform_update`.
+
+`GET /market/overview` and `POST /market/quotes/refresh` return one row per core
+instrument. Rows include `venue_type`, `trading_mode`, `official_exchange_open`,
+`official_exchange_closed`, `quote_source`, `quote_allowed_for_data_collection`,
+`spread_abs_rub`, `spread_bps`, `display_market_quality_score`,
+`calibration_market_quality_score`, `market_quality_components`,
+`recent_market_trades`, and explicit reason/warning fields.
+
+Spread units are fixed: `spread_abs`/`spread_abs_rub` are RUB, and
+`spread_bps = (best_ask - best_bid) / mid_price * 10000`.

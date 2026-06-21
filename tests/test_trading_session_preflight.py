@@ -37,10 +37,12 @@ class FakePreflightGateway:
         windows: list[dict[str, object]] | None = None,
         schedule_error: bool = False,
         api_trade_available: bool = True,
+        trading_status: str = "normal_trading",
     ) -> None:
         self.windows = windows
         self.schedule_error = schedule_error
         self.api_trade_available = api_trade_available
+        self.trading_status = trading_status
         self.trading_status_calls: list[TradingStatusRequest] = []
 
     async def trading_schedules(
@@ -67,7 +69,7 @@ class FakePreflightGateway:
             method_name="GetTradingStatus",
             data={
                 "instrument_id": request.instrument.instrument_id,
-                "trading_status": "normal_trading",
+                "trading_status": self.trading_status,
                 "api_trade_available": self.api_trade_available,
             },
         )
@@ -80,7 +82,7 @@ def test_saturday_fallback_window_is_weekend_continuous_trading() -> None:
         TradingSessionPreflightService(cast(BrokerGateway, gateway)).run(
             TradingSessionPreflightConfig(
                 instruments=(instrument(),),
-                now=msk(2026, 6, 20, 11),
+                now=msk(2026, 6, 13, 11),
             )
         )
     )
@@ -97,7 +99,7 @@ def test_saturday_after_weekend_window_is_expected_closed() -> None:
 
     result = asyncio.run(
         TradingSessionPreflightService(cast(BrokerGateway, gateway)).run(
-            TradingSessionPreflightConfig(now=msk(2026, 6, 20, 22))
+            TradingSessionPreflightConfig(now=msk(2026, 6, 13, 22))
         )
     )
 
@@ -112,7 +114,7 @@ def test_sunday_outside_trading_window_is_expected_closed() -> None:
 
     result = asyncio.run(
         TradingSessionPreflightService(cast(BrokerGateway, gateway)).run(
-            TradingSessionPreflightConfig(now=msk(2026, 6, 21, 8))
+            TradingSessionPreflightConfig(now=msk(2026, 6, 14, 8))
         )
     )
 
@@ -140,10 +142,10 @@ def test_broker_weekend_schedule_overrides_weekday_label() -> None:
             {
                 "session_type": "weekday_main",
                 "session_phase": "continuous_trading",
-                "start_at": "2026-06-20T10:00:00+03:00",
-                "end_at": "2026-06-20T19:00:00+03:00",
-                "trading_date": "2026-06-20",
-                "calendar_date": "2026-06-20",
+                "start_at": "2026-06-13T10:00:00+03:00",
+                "end_at": "2026-06-13T19:00:00+03:00",
+                "trading_date": "2026-06-13",
+                "calendar_date": "2026-06-13",
             }
         ]
     )
@@ -152,7 +154,7 @@ def test_broker_weekend_schedule_overrides_weekday_label() -> None:
         TradingSessionPreflightService(cast(BrokerGateway, gateway)).run(
             TradingSessionPreflightConfig(
                 instruments=(instrument(),),
-                now=msk(2026, 6, 20, 11),
+                now=msk(2026, 6, 13, 11),
             )
         )
     )
@@ -169,7 +171,7 @@ def test_broker_non_trading_day_does_not_fall_back_to_time_rules() -> None:
         TradingSessionPreflightService(cast(BrokerGateway, gateway)).run(
             TradingSessionPreflightConfig(
                 instruments=(instrument(),),
-                now=msk(2026, 6, 20, 11),
+                now=msk(2026, 6, 13, 11),
             )
         )
     )
@@ -177,3 +179,79 @@ def test_broker_non_trading_day_does_not_fall_back_to_time_rules() -> None:
     assert result.market_open is False
     assert result.market_closed_expected is True
     assert result.source == "broker_trading_schedules"
+
+
+def test_broker_dealer_status_is_not_official_exchange_without_override() -> None:
+    gateway = FakePreflightGateway(
+        schedule_error=True,
+        api_trade_available=True,
+        trading_status="dealer_normal_trading",
+    )
+
+    result = asyncio.run(
+        TradingSessionPreflightService(cast(BrokerGateway, gateway)).run(
+            TradingSessionPreflightConfig(
+                instruments=(instrument(),),
+                now=msk(2026, 6, 13, 11),
+            )
+        )
+    )
+
+    assert result.market_open is False
+    assert result.market_closed_expected is True
+    assert result.official_exchange_open is False
+    assert result.official_exchange_closed is False
+    assert result.api_trade_available_raw is True
+    assert result.api_trade_available_for_exchange is False
+    assert result.data_only_collection_allowed is False
+    assert result.streams_for_display_allowed is True
+    assert result.streams_for_calibration_allowed is False
+    assert result.venue_type == "broker_otc"
+    assert result.trading_mode == "broker_otc_only"
+    assert result.reason_code == "broker_otc_only"
+
+
+def test_official_moex_override_closes_2026_06_20() -> None:
+    gateway = FakePreflightGateway(
+        schedule_error=True,
+        api_trade_available=True,
+        trading_status="dealer_normal_trading",
+    )
+
+    result = asyncio.run(
+        TradingSessionPreflightService(cast(BrokerGateway, gateway)).run(
+            TradingSessionPreflightConfig(
+                instruments=(instrument(),),
+                now=msk(2026, 6, 20, 11),
+            )
+        )
+    )
+
+    assert result.market_open is False
+    assert result.market_closed_expected is True
+    assert result.official_exchange_closed is True
+    assert result.reason_code == "moex_dsvd_cancelled_platform_update"
+    assert result.api_trade_available_raw is True
+    assert result.api_trade_available_for_exchange is False
+    assert result.data_only_collection_allowed is False
+    assert result.streams_for_calibration_allowed is False
+    assert result.venue_type == "broker_otc"
+    assert "official_exchange_closed_overrides_broker_status" in result.warnings
+
+
+def test_official_moex_override_closes_2026_06_21() -> None:
+    gateway = FakePreflightGateway(schedule_error=True, api_trade_available=True)
+
+    result = asyncio.run(
+        TradingSessionPreflightService(cast(BrokerGateway, gateway)).run(
+            TradingSessionPreflightConfig(
+                instruments=(instrument(),),
+                now=msk(2026, 6, 21, 11),
+            )
+        )
+    )
+
+    assert result.market_open is False
+    assert result.official_exchange_closed is True
+    assert result.reason_code == "moex_dsvd_cancelled_platform_update"
+    assert result.source == "official_moex_calendar_override"
