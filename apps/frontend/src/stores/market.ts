@@ -103,7 +103,9 @@ export const useMarketStore = defineStore("market", () => {
     try {
       applyOverview(await apiClient.refreshMarketQuotes());
     } catch (unknownError) {
-      error.value = unknownError instanceof Error ? unknownError.message : "Market quote refresh failed";
+      if (overview.value.instruments.length === 0) {
+        error.value = unknownError instanceof Error ? unknownError.message : "Market quote refresh failed";
+      }
     }
   }
 
@@ -165,16 +167,20 @@ export const useMarketStore = defineStore("market", () => {
     };
   }
 
-  function startMarketPolling(intervalMs = 30_000): void {
+  function startMarketPolling(intervalMs = 15_000): void {
     if (marketPollTimer !== null) {
       return;
     }
-    void fetchOverview();
     void refreshQuotes();
+    window.setTimeout(() => {
+      void fetchOverview();
+    }, 1500);
     void fetchDataShadowStatus();
     marketPollTimer = window.setInterval(() => {
-      void fetchOverview();
       void refreshQuotes();
+      window.setTimeout(() => {
+        void fetchOverview();
+      }, 1500);
       void fetchDataShadowStatus();
     }, intervalMs);
   }

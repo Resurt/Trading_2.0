@@ -133,6 +133,34 @@ class FakeBalanceGateway:
         )
 
 
+class FakeQuoteGateway:
+    async def get_last_prices(
+        self,
+        request: object,
+        metadata: object = None,
+    ) -> BrokerUnaryResponse:
+        del request, metadata
+        return BrokerUnaryResponse(method_name="GetLastPrices", data={"prices": []})
+
+    async def get_order_book(self, request: object, metadata: object = None) -> BrokerUnaryResponse:
+        del request, metadata
+        return BrokerUnaryResponse(
+            method_name="GetOrderBook",
+            data={
+                "instrument_uid": "uid-sber",
+                "exchange_ts": "2026-06-21T10:00:00+00:00",
+                "bids": [
+                    {"price": "312.98", "quantity_lots": "19"},
+                    {"price": "312.95", "quantity_lots": "306"},
+                ],
+                "asks": [
+                    {"price": "313.40", "quantity_lots": "195"},
+                    {"price": "313.45", "quantity_lots": "637"},
+                ],
+            },
+        )
+
+
 def make_client(tmp_path: Path) -> TestClient:
     database = DatabaseService(f"sqlite+pysqlite:///{tmp_path / 'api-bff.db'}")
     Base.metadata.create_all(database.engine)
@@ -751,6 +779,49 @@ def test_market_overview_is_local_read_model_not_broker_call(
 
     assert len(market["instruments"]) == 8
     assert {row["instrument_id"] for row in market["instruments"]} >= {"MOEX:SBER", "MOEX:GAZP"}
+
+
+def test_market_quotes_refresh_falls_back_when_broker_gateway_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app_module = importlib.import_module("trading_api.app")
+
+    def unavailable_gateway() -> object:
+        raise RuntimeError("readonly gateway unavailable")
+
+    monkeypatch.setattr(app_module, "_readonly_tbank_gateway", unavailable_gateway)
+    client = make_client(tmp_path)
+
+    response = client.post("/market/quotes/refresh", headers={"X-API-Role": "observer"})
+
+    assert response.status_code == 200
+    market = response.json()
+    assert len(market["instruments"]) == 8
+    assert {row["instrument_id"] for row in market["instruments"]} >= {"MOEX:SBER", "MOEX:GAZP"}
+
+
+def test_market_quotes_refresh_marks_successful_order_book_refresh_live(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app_module = importlib.import_module("trading_api.app")
+
+    monkeypatch.setattr(app_module, "_readonly_tbank_gateway", lambda: FakeQuoteGateway())
+    client = make_client(tmp_path)
+
+    response = client.post("/market/quotes/refresh", headers={"X-API-Role": "observer"})
+
+    assert response.status_code == 200
+    market = response.json()
+    sber = next(row for row in market["instruments"] if row["instrument_id"] == "MOEX:SBER")
+    assert sber["last_price_source"] == "live_order_book_mid"
+    assert sber["quote_status"] == "live"
+    assert sber["is_price_stale"] is False
+    assert sber["order_book_stale"] is False
+    assert sber["price_staleness_seconds"] == 0
+    assert sber["order_book_summary"]["exchange_ts"] == "2026-06-21T10:00:00+00:00"
+    assert sber["order_book_summary"]["exchange_age_seconds"] is not None
 
 
 def test_portfolio_refresh_masks_account_id_and_updates_summary(

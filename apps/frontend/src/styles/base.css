@@ -305,7 +305,7 @@ code {
 
 .metric-grid {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: var(--space-3);
 }
 
@@ -385,6 +385,7 @@ code {
   gap: var(--space-1);
   min-height: 84px;
   min-width: 0;
+  overflow: hidden;
   padding: var(--space-3);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-control);
@@ -401,9 +402,10 @@ code {
 .metric-tile__value {
   min-width: 0;
   color: var(--color-text-primary);
-  font-size: 18px;
+  font-size: 17px;
   line-height: 1.2;
   overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .metric-tile--good {
@@ -546,6 +548,44 @@ code {
   text-align: left;
 }
 
+.quote-grid--dashboard {
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+}
+
+.quote-card--rich {
+  align-content: start;
+  min-height: 174px;
+  overflow: hidden;
+}
+
+.quote-card__top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.quote-card__source,
+.quote-card__freshness {
+  color: var(--color-text-muted);
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.quote-card__meta {
+  display: grid;
+  gap: 2px;
+  padding-top: var(--space-1);
+}
+
+.quote-card__meta small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .quote-card:hover,
 .quote-card--active {
   border-color: rgba(98, 168, 216, 0.5);
@@ -611,7 +651,7 @@ code {
   align-content: start;
   gap: var(--space-3);
   min-width: 0;
-  min-height: 150px;
+  min-height: 132px;
   padding: var(--space-3);
   border: 1px solid rgba(66, 200, 138, 0.34);
   border-radius: var(--radius-panel);
@@ -649,6 +689,7 @@ code {
 .balance-card p {
   color: var(--color-text-secondary);
   font-size: 13px;
+  overflow-wrap: anywhere;
 }
 
 .balance-card dl {
@@ -947,17 +988,20 @@ dd {
 
 .market-depth-layout {
   display: grid;
-  grid-template-columns: minmax(520px, 1.35fr) minmax(340px, 0.9fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--space-4);
   align-items: stretch;
+  min-width: 0;
 }
 
 .depth-ladder-card,
 .market-tape-card {
   display: grid;
   grid-template-rows: auto auto 1fr;
-  min-height: 560px;
+  min-height: 380px;
   min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
   padding: var(--space-4);
   border: 1px solid rgba(98, 168, 216, 0.18);
   border-radius: 18px;
@@ -1011,9 +1055,10 @@ dd {
 
 .depth-ladder-grid {
   display: grid;
-  grid-template-columns: minmax(100px, 0.7fr) minmax(150px, 1fr) minmax(100px, 0.7fr) minmax(150px, 1fr);
+  grid-template-columns: minmax(72px, 0.72fr) minmax(92px, 1fr) minmax(72px, 0.72fr) minmax(92px, 1fr);
   gap: var(--space-3);
   align-items: center;
+  min-width: 0;
 }
 
 .depth-ladder-grid--head {
@@ -1041,7 +1086,8 @@ dd {
   position: relative;
   z-index: 1;
   color: var(--color-text-primary);
-  font-size: 16px;
+  font-size: 15px;
+  overflow-wrap: anywhere;
 }
 
 .depth-price--bid {
@@ -1093,13 +1139,19 @@ dd {
 
 .market-tape-row {
   display: grid;
-  grid-template-columns: minmax(74px, 0.85fr) minmax(90px, 1fr) minmax(60px, 0.65fr) minmax(92px, 0.9fr);
+  grid-template-columns: minmax(70px, 0.85fr) minmax(78px, 1fr) minmax(54px, 0.65fr) minmax(86px, 0.9fr);
   gap: var(--space-3);
   align-items: center;
   min-height: 34px;
   border-bottom: 1px solid rgba(148, 180, 190, 0.08);
   color: var(--color-text-primary);
   font-variant-numeric: tabular-nums;
+}
+
+.market-tape-row > * {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .market-tape-row--head {
@@ -1121,6 +1173,12 @@ dd {
 
 .market-tape-price--sell {
   color: #ff5e7f;
+}
+
+@media (min-width: 1800px) {
+  .market-depth-layout {
+    grid-template-columns: minmax(0, 1.15fr) minmax(280px, 0.85fr);
+  }
 }
 
 .kv-list,

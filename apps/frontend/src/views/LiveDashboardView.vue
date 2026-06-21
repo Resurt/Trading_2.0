@@ -48,9 +48,9 @@ const QUOTE_SOURCE_LABELS: Record<string, string> = {
 };
 
 const QUOTE_STATUS_LABELS: Record<string, string> = {
-  live: "live",
-  stale: "stale",
-  previous_close: "prev close",
+  live: "свежая",
+  stale: "устарела",
+  previous_close: "пред. закрытие",
   unavailable: "нет цены",
 };
 
@@ -60,7 +60,7 @@ const COLLECTOR_LABELS: Record<string, string> = {
   starting: "Запускается",
   collecting: "Идёт сбор",
   stopping: "Останавливается",
-  stopped_by_operator: "Остановлен оператором",
+  stopped_by_operator: "Сбор остановлен",
   emergency_stopped: "Аварийно остановлен",
   degraded: "Degraded",
 };
@@ -215,7 +215,7 @@ function marketStatusText(): string {
 
 function portfolioStatusText(): string {
   if (robot.balanceRefreshLoading) {
-    return "Обновляю broker balance read-only через T-Invest.";
+    return "Обновляю счёт через T-Invest.";
   }
   if (portfolio.error) {
     return operatorError(portfolio.error);
@@ -223,7 +223,7 @@ function portfolioStatusText(): string {
   if (robot.status.balance.balance_degraded) {
     return balanceUnavailableReason();
   }
-  return "Broker balance получен. Это только отображение счёта, не торговое разрешение.";
+  return "Счёт получен. Баланс обновляется автоматически.";
 }
 
 function balanceUnavailableReason(): string {
@@ -258,55 +258,58 @@ function blockedCash(): string {
   return formatMoney(robot.status.balance.blocked_cash_rub ?? robot.status.balance.blocked, "RUB");
 }
 
-function expectedYield(): string {
-  return formatMoney(robot.status.balance.expected_yield_rub, "RUB");
-}
-
 function sessionDetail(): string {
   const date = robot.session.trading_date ?? robot.session.calendar_date ?? "нет даты";
   const marketOpen = market.dataShadowStatus.market_open;
-  const openLabel = marketOpen === null ? "market_open уточняется" : marketOpen ? "market_open=true" : "market_open=false";
+  const openLabel = marketOpen === null ? "проверяю календарь" : marketOpen ? "рынок открыт" : "рынок закрыт";
   const reason = market.dataShadowStatus.reason_code ?? robot.lastCommandReasonCode;
-  return `${date} / ${openLabel}${reason ? ` / ${reasonLabel(reason)}` : ""}`;
+  return `${date} · ${openLabel}${reason ? ` · ${reasonLabel(reason)}` : ""}`;
 }
 
 function phaseDetail(): string {
   const expected = market.dataShadowStatus.market_closed_expected;
   if (expected === true) {
-    return `Закрытие ожидаемо. Следующая сессия: ${compactDateTime(market.dataShadowStatus.next_session_at)}`;
+    return `По расписанию закрыто. Следующая сессия: ${compactDateTime(market.dataShadowStatus.next_session_at)}`;
   }
   if (expected === false) {
-    return "Рынок должен быть доступен; collector можно запускать после preflight.";
+    return "Preflight разрешает data-only сбор.";
   }
-  return "Жду preflight или runtime status.";
+  return "Жду preflight календаря.";
 }
 
 function brokerStatusValue(): string {
-  if (robot.status.broker_trading_status && robot.status.broker_trading_status !== "unknown") {
-    return robot.status.broker_trading_status;
+  const raw = robot.status.broker_trading_status;
+  if (raw === "normal_trading") {
+    return "Брокер доступен";
+  }
+  if (raw === "closed" || raw === "not_available_for_trading") {
+    return "Торги закрыты";
+  }
+  if (raw && raw !== "unknown") {
+    return raw.replaceAll("_", " ");
   }
   if (!robot.status.balance.balance_degraded || market.quoteRows.some((item) => item.last_price)) {
-    return "Read-only доступен";
+    return "Readonly доступен";
   }
-  return "Статус уточняется";
-}
-
-function brokerStatusDetail(): string {
-  if (market.quoteRows.some((item) => item.order_book_source === "tbank_order_book")) {
-    return "Стакан получен через readonly T-Invest GetOrderBook.";
-  }
-  if (market.quoteRows.some((item) => item.last_price_source === "tbank_last_price")) {
-    return "Последние цены получены через readonly T-Invest GetLastPrices.";
-  }
-  if (!robot.status.balance.balance_degraded) {
-    return "Счёт получен через readonly T-Invest.";
-  }
-  return "Жду read-only ответ T-Invest по счёту, ценам или стаканам.";
+  return "Проверяется";
 }
 
 function microSessionValue(): string {
-  if (market.dataShadowStatus.collector_state) {
-    return collectorLabel(market.dataShadowStatus.collector_state);
+  const state = market.dataShadowStatus.collector_state;
+  if (state === "collecting") {
+    return "Сбор идёт";
+  }
+  if (state === "starting") {
+    return "Запускается";
+  }
+  if (state === "stopping") {
+    return "Останавливается";
+  }
+  if (state === "preflight_blocked") {
+    return "Сбор заблокирован";
+  }
+  if (state === "stopped_by_operator" || state === "stopped") {
+    return "Сбор остановлен";
   }
   if (robot.status.micro_session_id) {
     return "Окно сбора активно";
@@ -321,10 +324,10 @@ function microSessionDetail(): string {
   if (market.dataShadowStatus.collector_state === "preflight_blocked") {
     return `Сбор не стартовал: ${reasonLabel(market.dataShadowStatus.reason_code)}`;
   }
-  if (robot.status.micro_session_id) {
-    return robot.status.micro_session_id;
+  if (market.dataShadowStatus.collector_state === "stopped_by_operator") {
+    return "Остановлено кнопкой Stop.";
   }
-  return "Live stream не запущен. Цены показываются из read-only refresh или локальной истории.";
+  return "Нажмите Start, когда preflight разрешит сбор.";
 }
 
 function tradingModeValue(): string {
@@ -335,7 +338,7 @@ function tradingModeValue(): string {
 }
 
 function tradingModeDetail(): string {
-  return "Data-only режим: real orders, pseudo-orders, signal_candidate и order_intent не создаются.";
+  return "Data-only: заявок, pseudo-orders и signal_candidate нет.";
 }
 
 function formatBps(value: string | null | undefined): string {
@@ -343,7 +346,7 @@ function formatBps(value: string | null | undefined): string {
 }
 
 function formatLots(value: string | null | undefined): string {
-  return value === null || value === undefined ? "Нет данных" : `${formatDecimal(value, 0)} lots`;
+  return value === null || value === undefined ? "Нет данных" : `${formatDecimal(value, 0)} лотов`;
 }
 
 function formatChangeBps(value: string | null | undefined): string {
@@ -370,11 +373,14 @@ function quoteFreshness(instrument: MarketInstrumentOverview): string {
   if (!instrument.last_price_at) {
     return reasonLabel(String(instrument.quote_payload?.reason_code ?? "no_price_source_available"));
   }
-  const age = instrument.price_staleness_seconds;
-  if (age === null || age === undefined) {
-    return compactDateTime(instrument.last_price_at);
+  const timestamp = compactDateTime(instrument.last_price_at);
+  if (instrument.quote_status === "live") {
+    return `${timestamp} · свежая`;
   }
-  return `${compactDateTime(instrument.last_price_at)} / ${age}s`;
+  if (instrument.quote_status === "previous_close") {
+    return `${timestamp} · пред. закрытие`;
+  }
+  return `${timestamp} · устарела`;
 }
 
 function selectedInstrumentTitle(): string {
@@ -514,13 +520,17 @@ function degradedFlagLabel(flag: string): string {
       </section>
     </div>
 
-    <div class="command-status-panel" :class="{ 'command-status-panel--active': robot.commandLoading }">
+    <div
+      v-if="robot.commandLoading || robot.lastCommandStatus"
+      class="command-status-panel"
+      :class="{ 'command-status-panel--active': robot.commandLoading }"
+    >
       <span v-if="robot.commandLoading" class="inline-spinner" aria-hidden="true" />
       <div>
-        <p class="eyebrow">last command</p>
+        <p class="eyebrow">команда</p>
         <strong>{{ commandStatusLabel(robot.lastCommandStatus) }}</strong>
       </div>
-      <p>{{ robot.lastCommandMessage ?? "Команд ещё не было. Start запускает только data-only сбор, торговля отключена." }}</p>
+      <p>{{ robot.lastCommandMessage }}</p>
       <code v-if="robot.lastCommandReasonCode">{{ reasonLabel(robot.lastCommandReasonCode) }}</code>
       <small v-if="robot.lastCommandNextSessionAt">next {{ compactDateTime(robot.lastCommandNextSessionAt) }}</small>
       <small v-if="robot.lastCommandAt">{{ compactDateTime(robot.lastCommandAt) }}</small>
@@ -530,12 +540,10 @@ function degradedFlagLabel(flag: string): string {
       <section class="balance-card" :class="{ 'balance-card--degraded': robot.status.balance.balance_degraded }">
         <div class="balance-card__top">
           <span>Брокерский счёт</span>
-          <button type="button" class="inline-action" :disabled="robot.balanceRefreshLoading" @click="robot.refreshBalance()">
-            {{ robot.balanceRefreshLoading ? "Обновляю..." : "Обновить" }}
-          </button>
+          <span v-if="robot.balanceRefreshLoading" class="inline-spinner" aria-hidden="true" />
         </div>
         <strong>{{ balanceValue() }}</strong>
-        <p>{{ robot.status.balance.balance_degraded ? balanceUnavailableReason() : "Readonly баланс T-Invest. Это не разрешение на торговлю." }}</p>
+        <p v-if="robot.status.balance.balance_degraded">{{ balanceUnavailableReason() }}</p>
         <dl>
           <div>
             <dt>свободно</dt>
@@ -545,25 +553,12 @@ function degradedFlagLabel(flag: string): string {
             <dt>блок</dt>
             <dd>{{ blockedCash() }}</dd>
           </div>
-          <div>
-            <dt>доход</dt>
-            <dd>{{ expectedYield() }}</dd>
-          </div>
-          <div>
-            <dt>счёт</dt>
-            <dd>{{ robot.status.balance.account_id_masked ?? "masked" }}</dd>
-          </div>
-          <div>
-            <dt>freshness</dt>
-            <dd>{{ compactDateTime(robot.status.balance.last_balance_refresh_at) }}</dd>
-          </div>
         </dl>
       </section>
 
       <MetricTile label="Сессия MOEX" :value="sessionLabel(robot.status.session_type)" :detail="sessionDetail()" />
       <MetricTile label="Фаза рынка" :value="phaseLabel(robot.status.session_phase)" :detail="phaseDetail()" />
-      <MetricTile label="Связь с брокером" :value="brokerStatusValue()" :detail="brokerStatusDetail()" />
-      <MetricTile label="Окно сбора" :value="microSessionValue()" :detail="microSessionDetail()" />
+      <MetricTile label="Сбор данных" :value="microSessionValue()" :detail="microSessionDetail()" />
       <MetricTile label="Торговля" :value="tradingModeValue()" :detail="tradingModeDetail()" tone="info" />
     </div>
 
@@ -576,53 +571,36 @@ function degradedFlagLabel(flag: string): string {
             <span class="status-badge status-badge--info">{{ quoteRows.length }} инструментов</span>
           </template>
 
-          <div v-if="quoteRows.length" class="quote-table-wrap">
-            <table class="quote-table">
-              <thead>
-                <tr>
-                  <th>ticker</th>
-                  <th>цена</th>
-                  <th>status/source</th>
-                  <th>freshness</th>
-                  <th>сессия</th>
-                  <th>spread</th>
-                  <th>bid / ask</th>
-                  <th>качество</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr
-                  v-for="instrument in quoteRows"
-                  :key="instrument.instrument_id"
-                  :class="{ 'quote-table__row--active': market.selectedInstrumentId === instrument.instrument_id }"
-                  @click="market.selectedInstrumentId = instrument.instrument_id"
-                >
-                  <td>
-                    <button class="quote-row-button" type="button">
-                      <strong>{{ instrument.ticker ?? instrument.instrument_id }}</strong>
-                      <small>{{ instrument.instrument_id }}</small>
-                    </button>
-                  </td>
-                  <td>
-                    <strong class="price-cell">{{ formatDecimal(instrument.last_price, 2) }}</strong>
-                    <small :class="`quote-change quote-change--${changeTone(instrument.change_bps)}`">
-                      {{ formatChangeBps(instrument.change_bps) }}
-                    </small>
-                  </td>
-                  <td>
-                    <span class="status-badge" :class="`status-badge--${toneFromQuote(instrument)}`">
-                      {{ statusLabel(instrument.quote_status) }}
-                    </span>
-                    <small>{{ sourceLabel(instrument.last_price_source) }}</small>
-                  </td>
-                  <td>{{ quoteFreshness(instrument) }}</td>
-                  <td>{{ sessionLabel(instrument.session_type) }}</td>
-                  <td>{{ formatBps(instrument.spread_bps) }}</td>
-                  <td>{{ formatDecimal(instrument.best_bid, 2) }} / {{ formatDecimal(instrument.best_ask, 2) }}</td>
-                  <td>{{ formatPercentRatio(instrument.market_quality) }}</td>
-                </tr>
-              </tbody>
-            </table>
+          <div v-if="quoteRows.length" class="quote-grid quote-grid--dashboard">
+            <button
+              v-for="instrument in quoteRows"
+              :key="instrument.instrument_id"
+              class="quote-card quote-card--rich"
+              :class="{
+                'quote-card--active': market.selectedInstrumentId === instrument.instrument_id,
+                [`quote-card--${toneFromQuote(instrument)}`]: true,
+              }"
+              type="button"
+              @click="market.selectedInstrumentId = instrument.instrument_id"
+            >
+              <span class="quote-card__top">
+                <span class="quote-card__ticker">{{ instrument.ticker ?? instrument.instrument_id }}</span>
+                <span class="status-badge" :class="`status-badge--${toneFromQuote(instrument)}`">
+                  {{ statusLabel(instrument.quote_status) }}
+                </span>
+              </span>
+              <strong>{{ formatDecimal(instrument.last_price, 2) }}</strong>
+              <span class="quote-card__source">{{ sourceLabel(instrument.last_price_source) }}</span>
+              <span class="quote-card__freshness">{{ quoteFreshness(instrument) }}</span>
+              <span class="quote-card__meta">
+                <small>bid/ask {{ formatDecimal(instrument.best_bid, 2) }} / {{ formatDecimal(instrument.best_ask, 2) }}</small>
+                <small>спред {{ formatBps(instrument.spread_bps) }}</small>
+                <small>стакан {{ formatPercentRatio(instrument.market_quality) }}</small>
+              </span>
+              <small :class="`quote-change quote-change--${changeTone(instrument.change_bps)}`">
+                {{ formatChangeBps(instrument.change_bps) }}
+              </small>
+            </button>
           </div>
           <EmptyState
             v-else
@@ -659,9 +637,9 @@ function degradedFlagLabel(flag: string): string {
             <MetricTile label="Mid" :value="formatDecimal(selectedInstrument?.mid_price, 2)" :detail="formatBps(selectedInstrument?.spread_bps)" />
             <MetricTile label="Спред" :value="formatDecimal(selectedInstrument?.spread_abs, 4)" :detail="formatBps(selectedInstrument?.spread_bps)" tone="info" />
             <MetricTile label="Глубина" :value="`${formatLots(selectedInstrument?.bid_depth_lots)} / ${formatLots(selectedInstrument?.ask_depth_lots)}`" />
-            <MetricTile label="Imbalance" :value="formatDecimal(selectedInstrument?.book_imbalance, 3)" />
+            <MetricTile label="Имбаланс" :value="formatDecimal(selectedInstrument?.book_imbalance, 3)" />
             <MetricTile label="Качество стакана" :value="formatPercentRatio(selectedInstrument?.market_quality)" :tone="Number(selectedInstrument?.market_quality ?? 0) >= 0.7 ? 'good' : 'warn'" />
-            <MetricTile label="Статус стакана" :value="selectedInstrument?.order_book_stale ? 'stale' : selectedInstrument?.order_book_source ? 'fresh' : 'нет стакана'" :detail="orderBookReason()" />
+            <MetricTile label="Статус стакана" :value="selectedInstrument?.order_book_stale ? 'устарел' : selectedInstrument?.order_book_source ? 'свежий' : 'нет стакана'" :detail="orderBookReason()" />
           </div>
 
           <div class="market-depth-layout">
@@ -705,24 +683,22 @@ function degradedFlagLabel(flag: string): string {
           <template #eyebrow>collector</template>
           <template #title>Data-only сбор</template>
           <dl class="definition-grid">
-            <dt>state</dt>
+            <dt>состояние</dt>
             <dd>{{ collectorLabel(market.dataShadowStatus.collector_state) }}</dd>
-            <dt>market_open</dt>
-            <dd>{{ market.dataShadowStatus.market_open ?? "уточняется" }}</dd>
-            <dt>reason</dt>
+            <dt>рынок</dt>
+            <dd>{{ market.dataShadowStatus.market_open === true ? "открыт" : market.dataShadowStatus.market_open === false ? "закрыт" : "уточняется" }}</dd>
+            <dt>причина</dt>
             <dd>{{ reasonLabel(market.dataShadowStatus.reason_code) }}</dd>
-            <dt>next session</dt>
+            <dt>следующая сессия</dt>
             <dd>{{ compactDateTime(market.dataShadowStatus.next_session_at) }}</dd>
-            <dt>stream</dt>
-            <dd>{{ market.dataShadowStatus.stream_alive ? "live samples идут" : "live samples нет" }}</dd>
+            <dt>поток</dt>
+            <dd>{{ market.dataShadowStatus.stream_alive ? "samples идут" : "samples нет" }}</dd>
             <dt>snapshots</dt>
             <dd>{{ market.dataShadowStatus.market_microstructure_snapshots }}</dd>
             <dt>стаканы</dt>
             <dd>{{ market.dataShadowStatus.order_book_snapshots }}</dd>
-            <dt>last sample age</dt>
+            <dt>возраст sample</dt>
             <dd>{{ market.dataShadowStatus.last_message_age_seconds ?? "нет samples" }}</dd>
-            <dt>last command</dt>
-            <dd>{{ market.dataShadowStatus.last_command_status ?? "нет command" }}</dd>
           </dl>
           <div v-if="market.dataShadowStatus.warnings.length" class="operator-list operator-list--compact">
             <div v-for="warning in market.dataShadowStatus.warnings" :key="warning">
@@ -735,15 +711,15 @@ function degradedFlagLabel(flag: string): string {
           <template #eyebrow>session</template>
           <template #title>Текущая сессия</template>
           <dl class="definition-grid">
-            <dt>date</dt>
+            <dt>дата</dt>
             <dd>{{ robot.session.trading_date ?? robot.session.calendar_date ?? "нет даты" }}</dd>
-            <dt>session</dt>
+            <dt>сессия</dt>
             <dd>{{ sessionLabel(robot.status.session_type) }}</dd>
-            <dt>phase</dt>
+            <dt>фаза</dt>
             <dd>{{ phaseLabel(robot.status.session_phase) }}</dd>
-            <dt>closed expected</dt>
-            <dd>{{ market.dataShadowStatus.market_closed_expected ?? "уточняется" }}</dd>
-            <dt>broker status</dt>
+            <dt>закрыто по расписанию</dt>
+            <dd>{{ market.dataShadowStatus.market_closed_expected === true ? "да" : market.dataShadowStatus.market_closed_expected === false ? "нет" : "уточняется" }}</dd>
+            <dt>брокер</dt>
             <dd>{{ brokerStatusValue() }}</dd>
           </dl>
         </DataPanel>
@@ -769,21 +745,6 @@ function degradedFlagLabel(flag: string): string {
             </div>
           </div>
           <EmptyState v-else title="Критичных проблем нет" detail="Dashboard не видит degraded flags." />
-        </DataPanel>
-
-        <DataPanel>
-          <template #eyebrow>freshness</template>
-          <template #title>Обновление</template>
-          <dl class="definition-grid">
-            <dt>панель</dt>
-            <dd>{{ compactDateTime(robot.lastDashboardMessageAt) }}</dd>
-            <dt>котировки</dt>
-            <dd>{{ compactDateTime(market.overview.generated_at) }}</dd>
-            <dt>сессия</dt>
-            <dd>{{ compactDateTime(robot.session.observed_at) }}</dd>
-            <dt>баланс</dt>
-            <dd>{{ compactDateTime(robot.status.balance.last_balance_refresh_at) }}</dd>
-          </dl>
         </DataPanel>
       </div>
     </div>

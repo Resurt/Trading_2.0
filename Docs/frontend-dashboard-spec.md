@@ -255,20 +255,19 @@ Current Live Dashboard blocks:
 - Balance card
 - session type, phase, broker status and micro-session
 - cockpit-style connection chips with human labels, not raw `unknown` / `loading` codes
-- quote table for the core universe: SBER, GAZP, LKOH, YDEX, TATN, GMKN, OZON, VTBR
+- compact quote cards for the core universe: SBER, GAZP, LKOH, YDEX, TATN, GMKN, OZON, VTBR
 - Data-only Shadow Status
 - selected instrument panel with price, bid/ask, mid, spread, depth, imbalance and book quality
 - selected instrument market depth block: order-book ladder on the left and market trades tape on the right
 - current signal and blocker reason
 - recent risk events
 - stream health
-- report freshness
 
 Balance card:
 
-- shows portfolio value, available cash, blocked cash, expected yield, masked account id
-  and freshness;
-- shows masked account id only;
+- shows portfolio value, available cash and blocked cash in the primary card;
+- does not show full account id; the main dashboard card also avoids account id,
+  expected yield and freshness clutter;
 - auto-refreshes broker balance through readonly `POST /portfolio/refresh` while the
   dashboard is open;
 - shows human-readable degraded reasons when broker balance is missing; raw technical
@@ -284,12 +283,13 @@ Start/Stop command feedback:
   not start streams.
 - If `market_open=true`, Start submits the data-only start command and shows the
   returned `RobotCommandResponse`.
-- During Start, the button shows an animated progress state and the command strip shows
-  the current phase (`checking_preflight`, `start_requesting`, etc.).
+- During Start, the button shows an animated progress state and a compact command strip
+  appears only while a command is running or after a real command result.
 - Stop always submits controlled stop and shows requested/stopped/error result in
   the command status panel.
-- The latest command state is visible as `lastCommandStatus`, `lastCommandMessage`,
-  `lastCommandReasonCode`, `lastCommandAt` and `lastCommandNextSessionAt`.
+- The latest command state is visible in human-readable form with reason and next
+  session when applicable; the dashboard must not show an empty technical
+  `last command` block before any command exists.
 
 Quotes:
 
@@ -302,8 +302,13 @@ Quotes:
   latest known candle close, previous close, then unavailable.
 - `POST /market/quotes/refresh` is the explicit readonly broker refresh path for
   `GetLastPrices`/`GetOrderBook`.
+- A successful readonly `GetOrderBook` response is treated as fresh by broker
+  response receipt time; the exchange timestamp remains visible only as a
+  diagnostic field.
 - If a refresh request times out, the dashboard keeps the last good quote instead of
   clearing the quote grid.
+- The quote grid is card-based and must not require horizontal scrolling for the
+  eight core instruments.
 - Stale candles/order books remain visible with timestamp and stale badge, never as
   current live prices.
 - Balance, session state and current/last prices must be visible without starting
@@ -313,6 +318,9 @@ Selected instrument depth:
 
 - When the operator clicks a core universe row, the selected instrument block must
   render an order-book ladder with bid price, bid volume, ask price and ask volume.
+- The selected instrument depth/tape layout must stay inside the selected
+  instrument panel. It may stack ladder and tape vertically on narrower screens to
+  avoid overlap with the side column.
 - Ladder volume bars use only real `order_book_summary.bids`/`asks` levels from
   live data-only storage or explicit readonly `GetOrderBook` refresh. The UI must
   not invent synthetic depth levels.

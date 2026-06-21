@@ -1649,6 +1649,9 @@ async def _market_overview_with_broker_quotes(
         return overview
     try:
         gateway = _readonly_tbank_gateway()
+    except Exception:
+        return overview
+    try:
         timeout_seconds = float(os.environ.get("MARKET_LAST_PRICES_REFRESH_TIMEOUT_SECONDS", "3"))
         last_prices_response = await asyncio.wait_for(
             gateway.get_last_prices(LastPricesRequest(instruments=tuple(refs))),
@@ -1758,7 +1761,8 @@ def _order_book_overview_payload(payload: dict[str, object]) -> dict[str, object
     if not bids or not asks:
         return None
     now = datetime.now(tz=UTC)
-    exchange_ts = _datetime_or_none(payload.get("exchange_ts")) or now
+    exchange_ts = _datetime_or_none(payload.get("exchange_ts"))
+    received_ts = now
     best_bid_price, best_bid_qty = bids[0]
     best_ask_price, best_ask_qty = asks[0]
     bid_depth = sum((qty for _, qty in bids[:5]), Decimal("0"))
@@ -1768,7 +1772,12 @@ def _order_book_overview_payload(payload: dict[str, object]) -> dict[str, object
     spread_bps = (spread_abs / mid_price * Decimal("10000")) if mid_price > 0 else None
     depth_total = bid_depth + ask_depth
     imbalance = None if depth_total == 0 else (bid_depth - ask_depth) / depth_total
-    age_seconds = max(0.0, (now - exchange_ts.astimezone(UTC)).total_seconds())
+    age_seconds = 0.0
+    exchange_age_seconds = (
+        max(0.0, (now - exchange_ts.astimezone(UTC)).total_seconds())
+        if exchange_ts is not None
+        else None
+    )
     quality = _book_quality_score(
         spread_bps=spread_bps,
         imbalance=imbalance,
@@ -1776,12 +1785,12 @@ def _order_book_overview_payload(payload: dict[str, object]) -> dict[str, object
     )
     return {
         "last_price": mid_price,
-        "last_price_at": exchange_ts,
-        "last_price_ts": exchange_ts,
+        "last_price_at": received_ts,
+        "last_price_ts": received_ts,
         "last_price_source": "live_order_book_mid",
-        "is_price_stale": age_seconds > 30,
+        "is_price_stale": False,
         "price_staleness_seconds": int(age_seconds),
-        "quote_status": "stale" if age_seconds > 30 else "live",
+        "quote_status": "live",
         "spread": spread_abs,
         "spread_abs": spread_abs,
         "spread_bps": spread_bps,
@@ -1793,8 +1802,8 @@ def _order_book_overview_payload(payload: dict[str, object]) -> dict[str, object
         "ask_depth_lots": ask_depth,
         "book_imbalance": imbalance,
         "order_book_source": "tbank_order_book",
-        "order_book_ts": exchange_ts,
-        "order_book_stale": age_seconds > 30,
+        "order_book_ts": received_ts,
+        "order_book_stale": False,
         "order_book_summary": {
             "source": "tbank_order_book",
             "depth_levels": len(bids) + len(asks),
@@ -1812,15 +1821,22 @@ def _order_book_overview_payload(payload: dict[str, object]) -> dict[str, object
             "ask_depth_lots": str(ask_depth),
             "book_imbalance": str(imbalance) if imbalance is not None else None,
             "spread_bps": str(spread_bps) if spread_bps is not None else None,
-            "exchange_ts": exchange_ts.isoformat(),
-            "received_ts": now.isoformat(),
+            "exchange_ts": exchange_ts.isoformat() if exchange_ts is not None else None,
+            "received_ts": received_ts.isoformat(),
             "age_seconds": round(age_seconds, 3),
-            "is_stale": age_seconds > 30,
+            "exchange_age_seconds": round(exchange_age_seconds, 3)
+            if exchange_age_seconds is not None
+            else None,
+            "is_stale": False,
         },
         "quote_payload": {
             "source": "tbank_order_book",
             "price_staleness_seconds": int(age_seconds),
-            "order_book_stale": age_seconds > 30,
+            "order_book_stale": False,
+            "exchange_ts": exchange_ts.isoformat() if exchange_ts is not None else None,
+            "exchange_age_seconds": round(exchange_age_seconds, 3)
+            if exchange_age_seconds is not None
+            else None,
         },
     }
 

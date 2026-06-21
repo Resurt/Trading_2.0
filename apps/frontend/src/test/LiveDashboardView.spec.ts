@@ -117,12 +117,14 @@ function mountWithStores() {
 }
 
 describe("LiveDashboardView", () => {
-  it("renders operator dashboard with quote table and readable status", () => {
+  it("renders operator dashboard with quote cards and readable status", () => {
     const wrapper = mountWithStores();
 
     expect(wrapper.find('[data-testid="live-dashboard"]').exists()).toBe(true);
     expect(wrapper.text()).toContain("Котировки core universe");
     expect(wrapper.text()).toContain("8 инструментов");
+    expect(wrapper.findAll(".quote-card").length).toBe(8);
+    expect(wrapper.find(".quote-table").exists()).toBe(false);
     expect(wrapper.text()).toContain("СТАКАН");
     expect(wrapper.text()).toContain("ЛЕНТА СДЕЛОК");
     expect(wrapper.text()).toContain("100,00");
@@ -130,9 +132,11 @@ describe("LiveDashboardView", () => {
     expect(wrapper.text()).toContain("Покупка");
     expect(wrapper.text()).toContain("Сессия MOEX");
     expect(wrapper.text()).toContain("Data-only сбор");
-    expect(wrapper.text()).toContain("real orders, pseudo-orders");
-    expect(wrapper.text()).toContain("acc***001");
-    expect(wrapper.text()).toContain("Broker balance получен");
+    expect(wrapper.text()).toContain("заявок, pseudo-orders");
+    expect(wrapper.text()).toMatch(/250\s000,00/);
+    expect(wrapper.text()).not.toContain("acc***001");
+    expect(wrapper.text()).not.toContain("freshness");
+    expect(wrapper.text()).not.toContain("Обновить");
     expect(wrapper.text()).toContain("spread_too_wide");
     expect(wrapper.text()).toContain("spread above configured threshold");
     expect(wrapper.text()).not.toContain("request-1");
@@ -152,18 +156,18 @@ describe("LiveDashboardView", () => {
 
     expect(wrapper.text()).toContain("Счёт не получен");
     expect(wrapper.text()).toContain("Нет сохранённых данных счёта");
-    expect(wrapper.text()).toContain("Обновить");
+    expect(wrapper.text()).not.toContain("Обновить");
   });
 
-  it("updates selected instrument panel when a quote row is clicked", async () => {
+  it("updates selected instrument panel when a quote card is clicked", async () => {
     const wrapper = mountWithStores();
 
-    await wrapper.findAll(".quote-table tbody tr")[1].trigger("click");
+    await wrapper.findAll(".quote-card")[1].trigger("click");
     await nextTick();
 
     const market = useMarketStore();
     expect(market.selectedInstrumentId).toBe("MOEX:GAZP");
-    expect(wrapper.text()).toContain("GAZP / stale");
+    expect(wrapper.text()).toContain("GAZP / устарела");
   });
 });
 

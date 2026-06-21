@@ -324,14 +324,16 @@ browser does not fan out directly to `localhost:8000`.
 The Live Dashboard auto-refreshes broker balance through readonly `/portfolio/refresh`
 while the page is open. The API container must have the readonly T-Bank token mounted;
 if `GetAccounts` is unavailable but `TRADING_ACCOUNT_ID` is set, refresh can still use
-that account id and only render the masked form.
+that account id internally. The main dashboard card shows portfolio value, available
+cash and blocked cash only; full account ids are never rendered.
 
 The Live Dashboard also shows quotes for the core universe. `GET /market/overview` is
 a fast local read-model endpoint: it always returns one row per core instrument, shows
 source/freshness/stale status, and does not call T-Invest. Explicit readonly broker
 quote refresh is `POST /market/quotes/refresh`, which may call `GetLastPrices` and
 `GetOrderBook` with bounded timeouts. Temporary request failures must not clear
-already displayed quotes.
+already displayed quotes; if the readonly gateway is unavailable, refresh falls back
+to the local overview instead of blocking the dashboard.
 
 Runbook: `Docs/runbooks/data-only-shadow.md`.
 

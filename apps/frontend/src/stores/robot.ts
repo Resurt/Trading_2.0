@@ -338,7 +338,7 @@ export const useRobotStore = defineStore("robot", () => {
     }
   }
 
-  function startBalancePolling(intervalMs = 60_000): void {
+  function startBalancePolling(intervalMs = 20_000): void {
     if (balancePollTimer !== null) {
       return;
     }
