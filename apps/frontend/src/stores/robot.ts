@@ -373,7 +373,7 @@ export const useRobotStore = defineStore("robot", () => {
       ? ` Следующая биржевая сессия: ${preflight.next_session_at}.`
       : "";
     const prefix = preflight.official_exchange_closed
-      ? "Официальная MOEX-сессия закрыта. Data-only сбор для калибровки не запущен."
+      ? "Площадка: внебиржевая торговля. Data-only сбор не запущен."
       : preflight.market_closed_expected
       ? `Рынок закрыт. Сессия: ${preflight.session_type}.`
       : `Preflight не разрешил старт. Сессия: ${preflight.session_type}.`;

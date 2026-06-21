@@ -130,7 +130,8 @@ describe("LiveDashboardView", () => {
     expect(wrapper.text()).toContain("100,00");
     expect(wrapper.text()).toContain("100,10");
     expect(wrapper.text()).toContain("Покупка");
-    expect(wrapper.text()).toContain("Сессия MOEX");
+    expect(wrapper.text()).toContain("Площадка");
+    expect(wrapper.text()).toContain("Биржевая торговля");
     expect(wrapper.text()).toContain("Data-only сбор");
     expect(wrapper.text()).toContain("заявок, pseudo-orders");
     expect(wrapper.text()).toMatch(/250\s000,00/);

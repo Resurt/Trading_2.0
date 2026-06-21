@@ -170,8 +170,7 @@ function reasonLabel(reason: string | null | undefined): string {
     broker_accounts_empty: "T-Bank вернул пустой список счетов",
     broker_balance_timeout: "T-Bank не ответил вовремя",
     api_snapshot_unavailable: "snapshot API не получен",
-    moex_dsvd_cancelled_platform_update:
-      "официальная MOEX-сессия закрыта: ДСВД 20-21 июня отменена",
+    moex_dsvd_cancelled_platform_update: "биржа закрыта",
     broker_otc_only: "доступны только брокерские внебиржевые котировки",
     no_market_trades_samples: "лента сделок не пришла",
     not_for_calibration: "не для калибровки",
@@ -281,32 +280,53 @@ function blockedCash(): string {
 function sessionDetail(): string {
   const preflight = robot.lastSessionPreflight;
   const date = robot.session.trading_date ?? robot.session.calendar_date ?? "нет даты";
-  if (preflight?.official_exchange_closed) {
-    return `${date} · официальная MOEX закрыта · ${reasonLabel(
-      preflight.official_exchange_reason_code ?? preflight.reason_code,
-    )}`;
-  }
   const marketOpen = market.dataShadowStatus.market_open;
   const openLabel = marketOpen === null ? "проверяю календарь" : marketOpen ? "рынок открыт" : "рынок закрыт";
   const reason = market.dataShadowStatus.reason_code ?? robot.lastCommandReasonCode;
   return `${date} · ${openLabel}${reason ? ` · ${reasonLabel(reason)}` : ""}`;
 }
 
+function venueStatusValue(): string {
+  const preflight = robot.lastSessionPreflight;
+  if (
+    preflight?.venue_type === "official_exchange" ||
+    preflight?.official_exchange_open ||
+    market.quoteRows.some((instrument) => instrument.venue_type === "official_exchange")
+  ) {
+    return "Биржевая торговля";
+  }
+  if (
+    preflight?.venue_type === "broker_otc" ||
+    preflight?.broker_otc_or_indicative_available ||
+    market.quoteRows.some((instrument) => instrument.venue_type === "broker_otc")
+  ) {
+    return "Внебиржевая торговля";
+  }
+  if (
+    preflight?.venue_type === "broker_indicative" ||
+    market.quoteRows.some((instrument) => instrument.venue_type === "broker_indicative")
+  ) {
+    return "Индикативные котировки";
+  }
+  if (preflight?.official_exchange_closed || market.dataShadowStatus.market_closed_expected) {
+    return "Площадка закрыта";
+  }
+  return "Площадка уточняется";
+}
+
 function phaseDetail(): string {
   const preflight = robot.lastSessionPreflight;
   if (preflight?.official_exchange_closed) {
-    return `Выходная сессия отменена. Следующая биржевая сессия: ${compactDateTime(
-      preflight.next_session_at,
-    )}`;
+    return `Следующая: ${compactDateTime(preflight.next_session_at)}`;
   }
   const expected = market.dataShadowStatus.market_closed_expected;
   if (expected === true) {
-    return `По расписанию закрыто. Следующая сессия: ${compactDateTime(market.dataShadowStatus.next_session_at)}`;
+    return `Следующая: ${compactDateTime(market.dataShadowStatus.next_session_at)}`;
   }
   if (expected === false) {
-    return "Preflight разрешает data-only сбор.";
+    return "Сбор разрешен.";
   }
-  return "Жду preflight календаря.";
+  return "Проверяю.";
 }
 
 function brokerStatusValue(): string {
@@ -436,8 +456,8 @@ function quoteFreshness(instrument: MarketInstrumentOverview): string {
 
 function venueLabel(value: string | null | undefined): string {
   const labels: Record<string, string> = {
-    official_exchange: "официальная MOEX",
-    broker_otc: "брокерская / внебиржевая",
+    official_exchange: "биржевая",
+    broker_otc: "внебиржевая",
     broker_indicative: "индикативная",
     stale_local: "локальная история",
     unknown: "источник уточняется",
@@ -470,7 +490,7 @@ function orderBookReason(): string {
   }
   if (instrument.order_book_source && !instrument.order_book_stale) {
     if (instrument.official_exchange_closed) {
-      return "Стакан получен как брокерская котировка: официальная MOEX-сессия закрыта, в калибровку не идет.";
+      return "Брокерская котировка; не для калибровки.";
     }
     return "Стакан свежий.";
   }
@@ -587,7 +607,7 @@ function degradedFlagLabel(flag: string): string {
         </dl>
       </section>
 
-      <MetricTile label="Сессия MOEX" :value="sessionLabel(robot.status.session_type)" :detail="sessionDetail()" />
+      <MetricTile label="Площадка" :value="venueStatusValue()" />
       <MetricTile label="Фаза рынка" :value="phaseLabel(robot.status.session_phase)" :detail="phaseDetail()" />
       <MetricTile label="Сбор данных" :value="microSessionValue()" :detail="microSessionDetail()" />
       <MetricTile label="Торговля" :value="tradingModeValue()" :detail="tradingModeDetail()" tone="info" />
@@ -741,19 +761,15 @@ function degradedFlagLabel(flag: string): string {
         </DataPanel>
 
         <DataPanel>
-          <template #eyebrow>session</template>
-          <template #title>Текущая сессия</template>
+          <template #eyebrow>venue</template>
+          <template #title>Площадка</template>
           <dl class="definition-grid">
-            <dt>дата</dt>
-            <dd>{{ robot.session.trading_date ?? robot.session.calendar_date ?? "нет даты" }}</dd>
-            <dt>сессия</dt>
-            <dd>{{ sessionLabel(robot.status.session_type) }}</dd>
+            <dt>режим</dt>
+            <dd>{{ venueStatusValue() }}</dd>
             <dt>фаза</dt>
             <dd>{{ phaseLabel(robot.status.session_phase) }}</dd>
-            <dt>закрыто по расписанию</dt>
-            <dd>{{ market.dataShadowStatus.market_closed_expected === true ? "да" : market.dataShadowStatus.market_closed_expected === false ? "нет" : "уточняется" }}</dd>
-            <dt>брокер</dt>
-            <dd>{{ brokerStatusValue() }}</dd>
+            <dt>сбор</dt>
+            <dd>{{ robot.lastSessionPreflight?.data_only_collection_allowed ? "разрешен" : "заблокирован" }}</dd>
           </dl>
         </DataPanel>
 
