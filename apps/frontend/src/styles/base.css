@@ -313,6 +313,35 @@ code {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
+.session-ribbon {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  background: var(--color-surface-raised);
+}
+
+.session-ribbon > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.session-ribbon strong {
+  min-width: 0;
+  color: var(--color-text-primary);
+  font-size: 15px;
+  overflow-wrap: anywhere;
+}
+
+.session-ribbon small {
+  color: var(--color-text-muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 .dashboard-command-row {
   display: flex;
   align-items: center;
@@ -1407,6 +1436,7 @@ td {
 @media (max-width: 1180px) {
   .metric-grid,
   .metric-grid--compact,
+  .session-ribbon,
   .quote-grid,
   .selected-instrument-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1459,6 +1489,7 @@ td {
 
   .metric-grid,
   .metric-grid--compact,
+  .session-ribbon,
   .quote-grid,
   .selected-instrument-grid,
   .depth-bars,

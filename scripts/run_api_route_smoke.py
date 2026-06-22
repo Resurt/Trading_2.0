@@ -16,6 +16,7 @@ EXPECTED_ROUTES = (
     "/portfolio/summary",
     "/portfolio/refresh",
     "/market/overview",
+    "/market/instruments/{instrument_id}/details",
     "/market/quotes/refresh",
     "/market/microstructure/latest",
     "/market/microstructure/summary",

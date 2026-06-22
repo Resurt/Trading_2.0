@@ -195,11 +195,12 @@ The dashboard Start button is not a blind start command. It first calls:
 GET /session/preflight?instruments=SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR&mode=data_shadow
 ```
 
-If `market_open=false`, the UI shows `blocked_by_preflight`/`rejected`, the
-`reason_code` and `next_session_at` when available. The frontend still calls
-`POST /robot/start` once after preflight so the API can persist a rejected
-`robot_command` and audit event for traceability. The API returns HTTP 200 with
-`accepted=false`; trade-core does not start streams.
+If preflight is unavailable, the UI shows `preflight_unavailable` and does not call
+`POST /robot/start`. If `market_open=false` or
+`data_only_collection_allowed=false`, the UI shows `blocked_by_preflight`, the
+`reason_code` and `next_session_at` when available. The frontend does not call
+`POST /robot/start` in this state; trade-core does not start streams and no data-only
+runtime command is created from the closed-market click.
 
 The Start button must show an animated progress state while preflight/start is in
 flight. A disabled button without command feedback is a UI bug. The command strip
@@ -248,7 +249,10 @@ rows immediately after a live broker refresh.
 Operator dashboard polling while open:
 
 - `/market/overview` and `/runtime/data-shadow/status`: every 5 seconds;
-- `/market/quotes/refresh`: no more often than every 30 seconds;
+- `/market/instruments/{instrument_id}/details`: selected instrument only, every
+  2 seconds while market/collector is active and every 8 seconds while idle;
+- `/market/quotes/refresh`: explicit readonly diagnostic/operator action, not an
+  all-instruments dashboard mount poll;
 - `/portfolio/refresh`: every 60 seconds.
 
 These polling paths are readonly. They must not call `PostOrder`, `CancelOrder`, create

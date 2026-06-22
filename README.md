@@ -331,18 +331,23 @@ cash and blocked cash only; full account ids are never rendered.
 
 The Live Dashboard also shows quotes for the core universe. `GET /market/overview` is
 a fast local read-model endpoint: it always returns one row per core instrument, shows
-source/freshness/stale status, and does not call T-Invest. Explicit readonly broker
-quote refresh is `POST /market/quotes/refresh`, which may call `GetLastPrices` and
-`GetOrderBook` with bounded timeouts. Temporary request failures must not clear
-already displayed quotes; if the readonly gateway is unavailable, refresh falls back
-to the local overview instead of blocking the dashboard. A successful readonly quote
-refresh is cached briefly by the API, so the next `/market/overview` and dashboard
-snapshot do not overwrite live broker quotes with old candle fallback rows.
+source/freshness/stale status, and does not call T-Invest. The quote board uses
+`/market/overview?include_details=false`; selected-instrument bid/ask ladder and
+trade tape load lazily from `GET /market/instruments/{instrument_id}/details`.
+Explicit readonly broker quote refresh remains `POST /market/quotes/refresh`, which
+may call `GetLastPrices` and `GetOrderBook` with bounded timeouts, but it is not part
+of the dashboard mount/poll loop. Temporary request failures must not clear already
+displayed quotes; if the readonly gateway is unavailable, refresh falls back to the
+local overview instead of blocking the dashboard. A successful readonly quote refresh
+is cached briefly by the API, so the next `/market/overview` and dashboard snapshot do
+not overwrite live broker quotes with old candle fallback rows.
 
 Dashboard polling is intentionally split: local market overview and data-only status
-poll every 5 seconds, readonly broker quote refresh no more often than every 30
-seconds, and broker balance refresh every 60 seconds. Polling is silent and must not
-clear the last good balance or quote rows on timeout.
+poll every 5 seconds, selected-instrument details poll every 2 seconds while the
+market/collector is active and every 8 seconds while idle, and broker balance refresh
+polls every 60 seconds. Polling is silent and must not clear the last good balance or
+quote rows on timeout. Empty or partial `/ws/market` snapshots are merged into the
+existing board and never delete missing core-universe rows.
 
 Runbook: `Docs/runbooks/data-only-shadow.md`.
 

@@ -72,34 +72,9 @@ const COLLECTOR_LABELS: Record<string, string> = {
   degraded: "Degraded",
 };
 
-const quoteRows = computed(() =>
-  [...market.quoteRows].sort((left, right) => {
-    const leftPriority = quotePriority(left);
-    const rightPriority = quotePriority(right);
-    if (leftPriority !== rightPriority) {
-      return leftPriority - rightPriority;
-    }
-    return left.instrument_id.localeCompare(right.instrument_id);
-  }),
-);
+const quoteRows = computed(() => market.quoteRows);
 
 const selectedInstrument = computed(() => market.currentInstrument);
-
-function quotePriority(instrument: MarketInstrumentOverview): number {
-  if (instrument.quote_status === "live") {
-    return 0;
-  }
-  if (instrument.quote_status === "broker_quote" || instrument.quote_status === "indicative") {
-    return 1;
-  }
-  if (instrument.quote_status === "stale") {
-    return 2;
-  }
-  if (instrument.quote_status === "previous_close") {
-    return 3;
-  }
-  return 4;
-}
 
 function toneFromQuote(instrument: MarketInstrumentOverview): "good" | "warn" | "muted" {
   if (instrument.quote_status === "live") {
@@ -164,8 +139,12 @@ function reasonLabel(reason: string | null | undefined): string {
     broker_schedule_unavailable: "расписание брокера недоступно",
     broker_status_unavailable: "статус инструмента недоступен",
     session_preflight_unavailable: "preflight недоступен",
+    preflight_unavailable: "preflight недоступен",
     collector_waiting_for_operator_start: "ожидает Start",
     collector_no_recent_samples: "нет свежих live samples",
+    data_only_collection_stopped: "data-only сбор остановлен",
+    data_only_collection_allowed: "data-only сбор разрешён",
+    data_only_collection_blocked: "data-only сбор заблокирован",
     broker_balance_unavailable: "нет сохранённого broker balance",
     broker_accounts_empty: "T-Bank вернул пустой список счетов",
     broker_balance_timeout: "T-Bank не ответил вовремя",
@@ -173,7 +152,14 @@ function reasonLabel(reason: string | null | undefined): string {
     moex_dsvd_cancelled_platform_update: "биржа закрыта",
     broker_otc_only: "доступны только брокерские внебиржевые котировки",
     no_market_trades_samples: "лента сделок не пришла",
+    instrument_unavailable: "инструмент недоступен",
     not_for_calibration: "не для калибровки",
+    broker_quote_not_for_calibration: "брокерская котировка только для отображения",
+    stale_order_book: "стакан устарел",
+    no_order_book_samples: "нет samples стакана",
+    empty_market_ws_snapshot: "пустой market WS snapshot проигнорирован",
+    selected_instrument_details_unavailable: "details выбранного инструмента недоступны",
+    data_shadow_status_unavailable: "статус data-only временно недоступен",
   };
   return labels[reason ?? ""] ?? reason ?? "нет причины";
 }
@@ -346,42 +332,6 @@ function brokerStatusValue(): string {
   return "Проверяется";
 }
 
-function microSessionValue(): string {
-  const state = market.dataShadowStatus.collector_state;
-  if (state === "collecting") {
-    return "Сбор идёт";
-  }
-  if (state === "starting") {
-    return "Запускается";
-  }
-  if (state === "stopping") {
-    return "Останавливается";
-  }
-  if (state === "preflight_blocked") {
-    return "Сбор заблокирован";
-  }
-  if (state === "stopped_by_operator" || state === "stopped") {
-    return "Сбор остановлен";
-  }
-  if (robot.status.micro_session_id) {
-    return "Окно сбора активно";
-  }
-  return "Нет активного окна";
-}
-
-function microSessionDetail(): string {
-  if (market.dataShadowStatus.stream_alive) {
-    return `samples ${market.dataShadowStatus.market_microstructure_snapshots}, стаканы ${market.dataShadowStatus.order_book_snapshots}`;
-  }
-  if (market.dataShadowStatus.collector_state === "preflight_blocked") {
-    return `Сбор не стартовал: ${reasonLabel(market.dataShadowStatus.reason_code)}`;
-  }
-  if (market.dataShadowStatus.collector_state === "stopped_by_operator") {
-    return "Остановлено кнопкой Stop.";
-  }
-  return "Нажмите Start, когда preflight разрешит сбор.";
-}
-
 function tradingModeValue(): string {
   if (market.dataShadowStatus.collector_state === "collecting") {
     return "Data-only сбор";
@@ -465,9 +415,72 @@ function venueLabel(value: string | null | undefined): string {
   return labels[value ?? "unknown"] ?? value ?? "источник уточняется";
 }
 
+function collectionAllowedLabel(): string {
+  const preflight = robot.lastSessionPreflight;
+  if (preflight?.data_only_collection_allowed === true) {
+    return "разрешён";
+  }
+  if (preflight?.data_only_collection_allowed === false) {
+    return "заблокирован";
+  }
+  if (market.dataShadowStatus.market_open === false) {
+    return "заблокирован";
+  }
+  return "уточняется";
+}
+
+function collectionReason(): string {
+  const reason =
+    robot.lastSessionPreflight?.reason_code ??
+    market.dataShadowStatus.reason_code ??
+    robot.lastCommandReasonCode;
+  return reasonLabel(reason);
+}
+
+function nextSessionLabel(): string {
+  const nextSession = robot.lastSessionPreflight?.next_session_at ?? market.dataShadowStatus.next_session_at;
+  return nextSession ? `Следующая: ${compactDateTime(nextSession)}` : "Следующая сессия не указана";
+}
+
+function hasRealOrderBook(instrument: MarketInstrumentOverview | null): boolean {
+  return Boolean(
+    instrument?.order_book_source &&
+      !instrument.order_book_stale &&
+      instrument.best_bid &&
+      instrument.best_ask,
+  );
+}
+
+function displayQualityValue(instrument: MarketInstrumentOverview | null): string {
+  if (!hasRealOrderBook(instrument)) {
+    return "нет стакана";
+  }
+  return formatPercentRatio(instrument?.display_market_quality_score);
+}
+
+function displayQualityDetail(instrument: MarketInstrumentOverview | null): string {
+  if (!instrument) {
+    return "instrument_unavailable";
+  }
+  if (!hasRealOrderBook(instrument)) {
+    return reasonLabel(instrument.reason_code ?? "no_order_book_samples");
+  }
+  return instrument.market_quality_label ?? "unknown";
+}
+
+function displayQualityTone(instrument: MarketInstrumentOverview | null): "good" | "warn" | "info" {
+  if (!hasRealOrderBook(instrument)) {
+    return "warn";
+  }
+  return Number(instrument?.display_market_quality_score ?? 0) >= 0.7 ? "good" : "warn";
+}
+
 function calibrationQualityLabel(instrument: MarketInstrumentOverview | null): string {
   if (!instrument) {
     return "Нет данных";
+  }
+  if (!hasRealOrderBook(instrument)) {
+    return "display-only";
   }
   if (!instrument.quote_allowed_for_data_collection) {
     return "не для калибровки";
@@ -587,6 +600,29 @@ function degradedFlagLabel(flag: string): string {
       <small v-if="robot.lastCommandAt">{{ compactDateTime(robot.lastCommandAt) }}</small>
     </div>
 
+    <section class="session-ribbon" data-testid="session-ribbon">
+      <div>
+        <span class="eyebrow">session</span>
+        <strong>{{ sessionLabel(robot.status.session_type) }}</strong>
+        <small>{{ sessionDetail() }}</small>
+      </div>
+      <div>
+        <span class="eyebrow">phase</span>
+        <strong>{{ phaseLabel(robot.status.session_phase) }}</strong>
+        <small>{{ brokerStatusValue() }}</small>
+      </div>
+      <div>
+        <span class="eyebrow">venue</span>
+        <strong>{{ venueStatusValue() }}</strong>
+        <small>{{ nextSessionLabel() }}</small>
+      </div>
+      <div>
+        <span class="eyebrow">data-only</span>
+        <strong>{{ collectionAllowedLabel() }}</strong>
+        <small>{{ collectionReason() }}</small>
+      </div>
+    </section>
+
     <div class="metric-grid">
       <section class="balance-card" :class="{ 'balance-card--degraded': robot.status.balance.balance_degraded }">
         <div class="balance-card__top">
@@ -609,7 +645,6 @@ function degradedFlagLabel(flag: string): string {
 
       <MetricTile label="Площадка" :value="venueStatusValue()" />
       <MetricTile label="Фаза рынка" :value="phaseLabel(robot.status.session_phase)" :detail="phaseDetail()" />
-      <MetricTile label="Сбор данных" :value="microSessionValue()" :detail="microSessionDetail()" />
       <MetricTile label="Торговля" :value="tradingModeValue()" :detail="tradingModeDetail()" tone="info" />
     </div>
 
@@ -646,7 +681,7 @@ function degradedFlagLabel(flag: string): string {
               <span class="quote-card__meta">
                 <small>bid/ask {{ formatDecimal(instrument.best_bid, 2) }} / {{ formatDecimal(instrument.best_ask, 2) }}</small>
                 <small>спред {{ formatSpread(instrument) }}</small>
-                <small>стакан {{ formatPercentRatio(instrument.display_market_quality_score) }}</small>
+                <small>стакан {{ displayQualityValue(instrument) }}</small>
               </span>
               <small :class="`quote-change quote-change--${changeTone(instrument.change_bps)}`">
                 {{ formatChangeBps(instrument.change_bps) }}
@@ -689,7 +724,7 @@ function degradedFlagLabel(flag: string): string {
             <MetricTile label="Спред" :value="selectedInstrument ? formatSpread(selectedInstrument) : 'Нет данных'" detail="bps / ₽" tone="info" />
             <MetricTile label="Глубина" :value="`${formatLots(selectedInstrument?.bid_depth_lots)} / ${formatLots(selectedInstrument?.ask_depth_lots)}`" />
             <MetricTile label="Имбаланс" :value="formatDecimal(selectedInstrument?.book_imbalance, 3)" />
-            <MetricTile label="Качество стакана" :value="formatPercentRatio(selectedInstrument?.display_market_quality_score)" :detail="selectedInstrument?.market_quality_label ?? 'unknown'" :tone="Number(selectedInstrument?.display_market_quality_score ?? 0) >= 0.7 ? 'good' : 'warn'" />
+            <MetricTile label="Качество стакана" :value="displayQualityValue(selectedInstrument)" :detail="displayQualityDetail(selectedInstrument)" :tone="displayQualityTone(selectedInstrument)" />
             <MetricTile label="Калибровка" :value="calibrationQualityLabel(selectedInstrument)" :detail="selectedInstrument?.quote_allowed_for_data_collection ? 'можно использовать' : 'display-only'" tone="warn" />
             <MetricTile label="Источник" :value="venueLabel(selectedInstrument?.venue_type)" :detail="selectedInstrument ? sourceLabel(selectedInstrument.quote_source) : 'Нет данных'" />
             <MetricTile label="Статус стакана" :value="selectedInstrument?.order_book_stale ? 'устарел' : selectedInstrument?.order_book_source ? 'свежий' : 'нет стакана'" :detail="orderBookReason()" />
@@ -704,7 +739,7 @@ function degradedFlagLabel(flag: string): string {
                   <h3>ЛЕНТА СДЕЛОК</h3>
                   <span>{{ selectedInstrument?.ticker ?? selectedInstrument?.instrument_id ?? "инструмент не выбран" }}</span>
                 </div>
-                <strong>рыночный поток</strong>
+                <strong>{{ market.recentTrades.length ? "рыночный поток" : reasonLabel(selectedInstrument?.market_trades_source ?? "no_market_trades_samples") }}</strong>
               </header>
               <div v-if="market.recentTrades.length" class="market-tape-table">
                 <div class="market-tape-row market-tape-row--head">
@@ -755,6 +790,11 @@ function degradedFlagLabel(flag: string): string {
           </dl>
           <div v-if="market.dataShadowStatus.warnings.length" class="operator-list operator-list--compact">
             <div v-for="warning in market.dataShadowStatus.warnings" :key="warning">
+              <strong>{{ reasonLabel(warning) }}</strong>
+            </div>
+          </div>
+          <div v-if="market.warnings.length" class="operator-list operator-list--compact">
+            <div v-for="warning in market.warnings" :key="warning">
               <strong>{{ reasonLabel(warning) }}</strong>
             </div>
           </div>

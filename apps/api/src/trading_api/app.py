@@ -359,9 +359,33 @@ def create_fastapi_app(
         service: ReadServiceDep,
         refresh: Annotated[bool, Query()] = True,
         instruments: Annotated[str | None, Query()] = None,
+        include_details: Annotated[bool, Query()] = False,
     ) -> MarketOverviewResponse:
-        del refresh, instruments
-        return _market_overview_with_cached_quotes(request.app, service.market_overview())
+        del refresh
+        return _market_overview_with_cached_quotes(
+            request.app,
+            service.market_overview(
+                instruments=instruments,
+                include_details=include_details,
+            ),
+        )
+
+    @app.get(
+        "/market/instruments/{instrument_id}/details",
+        response_model=MarketInstrumentOverview,
+        tags=["market"],
+    )
+    def market_instrument_details(
+        instrument_id: str,
+        request: Request,
+        service: ReadServiceDep,
+    ) -> MarketInstrumentOverview:
+        overview = MarketOverviewResponse(
+            generated_at=datetime.now(tz=UTC),
+            instruments=[service.market_instrument_details(instrument_id)],
+        )
+        cached = _market_overview_with_cached_quotes(request.app, overview)
+        return cached.instruments[0]
 
     @app.post("/market/quotes/refresh", response_model=MarketOverviewResponse, tags=["market"])
     async def market_quotes_refresh(
@@ -370,9 +394,15 @@ def create_fastapi_app(
         service: ReadServiceDep,
         instruments: Annotated[str | None, Query()] = None,
         details: Annotated[bool, Query()] = False,
+        quotes_only: Annotated[bool, Query()] = True,
+        include_order_book: Annotated[bool, Query()] = False,
     ) -> MarketOverviewResponse:
         require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
-        base_overview = service.market_overview()
+        include_details = details or include_order_book or not quotes_only
+        base_overview = service.market_overview(
+            instruments=instruments,
+            include_details=include_details,
+        )
         lock = _market_quote_refresh_lock(cast(FastAPI, request.app))
         if lock.locked():
             return _market_overview_with_cached_quotes(request.app, base_overview)
@@ -381,7 +411,7 @@ def create_fastapi_app(
                 request,
                 overview=base_overview,
                 instruments=instruments or _default_preflight_instruments(),
-                include_details=details,
+                include_details=include_details,
             )
             _store_market_quote_cache(request.app, refreshed)
             return refreshed

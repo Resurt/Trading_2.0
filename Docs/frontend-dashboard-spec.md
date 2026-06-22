@@ -229,7 +229,7 @@ Pinia stores:
 - `robot` - dashboard snapshot, `/session/preflight`, `/portfolio/refresh`,
   `/ws/dashboard`, start/stop commands and last command result.
 - `market` - dashboard snapshot, `/market/overview`, `/ws/market`, selected instrument
-  и top-of-book read model.
+  details endpoint and top-of-book read model.
 - `portfolio` - dashboard snapshot, `/positions`, `/orders/open`, `/ws/orders`.
 - `reports` - loaded on the Reports page only: `/reports/hourly`, `/reports/daily`,
   `/reports/counterfactual`, `/reports/daily/run`, `/ws/reports`.
@@ -295,10 +295,12 @@ Balance card:
 Start/Stop command feedback:
 
 - Start first calls `GET /session/preflight` with the core data-only universe.
-- If `market_open=false`, Start shows rejected/preflight-blocked state, `reason_code`
-  and `next_session_at` when present. The frontend still calls `POST /robot/start`
-  once so the API persists a rejected `robot_command`/audit event; trade-core does
-  not start streams.
+- If preflight fails, Start shows `preflight_unavailable` and does not call
+  `POST /robot/start`.
+- If `market_open=false` or `data_only_collection_allowed=false`, Start shows
+  blocked state, human `reason_code` and `next_session_at` when present. The frontend
+  does not call `POST /robot/start`; no command is sent to control plane and no stream
+  can start from a closed-market click.
 - If `market_open=true`, Start submits the data-only start command and shows the
   returned `RobotCommandResponse`.
 - During Start, the button shows an animated progress state and a compact command strip
@@ -311,15 +313,20 @@ Start/Stop command feedback:
 
 Quotes:
 
-- `GET /market/overview` is fast and local. It must return all eight core universe
-  rows without synchronous broker calls.
+- `GET /market/overview?include_details=false` is fast and local. It must return all
+  eight core universe rows without synchronous broker calls or heavy order-book level
+  payloads.
+- `GET /market/instruments/{instrument_id}/details` loads bid/ask ladder, market
+  trades and detailed source/freshness only for the selected instrument. SBER is the
+  default selection.
 - Quote rows show `last_price`, `last_price_at`, `last_price_source`,
   `quote_status`, `is_price_stale`, `price_staleness_seconds`, spread bps, bid/ask,
   depth, imbalance and book quality where available.
 - Source priority is fresh order-book mid, explicit readonly T-Bank quote refresh,
   latest known candle close, previous close, then unavailable.
-- `POST /market/quotes/refresh` is the explicit readonly broker refresh path for
-  `GetLastPrices`/`GetOrderBook`.
+- `POST /market/quotes/refresh` is an explicit operator/diagnostic readonly broker
+  refresh path for `GetLastPrices`/`GetOrderBook`; dashboard mount and polling do not
+  call it for all instruments.
 - A successful readonly `GetOrderBook` response is treated as fresh by broker
   response receipt time; the exchange timestamp remains visible only as a
   diagnostic field.
@@ -327,11 +334,14 @@ Quotes:
   `/market/overview` or dashboard snapshot cannot immediately replace live broker
   quotes with older candle fallback rows.
 - Polling model while the dashboard is open: local `/market/overview` and
-  `/runtime/data-shadow/status` every 5 seconds, readonly broker
-  `/market/quotes/refresh` no more often than every 30 seconds, and
-  `/portfolio/refresh` every 20 seconds.
+  `/runtime/data-shadow/status` every 5 seconds; selected-instrument details every
+  2 seconds while market/collector is active and every 8 seconds while idle; broker
+  `/portfolio/refresh` every 60 seconds.
 - If a refresh request times out, the dashboard keeps the last good quote instead of
   clearing the quote grid.
+- `/ws/market` updates merge by `instrument_id`. Empty `instruments=[]` snapshots add
+  `empty_market_ws_snapshot` warning and must never clear the quote board; partial
+  snapshots update present rows without deleting missing core instruments.
 - The quote grid is card-based and must not require horizontal scrolling for the
   eight core instruments.
 - Stale candles/order books remain visible with timestamp and stale badge, never as
@@ -353,6 +363,9 @@ Selected instrument depth:
   (`no_order_book_samples`, market closed, stream unavailable, stale book, etc.).
 - The right side shows recent market trades when the market trades stream exists.
   If not available, it shows `no_market_trades_samples` instead of an empty panel.
+- Display quality and calibration quality are separate. Without a real, fresh order
+  book the UI shows `нет стакана`, `display-only` and `not_for_calibration` instead
+  of rendering a synthetic percentage such as 35%.
 
 Analytics pages:
 

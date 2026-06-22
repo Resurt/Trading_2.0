@@ -22,6 +22,7 @@ import type {
   IntradayAnalyticsSnapshotResponse,
   MarketMicrostructureSnapshotResponse,
   MarketMicrostructureSummaryResponse,
+  MarketInstrumentOverview,
   MarketOverviewResponse,
   MarketRegimeSnapshotResponse,
   MarketSpecialDayClassificationResponse,
@@ -209,6 +210,11 @@ export const apiClient = {
     requestJson<MarketOverviewResponse>(withQuery("/market/overview", query), {
       timeoutMs: 10000,
     }),
+  marketInstrumentDetails: (instrumentId: string) =>
+    requestJson<MarketInstrumentOverview>(
+      `/market/instruments/${encodeURIComponent(instrumentId)}/details`,
+      { timeoutMs: 8000 },
+    ),
   refreshMarketQuotes: (query: Record<string, QueryValue> = {}) =>
     requestJson<MarketOverviewResponse>(
       withQuery("/market/quotes/refresh", query),

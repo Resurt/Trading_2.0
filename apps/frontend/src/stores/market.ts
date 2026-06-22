@@ -11,9 +11,25 @@ import type {
   WebSocketEnvelope,
 } from "../api/types";
 
+export const CORE_INSTRUMENT_IDS = [
+  "MOEX:SBER",
+  "MOEX:GAZP",
+  "MOEX:LKOH",
+  "MOEX:YDEX",
+  "MOEX:TATN",
+  "MOEX:GMKN",
+  "MOEX:OZON",
+  "MOEX:VTBR",
+];
+
+const DEFAULT_SELECTED_INSTRUMENT_ID = "MOEX:SBER";
+const CORE_INSTRUMENT_ORDER = new Map(
+  CORE_INSTRUMENT_IDS.map((instrumentId, index) => [instrumentId, index]),
+);
+
 const EMPTY_OVERVIEW: MarketOverviewResponse = {
   generated_at: new Date(0).toISOString(),
-  instruments: [],
+  instruments: CORE_INSTRUMENT_IDS.map((instrumentId) => emptyInstrument(instrumentId)),
 };
 
 const EMPTY_DATA_SHADOW_STATUS: DataShadowStatusResponse = {
@@ -48,13 +64,16 @@ const EMPTY_DATA_SHADOW_STATUS: DataShadowStatusResponse = {
 export const useMarketStore = defineStore("market", () => {
   const overview = ref<MarketOverviewResponse>(EMPTY_OVERVIEW);
   const dataShadowStatus = ref<DataShadowStatusResponse>(EMPTY_DATA_SHADOW_STATUS);
-  const selectedInstrumentId = ref<string | null>(null);
+  const selectedInstrumentId = ref<string | null>(DEFAULT_SELECTED_INSTRUMENT_ID);
   const loading = ref(false);
   const error = ref<string | null>(null);
+  const warnings = ref<string[]>([]);
   const liveConnection = ref<ConnectionState>("idle");
   let marketSocket: WebSocket | null = null;
   let marketPollTimer: number | null = null;
   let quoteRefreshTimer: number | null = null;
+  let selectedDetailsTimer: number | null = null;
+  let lastSelectedDetailsFetchAt = 0;
   let overviewInFlight = false;
   let quoteRefreshInFlight = false;
   let selectedDetailsInFlight = false;
@@ -64,10 +83,21 @@ export const useMarketStore = defineStore("market", () => {
     if (overview.value.instruments.length === 0) {
       return null;
     }
+    const selected = overview.value.instruments.find(
+      (instrument) => instrument.instrument_id === selectedInstrumentId.value,
+    );
+    if (selected) {
+      return selected;
+    }
+    const defaultInstrument = overview.value.instruments.find(
+      (instrument) => instrument.instrument_id === DEFAULT_SELECTED_INSTRUMENT_ID,
+    );
+    if (defaultInstrument) {
+      return defaultInstrument;
+    }
     return (
-      overview.value.instruments.find(
-        (instrument) => instrument.instrument_id === selectedInstrumentId.value,
-      ) ?? overview.value.instruments[0]
+      overview.value.instruments.find((instrument) => CORE_INSTRUMENT_ORDER.has(instrument.instrument_id)) ??
+      overview.value.instruments[0]
     );
   });
 
@@ -87,7 +117,7 @@ export const useMarketStore = defineStore("market", () => {
 
   const recentTrades = computed<JsonPayload[]>(() => currentInstrument.value?.recent_market_trades ?? []);
 
-  const quoteRows = computed(() => overview.value.instruments);
+  const quoteRows = computed(() => sortInstrumentRows(overview.value.instruments));
 
   async function fetchOverview(options: { silent?: boolean } = {}): Promise<void> {
     if (overviewInFlight) {
@@ -99,10 +129,8 @@ export const useMarketStore = defineStore("market", () => {
     }
     error.value = null;
     try {
-      applyOverview(await apiClient.marketOverview());
-      if (!selectedInstrumentId.value && overview.value.instruments[0]) {
-        selectedInstrumentId.value = overview.value.instruments[0].instrument_id;
-      }
+      applyOverview(await apiClient.marketOverview({ include_details: false }));
+      ensureSelectedInstrument();
     } catch (unknownError) {
       if (overview.value.instruments.length === 0) {
         error.value = unknownError instanceof Error ? unknownError.message : "Market overview failed";
@@ -121,7 +149,13 @@ export const useMarketStore = defineStore("market", () => {
     }
     quoteRefreshInFlight = true;
     try {
-      applyOverview(await apiClient.refreshMarketQuotes({ details: false }));
+      applyOverview(
+        await apiClient.refreshMarketQuotes({
+          details: false,
+          quotes_only: true,
+          include_order_book: false,
+        }),
+      );
       await refreshSelectedInstrumentDetails();
     } catch (unknownError) {
       if (overview.value.instruments.length === 0) {
@@ -134,19 +168,17 @@ export const useMarketStore = defineStore("market", () => {
 
   async function refreshSelectedInstrumentDetails(): Promise<void> {
     const instrument = currentInstrument.value;
-    const ticker = instrument?.ticker ?? instrument?.instrument_id?.replace(/^MOEX:/, "");
-    if (!ticker || selectedDetailsInFlight) {
+    const instrumentId = instrument?.instrument_id ?? selectedInstrumentId.value;
+    if (!instrumentId || selectedDetailsInFlight) {
       return;
     }
     selectedDetailsInFlight = true;
+    lastSelectedDetailsFetchAt = Date.now();
     try {
-      applyOverview(
-        await apiClient.refreshMarketQuotes({
-          instruments: ticker,
-          details: true,
-        }),
-      );
+      const details = await apiClient.marketInstrumentDetails(instrumentId);
+      applyOverview({ generated_at: new Date().toISOString(), instruments: [details] });
     } catch (unknownError) {
+      recordWarning("selected_instrument_details_unavailable");
       if (overview.value.instruments.length === 0) {
         error.value = unknownError instanceof Error ? unknownError.message : "Selected market details failed";
       }
@@ -157,21 +189,30 @@ export const useMarketStore = defineStore("market", () => {
 
   function applyOverview(nextOverview: MarketOverviewResponse): void {
     if (!nextOverview.instruments.length) {
+      recordWarning("empty_market_ws_snapshot");
       return;
     }
     error.value = null;
     const previousByInstrument = new Map(
       overview.value.instruments.map((instrument) => [instrument.instrument_id, instrument]),
     );
+    const mergedByInstrument = new Map(
+      ensureCoreRows(overview.value.instruments).map((instrument) => [
+        instrument.instrument_id,
+        instrument,
+      ]),
+    );
+    for (const nextInstrument of nextOverview.instruments) {
+      mergedByInstrument.set(
+        nextInstrument.instrument_id,
+        mergeInstrumentOverview(previousByInstrument.get(nextInstrument.instrument_id), nextInstrument),
+      );
+    }
     overview.value = {
       ...nextOverview,
-      instruments: nextOverview.instruments.map((nextInstrument) =>
-        mergeInstrumentOverview(previousByInstrument.get(nextInstrument.instrument_id), nextInstrument),
-      ),
+      instruments: sortInstrumentRows(ensureCoreRows([...mergedByInstrument.values()])),
     };
-    if (!selectedInstrumentId.value && overview.value.instruments[0]) {
-      selectedInstrumentId.value = overview.value.instruments[0].instrument_id;
-    }
+    ensureSelectedInstrument();
   }
 
   async function fetchDataShadowStatus(): Promise<void> {
@@ -182,7 +223,10 @@ export const useMarketStore = defineStore("market", () => {
     try {
       dataShadowStatus.value = await apiClient.dataShadowStatus();
     } catch (unknownError) {
-      error.value = unknownError instanceof Error ? unknownError.message : "Data shadow status failed";
+      recordWarning("data_shadow_status_unavailable");
+      if (overview.value.instruments.length === 0) {
+        error.value = unknownError instanceof Error ? unknownError.message : "Data shadow status failed";
+      }
     } finally {
       dataShadowStatusInFlight = false;
     }
@@ -204,9 +248,13 @@ export const useMarketStore = defineStore("market", () => {
       liveConnection.value = "live";
     };
     marketSocket.onmessage = (event: MessageEvent<string>) => {
-      const envelope = JSON.parse(event.data) as WebSocketEnvelope<{ data?: MarketOverviewResponse }>;
-      if (envelope.payload.data) {
-        applyOverview(envelope.payload.data);
+      try {
+        const envelope = JSON.parse(event.data) as WebSocketEnvelope<{ data?: MarketOverviewResponse }>;
+        if (envelope.payload.data) {
+          applyOverview(envelope.payload.data);
+        }
+      } catch {
+        recordWarning("invalid_market_ws_snapshot");
       }
     };
     marketSocket.onerror = () => {
@@ -218,20 +266,32 @@ export const useMarketStore = defineStore("market", () => {
     };
   }
 
-  function startMarketPolling(intervalMs = 5_000, quoteRefreshIntervalMs = 30_000): void {
+  function startMarketPolling(
+    intervalMs = 5_000,
+    selectedActiveIntervalMs = 2_000,
+    selectedIdleIntervalMs = 8_000,
+  ): void {
     if (marketPollTimer !== null) {
       return;
     }
-    void refreshQuotes();
     void fetchOverview({ silent: true });
+    void refreshSelectedInstrumentDetails();
     void fetchDataShadowStatus();
     marketPollTimer = window.setInterval(() => {
       void fetchOverview({ silent: true });
       void fetchDataShadowStatus();
     }, intervalMs);
-    quoteRefreshTimer = window.setInterval(() => {
-      void refreshQuotes();
-    }, quoteRefreshIntervalMs);
+    selectedDetailsTimer = window.setInterval(() => {
+      const targetInterval =
+        dataShadowStatus.value.stream_alive ||
+        dataShadowStatus.value.market_open === true ||
+        dataShadowStatus.value.collector_state === "collecting"
+          ? selectedActiveIntervalMs
+          : selectedIdleIntervalMs;
+      if (Date.now() - lastSelectedDetailsFetchAt >= targetInterval) {
+        void refreshSelectedInstrumentDetails();
+      }
+    }, 1_000);
   }
 
   function stopMarketPolling(): void {
@@ -244,11 +304,30 @@ export const useMarketStore = defineStore("market", () => {
       window.clearInterval(quoteRefreshTimer);
       quoteRefreshTimer = null;
     }
+    if (selectedDetailsTimer !== null) {
+      window.clearInterval(selectedDetailsTimer);
+      selectedDetailsTimer = null;
+    }
   }
 
   watch(selectedInstrumentId, () => {
     void refreshSelectedInstrumentDetails();
   });
+
+  function ensureSelectedInstrument(): void {
+    const rows = overview.value.instruments;
+    if (rows.some((instrument) => instrument.instrument_id === selectedInstrumentId.value)) {
+      return;
+    }
+    const defaultInstrument = rows.find(
+      (instrument) => instrument.instrument_id === DEFAULT_SELECTED_INSTRUMENT_ID,
+    );
+    selectedInstrumentId.value = defaultInstrument?.instrument_id ?? rows[0]?.instrument_id ?? null;
+  }
+
+  function recordWarning(warning: string): void {
+    warnings.value = Array.from(new Set([warning, ...warnings.value])).slice(0, 8);
+  }
 
   return {
     overview,
@@ -256,6 +335,7 @@ export const useMarketStore = defineStore("market", () => {
     selectedInstrumentId,
     loading,
     error,
+    warnings,
     liveConnection,
     currentInstrument,
     quoteRows,
@@ -272,6 +352,92 @@ export const useMarketStore = defineStore("market", () => {
     stopMarketPolling,
   };
 });
+
+function emptyInstrument(instrumentId: string): MarketInstrumentOverview {
+  const ticker = instrumentId.replace(/^MOEX:/, "");
+  return {
+    instrument_id: instrumentId,
+    ticker,
+    class_code: "TQBR",
+    board: "TQBR",
+    exchange: "MOEX",
+    venue_type: "unknown",
+    trading_mode: "unknown",
+    official_exchange_open: false,
+    official_exchange_closed: false,
+    quote_source: "unavailable",
+    quote_allowed_for_data_collection: false,
+    quote_allowed_for_display: false,
+    last_price: null,
+    last_price_at: null,
+    last_price_ts: null,
+    last_price_source: null,
+    is_price_stale: true,
+    price_staleness_seconds: null,
+    previous_close: null,
+    change_abs: null,
+    change_bps: null,
+    session_type: null,
+    broker_trading_status: null,
+    api_trade_available: null,
+    quote_status: "unavailable",
+    last_candle_timeframe: null,
+    spread: null,
+    spread_abs: null,
+    spread_bps: null,
+    spread_abs_rub: null,
+    spread_units_validated: true,
+    mid_price: null,
+    market_quality: null,
+    market_quality_score: null,
+    display_market_quality_score: null,
+    calibration_market_quality_score: null,
+    market_quality_label: "no_order_book_samples",
+    market_quality_components: {
+      reason_codes: ["instrument_unavailable", "no_order_book_samples"],
+    },
+    best_bid: null,
+    best_ask: null,
+    bid_depth_lots: null,
+    ask_depth_lots: null,
+    book_imbalance: null,
+    order_book_source: null,
+    order_book_ts: null,
+    order_book_age_ms: null,
+    order_book_stale: true,
+    recent_market_trades: [],
+    market_trades_source: "no_market_trades_samples",
+    market_trades_age_ms: null,
+    reason_code: "instrument_unavailable",
+    warning: null,
+    order_book_summary: {},
+    quote_payload: {
+      source: "unavailable",
+      reason_code: "instrument_unavailable",
+    },
+  };
+}
+
+function ensureCoreRows(instruments: MarketInstrumentOverview[]): MarketInstrumentOverview[] {
+  const byInstrument = new Map(instruments.map((instrument) => [instrument.instrument_id, instrument]));
+  for (const instrumentId of CORE_INSTRUMENT_IDS) {
+    if (!byInstrument.has(instrumentId)) {
+      byInstrument.set(instrumentId, emptyInstrument(instrumentId));
+    }
+  }
+  return [...byInstrument.values()];
+}
+
+function sortInstrumentRows(instruments: MarketInstrumentOverview[]): MarketInstrumentOverview[] {
+  return [...instruments].sort((left, right) => {
+    const leftOrder = CORE_INSTRUMENT_ORDER.get(left.instrument_id) ?? Number.MAX_SAFE_INTEGER;
+    const rightOrder = CORE_INSTRUMENT_ORDER.get(right.instrument_id) ?? Number.MAX_SAFE_INTEGER;
+    if (leftOrder !== rightOrder) {
+      return leftOrder - rightOrder;
+    }
+    return left.instrument_id.localeCompare(right.instrument_id);
+  });
+}
 
 function mergeInstrumentOverview(
   previous: MarketInstrumentOverview | undefined,
@@ -294,6 +460,9 @@ function withPreservedRecentTrades(
   next: MarketInstrumentOverview,
 ): MarketInstrumentOverview {
   if ((next.recent_market_trades?.length ?? 0) > 0) {
+    return next;
+  }
+  if (next.market_trades_source === "no_market_trades_samples") {
     return next;
   }
   if ((previous.recent_market_trades?.length ?? 0) === 0) {

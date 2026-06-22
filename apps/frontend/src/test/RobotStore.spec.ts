@@ -82,14 +82,7 @@ describe("robot store", () => {
   });
 
   it("persists rejected start command on closed market preflight", async () => {
-    apiClientMock.sessionPreflightFast.mockResolvedValue(preflightFixture(false));
-    apiClientMock.startRobot.mockResolvedValue({
-      ...commandFixture("start", "rejected"),
-      accepted: false,
-      reason_code: "market_closed_expected",
-      preflight_result: preflightFixture(false),
-      message: "Рынок закрыт. Data-only сбор не запущен.",
-    });
+    apiClientMock.sessionPreflight.mockResolvedValue(preflightFixture(false));
     apiClientMock.dataShadowStatus.mockResolvedValue(dataShadowStatusFixture("preflight_blocked"));
     apiClientMock.robotStatus.mockResolvedValue(statusFixture());
     apiClientMock.currentSession.mockResolvedValue(sessionFixture());
@@ -98,10 +91,45 @@ describe("robot store", () => {
 
     await robot.startRobot();
 
-    expect(apiClientMock.startRobot).toHaveBeenCalledTimes(1);
-    expect(robot.lastCommandStatus).toBe("rejected");
-    expect(robot.lastCommandMessage).toContain("Рынок закрыт");
+    expect(apiClientMock.startRobot).not.toHaveBeenCalled();
+    expect(robot.lastCommandStatus).toBe("blocked_by_preflight");
+    expect(robot.lastCommandMessage).toContain("Сбор не запущен");
     expect(robot.lastCommandReasonCode).toBe("market_closed_expected");
+  });
+
+  it("does not start when preflight request fails", async () => {
+    apiClientMock.sessionPreflight.mockRejectedValue(new Error("preflight down"));
+    apiClientMock.robotStatus.mockResolvedValue(statusFixture());
+    apiClientMock.currentSession.mockResolvedValue(sessionFixture());
+    apiClientMock.currentSignals.mockResolvedValue([]);
+    const robot = useRobotStore();
+
+    await robot.startRobot();
+
+    expect(apiClientMock.startRobot).not.toHaveBeenCalled();
+    expect(robot.lastCommandStatus).toBe("preflight_failed");
+    expect(robot.lastCommandReasonCode).toBe("preflight_unavailable");
+    expect(robot.lastCommandMessage).toContain("Сбор не запущен");
+  });
+
+  it("starts data-only when preflight is open", async () => {
+    apiClientMock.sessionPreflight.mockResolvedValue(preflightFixture(true));
+    apiClientMock.startRobot.mockResolvedValue(commandFixture("start", "requested"));
+    apiClientMock.robotStatus.mockResolvedValue(statusFixture());
+    apiClientMock.currentSession.mockResolvedValue(sessionFixture());
+    apiClientMock.currentSignals.mockResolvedValue([]);
+    const robot = useRobotStore();
+
+    await robot.startRobot();
+
+    expect(apiClientMock.startRobot).toHaveBeenCalledTimes(1);
+    expect(apiClientMock.startRobot.mock.calls[0][0]).toMatchObject({
+      mode: "data_shadow",
+      real_orders_disabled: true,
+      strategy_trading_disabled: true,
+    });
+    expect(robot.lastCommandStatus).toBe("requested");
+    expect(robot.lastCommandMessage).toContain("Data-only");
   });
 
   it("shows stop command result", async () => {
@@ -115,7 +143,7 @@ describe("robot store", () => {
 
     expect(apiClientMock.stopRobot).toHaveBeenCalledTimes(1);
     expect(robot.lastCommandStatus).toBe("requested");
-    expect(robot.lastCommandMessage).toContain("Команда stop отправлена");
+    expect(robot.lastCommandMessage).toContain("Команда Stop отправлена");
   });
 });
 

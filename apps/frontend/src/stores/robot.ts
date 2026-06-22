@@ -238,34 +238,33 @@ export const useRobotStore = defineStore("robot", () => {
     commandPhase.value = "preflight";
     setCommandState({
       status: "checking_preflight",
-      message: "Проверяю календарь и режим data-only. Заявки не выставляются.",
+      message: "Проверяю торговую сессию. Data-only сбор пока не запускается, заявки не выставляются.",
       reasonCode: "session_preflight_running",
     });
     try {
-      const preflight = await apiClient.sessionPreflightFast({
+      const preflight = await apiClient.sessionPreflight({
         instruments: CORE_UNIVERSE,
         mode: "data_shadow",
+        cache: false,
       });
       applySessionPreflight(preflight);
-      if (!preflight.data_only_collection_allowed) {
+      if (!preflight.market_open || !preflight.data_only_collection_allowed) {
         setCommandFromPreflight(preflight);
-        commandPhase.value = "start_command";
-        const response = await apiClient.startRobot({
-          requested_instruments: CORE_UNIVERSE,
-          preflight_result: preflight,
-        });
-        setCommandFromResponse(response);
-        void pollDataShadowStatusUntilSettled();
         return;
       }
       commandPhase.value = "start_command";
       setCommandState({
         status: "start_requesting",
-        message: "Отправляю команду запуска data-only сбора. Торговля отключена, заявки не выставляются.",
+        message: "Запускаем data-only сбор. Торговля отключена, заявки не выставляются.",
         reasonCode: "data_only_start_requested",
       });
       const response = await apiClient.startRobot({
+        mode: "data_shadow",
+        reason: "frontend_operator_data_only_start",
+        instruments: CORE_UNIVERSE,
         requested_instruments: CORE_UNIVERSE,
+        real_orders_disabled: true,
+        strategy_trading_disabled: true,
         preflight_result: preflight,
       });
       setCommandFromResponse(response);
@@ -273,8 +272,8 @@ export const useRobotStore = defineStore("robot", () => {
     } catch (unknownError) {
       setCommandState({
         status: "preflight_failed",
-        message: `Preflight не завершился: ${errorMessage(unknownError)}`,
-        reasonCode: "session_preflight_unavailable",
+        message: `Не удалось проверить торговую сессию. Сбор не запущен. Причина: preflight_unavailable. ${errorMessage(unknownError)}`,
+        reasonCode: "preflight_unavailable",
       });
     } finally {
       startLoading.value = false;
@@ -288,7 +287,7 @@ export const useRobotStore = defineStore("robot", () => {
     commandPhase.value = "stop_command";
     setCommandState({
       status: "stop_requesting",
-      message: "Отправляю controlled stop. Реальные заявки не трогаю.",
+      message: "Остановка запрошена. Реальные заявки не трогаю.",
       reasonCode: "controlled_stop_requested",
     });
     try {
@@ -301,7 +300,7 @@ export const useRobotStore = defineStore("robot", () => {
     } catch (unknownError) {
       setCommandState({
         status: "stop_failed",
-        message: `Ошибка остановки: ${errorMessage(unknownError)}`,
+        message: `Остановка не подтверждена: ${errorMessage(unknownError)}`,
         reasonCode: "stop_command_failed",
       });
     } finally {
@@ -377,13 +376,12 @@ export const useRobotStore = defineStore("robot", () => {
 
   function setCommandFromPreflight(preflight: SessionPreflightResponse): void {
     const nextSession = preflight.next_session_at
-      ? ` Следующая биржевая сессия: ${preflight.next_session_at}.`
+      ? ` Следующая сессия: ${preflight.next_session_at}.`
       : "";
-    const prefix = preflight.official_exchange_closed
-      ? "Площадка: внебиржевая торговля. Data-only сбор не запущен."
-      : preflight.market_closed_expected
-      ? `Рынок закрыт. Сессия: ${preflight.session_type}.`
-      : `Preflight не разрешил старт. Сессия: ${preflight.session_type}.`;
+    const prefix =
+      preflight.market_closed_expected || !preflight.market_open
+        ? "Сбор не запущен: рынок закрыт или нет торгового окна."
+        : "Сбор не запущен: data-only collection запрещён preflight.";
     setCommandState({
       status: "blocked_by_preflight",
       message: `${prefix} Причина: ${preflight.reason_code}.${nextSession}`,
@@ -424,10 +422,10 @@ export const useRobotStore = defineStore("robot", () => {
       return response.message || "Команда отклонена preflight.";
     }
     if (response.command === "start" && response.status === "requested") {
-      return "Команда старт отправлена в trade-core. Смотрите статус collector: live samples должны начать расти, когда runtime обработает команду.";
+      return "Команда Start отправлена в trade-core. Data-only режим активируется без торговли и без заявок.";
     }
     if (response.command === "stop" && response.status === "requested") {
-      return "Команда stop отправлена в trade-core. Collector должен перейти в остановку после обработки runtime.";
+      return "Команда Stop отправлена в trade-core. Collector должен перейти в controlled stop.";
     }
     return response.message || "Команда принята.";
   }

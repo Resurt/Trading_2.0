@@ -276,8 +276,13 @@ class BffReadService:
             for candidate in candidates
         ]
 
-    def market_overview(self) -> MarketOverviewResponse:
-        instruments = _dashboard_universe_from_env()
+    def market_overview(
+        self,
+        *,
+        instruments: str | Iterable[str] | None = None,
+        include_details: bool = False,
+    ) -> MarketOverviewResponse:
+        instrument_ids = _dashboard_universe(instruments)
         current_session = self.current_session()
         now_msk = datetime.now(tz=MSK)
         official_decision = MoexCalendarService().decision(
@@ -291,11 +296,29 @@ class BffReadService:
                     instrument_id,
                     current_session=current_session,
                     official_decision=official_decision,
+                    include_details=include_details,
                 )
             )
-            for instrument_id in instruments
+            for instrument_id in instrument_ids
         ]
         return MarketOverviewResponse(generated_at=datetime.now(tz=UTC), instruments=overviews)
+
+    def market_instrument_details(self, instrument_id: str) -> MarketInstrumentOverview:
+        current_session = self.current_session()
+        now_msk = datetime.now(tz=MSK)
+        official_decision = MoexCalendarService().decision(
+            now_msk.date(),
+            market="stock",
+            now_msk=now_msk,
+        )
+        return MarketInstrumentOverview(
+            **self._market_instrument_payload(
+                _canonical_moex_instrument(instrument_id),
+                current_session=current_session,
+                official_decision=official_decision,
+                include_details=True,
+            )
+        )
 
     def _market_instrument_payload(
         self,
@@ -303,6 +326,7 @@ class BffReadService:
         *,
         current_session: SessionSnapshotResponse,
         official_decision: MoexCalendarDecision,
+        include_details: bool = False,
     ) -> JsonPayload:
         now = datetime.now(tz=UTC)
         registry = self._instrument_registry_row(instrument_id)
@@ -419,21 +443,7 @@ class BffReadService:
             if summary is not None
             else None
         )
-        market_quality_components = calculate_market_quality(
-            spread_bps=spread_bps,
-            bid_depth_lots=summary.bid_depth_lots if summary is not None else None,
-            ask_depth_lots=summary.ask_depth_lots if summary is not None else None,
-            best_bid_qty_lots=summary.best_bid_qty_lots if summary is not None else None,
-            best_ask_qty_lots=summary.best_ask_qty_lots if summary is not None else None,
-            book_imbalance=summary.book_imbalance if summary is not None else None,
-            order_book_age_ms=(
-                int(order_book_age * 1000) if order_book_age is not None else None
-            ),
-            order_book_stale=order_book_stale,
-            venue_type=venue_type,
-            official_exchange_open=official_exchange_open,
-            trades_count=len(recent_market_trades),
-        )
+        market_quality_components: JsonPayload = _no_order_book_quality_components()
         if summary is not None:
             recent_market_trades = _payload_list(summary.summary_payload, "recent_market_trades")
             market_quality_components = calculate_market_quality(
@@ -490,6 +500,9 @@ class BffReadService:
                 "last_candle_volume_lots": str(candle.volume_lots),
                 "last_candle_close_ts": candle.close_ts_utc.isoformat(),
             }
+        if not include_details:
+            order_book_summary = _compact_order_book_summary(order_book_summary)
+            recent_market_trades = []
 
         return {
             "instrument_id": instrument_id,
@@ -1942,6 +1955,26 @@ def _dashboard_universe_from_env() -> list[str]:
     return [_canonical_moex_instrument(item) for item in source]
 
 
+def _dashboard_universe(instruments: str | Iterable[str] | None = None) -> list[str]:
+    if instruments is None:
+        return _dashboard_universe_from_env()
+    if isinstance(instruments, str):
+        requested = [item.strip() for item in instruments.split(",") if item.strip()]
+    else:
+        requested = [str(item).strip() for item in instruments if str(item).strip()]
+    if not requested:
+        return _dashboard_universe_from_env()
+    seen: set[str] = set()
+    instrument_ids: list[str] = []
+    for item in requested:
+        instrument_id = _canonical_moex_instrument(item)
+        if instrument_id in seen:
+            continue
+        seen.add(instrument_id)
+        instrument_ids.append(instrument_id)
+    return instrument_ids
+
+
 def _canonical_moex_instrument(instrument_id: str) -> str:
     value = instrument_id.strip()
     if not value:
@@ -1954,6 +1987,47 @@ def _canonical_moex_instrument(instrument_id: str) -> str:
 def _ticker_from_instrument_id(instrument_id: str) -> str:
     value = instrument_id.strip()
     return value.split(":", 1)[1] if ":" in value else value
+
+
+def _no_order_book_quality_components() -> JsonPayload:
+    return {
+        "display_market_quality_score": None,
+        "calibration_market_quality_score": None,
+        "market_quality_label": "no_order_book_samples",
+        "reason_codes": ["no_order_book_samples", "not_for_calibration"],
+    }
+
+
+def _compact_order_book_summary(summary: JsonPayload) -> JsonPayload:
+    if not summary:
+        return {}
+    compact_keys = {
+        "source",
+        "venue_type",
+        "quote_allowed_for_data_collection",
+        "include_in_calibration",
+        "depth_levels",
+        "best_bid_qty_lots",
+        "best_ask_qty_lots",
+        "bid_depth_lots",
+        "ask_depth_lots",
+        "book_imbalance",
+        "spread_abs_rub",
+        "spread_bps",
+        "ts_utc",
+        "exchange_ts",
+        "age_seconds",
+        "age_ms",
+        "is_stale",
+        "market_quality_components",
+        "last_candle_open",
+        "last_candle_high",
+        "last_candle_low",
+        "last_candle_close",
+        "last_candle_volume_lots",
+        "last_candle_close_ts",
+    }
+    return {key: value for key, value in summary.items() if key in compact_keys}
 
 
 def _age_seconds(value: datetime | None, *, now: datetime) -> int | None:

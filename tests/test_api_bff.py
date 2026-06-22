@@ -737,6 +737,8 @@ def test_robot_status_and_market_overview(
 
     status = client.get("/robot/status").json()
     market = client.get("/market/overview").json()
+    sber_details = client.get("/market/instruments/MOEX%3ASBER/details").json()
+    sber_details = client.get("/market/instruments/MOEX%3ASBER/details").json()
     latest_microstructure = client.get("/market/microstructure/latest").json()
     microstructure_summary = client.get(
         "/market/microstructure/summary",
@@ -767,8 +769,11 @@ def test_robot_status_and_market_overview(
     assert Decimal(str(market["instruments"][0]["spread_bps"])).quantize(
         Decimal("0.0001")
     ) == Decimal("9.9950")
-    assert market["instruments"][0]["order_book_summary"]["bids"][0]["price"] == "100"
-    assert market["instruments"][0]["order_book_summary"]["asks"][0]["price"] == "100.1"
+    assert "bids" not in market["instruments"][0]["order_book_summary"]
+    assert "asks" not in market["instruments"][0]["order_book_summary"]
+    assert sber_details["instrument_id"] == "MOEX:SBER"
+    assert sber_details["order_book_summary"]["bids"][0]["price"] == "100"
+    assert sber_details["order_book_summary"]["asks"][0]["price"] == "100.1"
     assert latest_microstructure[0]["source"] == "data_only_shadow"
     assert latest_microstructure[0]["spread_bps"] == "9.9950"
     assert microstructure_summary["snapshots_count"] == 1
@@ -843,6 +848,8 @@ def test_market_overview_uses_latest_candle_when_order_book_missing(tmp_path: Pa
     assert market["instruments"][0]["last_price_source"] == "latest_market_candle_close"
     assert market["instruments"][0]["quote_status"] in {"live", "stale"}
     assert market["instruments"][0]["is_price_stale"] is True
+    assert market["instruments"][0]["display_market_quality_score"] is None
+    assert market["instruments"][0]["market_quality_label"] == "no_order_book_samples"
 
 
 def test_market_overview_is_local_read_model_not_broker_call(
@@ -865,6 +872,22 @@ def test_market_overview_is_local_read_model_not_broker_call(
     assert {row["instrument_id"] for row in market["instruments"]} >= {"MOEX:SBER", "MOEX:GAZP"}
 
 
+def test_market_overview_filter_and_selected_details_endpoint(tmp_path: Path) -> None:
+    client = make_client(tmp_path)
+
+    market = client.get(
+        "/market/overview",
+        params={"instruments": "SBER,GAZP", "include_details": False},
+    ).json()
+    details = client.get("/market/instruments/MOEX%3ASBER/details").json()
+
+    assert [row["instrument_id"] for row in market["instruments"]] == ["MOEX:SBER", "MOEX:GAZP"]
+    assert "bids" not in market["instruments"][0]["order_book_summary"]
+    assert details["instrument_id"] == "MOEX:SBER"
+    assert details["order_book_summary"]["bids"][0]["price"] == "100"
+    assert details["recent_market_trades"][0]["price"] == "100.04"
+
+
 def test_market_quotes_refresh_falls_back_when_broker_gateway_unavailable(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -884,8 +907,7 @@ def test_market_quotes_refresh_falls_back_when_broker_gateway_unavailable(
 
     assert response.status_code == 200
     market = response.json()
-    assert len(market["instruments"]) == 8
-    assert {row["instrument_id"] for row in market["instruments"]} >= {"MOEX:SBER", "MOEX:GAZP"}
+    assert [row["instrument_id"] for row in market["instruments"]] == ["MOEX:SBER"]
 
 
 def test_market_quotes_refresh_marks_successful_order_book_refresh_display_only_when_closed(
@@ -1238,6 +1260,7 @@ def test_reports_config_and_openapi(tmp_path: Path) -> None:
     assert updated["version"] == 2
     paths = client.get("/openapi.json").json()["paths"]
     assert "/robot/status" in paths
+    assert "/market/instruments/{instrument_id}/details" in paths
     assert "/reports/daily/run" in paths
     assert "/analytics/blockers" in paths
 
@@ -1255,13 +1278,16 @@ def test_logging_analytics_read_models(tmp_path: Path) -> None:
         "/analytics/canceled-orders?trading_date=2026-06-12&strategy_id=baseline"
     ).json()
     market = client.get("/market/overview").json()
+    sber_details = client.get("/market/instruments/MOEX%3ASBER/details").json()
 
     assert blockers["rows"][0]["blocker_code"] == "spread_too_wide"
     assert blockers["rows"][0]["missed_pnl_net"] == "21.000000"
     assert {stage["stage_name"]: stage["count"] for stage in funnel["stages"]}["created"] == 1
     assert {stage["stage_name"]: stage["count"] for stage in funnel["stages"]}["filled"] == 1
     assert canceled["rows"][0]["cancel_reason_code"] == "stale_order"
-    assert market["instruments"][0]["recent_market_trades"][0]["price"] == "100.04"
+    assert "recent_market_trades" in market["instruments"][0]
+    assert market["instruments"][0]["recent_market_trades"] == []
+    assert sber_details["recent_market_trades"][0]["price"] == "100.04"
 
 
 def test_websocket_channels_send_smoke_snapshots(tmp_path: Path) -> None:

@@ -1,8 +1,20 @@
 import { createPinia, setActivePinia } from "pinia";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { MarketInstrumentOverview } from "../api/types";
 import { useMarketStore } from "../stores/market";
+
+const apiClientMock = vi.hoisted(() => ({
+  marketOverview: vi.fn(),
+  refreshMarketQuotes: vi.fn(),
+  marketInstrumentDetails: vi.fn(),
+  dataShadowStatus: vi.fn(),
+}));
+
+vi.mock("../api/client", () => ({
+  apiClient: apiClientMock,
+  openAuthenticatedWebSocket: vi.fn(),
+}));
 
 function instrument(
   overrides: Partial<MarketInstrumentOverview> = {},
@@ -67,8 +79,86 @@ function instrument(
 }
 
 describe("market store", () => {
-  it("keeps broker order book metrics when weaker snapshots arrive later", () => {
+  beforeEach(() => {
     setActivePinia(createPinia());
+    Object.values(apiClientMock).forEach((mock) => mock.mockReset());
+  });
+
+  it("starts with eight core instruments and selects SBER by default", () => {
+    const market = useMarketStore();
+
+    expect(market.quoteRows).toHaveLength(8);
+    expect(market.selectedInstrumentId).toBe("MOEX:SBER");
+    expect(market.currentInstrument?.instrument_id).toBe("MOEX:SBER");
+  });
+
+  it("does not clear quote board on empty WebSocket snapshot", () => {
+    const market = useMarketStore();
+    const now = new Date().toISOString();
+    market.applyOverview({
+      generated_at: now,
+      instruments: [instrument({ last_price: "313.10", quote_status: "live" })],
+    });
+
+    market.applyOverview({ generated_at: now, instruments: [] });
+
+    expect(market.quoteRows).toHaveLength(8);
+    expect(market.currentInstrument?.last_price).toBe("313.10");
+    expect(market.warnings).toContain("empty_market_ws_snapshot");
+  });
+
+  it("merges partial snapshots without deleting existing quote rows", () => {
+    const market = useMarketStore();
+    const now = new Date().toISOString();
+    market.applyOverview({
+      generated_at: now,
+      instruments: [
+        instrument({ instrument_id: "MOEX:SBER", ticker: "SBER", last_price: "313.10" }),
+        instrument({ instrument_id: "MOEX:GAZP", ticker: "GAZP", last_price: "144.20" }),
+      ],
+    });
+
+    market.applyOverview({
+      generated_at: now,
+      instruments: [instrument({ instrument_id: "MOEX:SBER", ticker: "SBER", last_price: "313.50" })],
+    });
+
+    expect(market.quoteRows).toHaveLength(8);
+    expect(market.quoteRows.find((row) => row.instrument_id === "MOEX:SBER")?.last_price).toBe("313.50");
+    expect(market.quoteRows.find((row) => row.instrument_id === "MOEX:GAZP")?.last_price).toBe("144.20");
+  });
+
+  it("preserves old quote board rows when overview API fails", async () => {
+    const market = useMarketStore();
+    market.applyOverview({
+      generated_at: new Date().toISOString(),
+      instruments: [instrument({ last_price: "313.10", quote_status: "live" })],
+    });
+    apiClientMock.marketOverview.mockRejectedValue(new Error("temporary API failure"));
+
+    await market.fetchOverview({ silent: true });
+
+    expect(market.currentInstrument?.last_price).toBe("313.10");
+  });
+
+  it("loads selected instrument details lazily", async () => {
+    const market = useMarketStore();
+    const gazp = instrument({ instrument_id: "MOEX:GAZP", ticker: "GAZP", last_price: "144.20" });
+    market.applyOverview({ generated_at: new Date().toISOString(), instruments: [gazp] });
+    apiClientMock.marketInstrumentDetails.mockResolvedValue({
+      ...gazp,
+      best_bid: "144.18",
+      best_ask: "144.22",
+    });
+    market.selectedInstrumentId = "MOEX:GAZP";
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(apiClientMock.marketInstrumentDetails).toHaveBeenCalledWith("MOEX:GAZP");
+    expect(market.currentInstrument?.best_bid).toBe("144.18");
+  });
+
+  it("keeps broker order book metrics when weaker snapshots arrive later", () => {
     const market = useMarketStore();
     const now = new Date().toISOString();
 

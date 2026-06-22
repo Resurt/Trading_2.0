@@ -141,7 +141,8 @@ exchange session.
 | `POST` | `/portfolio/refresh` | Operator/admin readonly broker balance refresh via get_accounts/get_portfolio/get_positions. |
 | `GET` | `/orders/open` | Получить открытые ордера. |
 | `GET` | `/signals/current` | Получить текущие candidates и blockers. |
-| `GET` | `/market/overview` | Fast local market overview read-model. Returns one row per core universe instrument and never blocks on broker calls. |
+| `GET` | `/market/overview` | Fast local market overview read-model. Returns one row per core universe instrument and never blocks on broker calls. Use `include_details=false` for quote board payloads. |
+| `GET` | `/market/instruments/{instrument_id}/details` | Local selected-instrument details: quote, top of book, order-book levels, recent market trades and source/freshness diagnostics for one instrument. |
 | `POST` | `/market/quotes/refresh` | Explicit readonly quote/order-book refresh via T-Invest `GetLastPrices`/`GetOrderBook`; does not place or cancel orders. If the readonly gateway is unavailable, it returns the local overview fallback instead of blocking the dashboard. |
 | `GET` | `/reports/hourly` | Получить hourly reports по фильтрам. |
 | `GET` | `/reports/daily` | Получить daily reports по фильтрам. |
@@ -194,10 +195,14 @@ exchange session.
 
 ## `/market/overview`
 
-`/market/overview` returns one row per core universe instrument even when no live
-order book exists. It is a local read-model endpoint only: it reads
+`/market/overview?include_details=false` returns one row per core universe instrument
+even when no live order book exists. It is a local read-model endpoint only: it reads
 `order_book_summary`, `market_candle`, registry/session context and previous-close
 data from the database and must not construct a broker gateway or wait for T-Invest.
+It accepts `instruments=SBER,GAZP` for filtered quote boards. The default
+`include_details=false` keeps payloads small: top-level bid/ask/spread/freshness stay
+available, but heavy `order_book_summary.bids[]`, `order_book_summary.asks[]` and
+`recent_market_trades` are reserved for the selected-instrument details endpoint.
 
 Important quote fields:
 
@@ -210,9 +215,14 @@ Important quote fields:
 - `best_bid`, `best_ask`, `mid_price`, `spread_abs`, `spread_bps`;
 - `bid_depth_lots`, `ask_depth_lots`, `book_imbalance`, `market_quality`;
 - `order_book_source`, `order_book_ts`, `order_book_stale`;
-- `order_book_summary.bids[]` and `order_book_summary.asks[]`, where each level
-  has `price` and `quantity_lots` when real order-book levels are available;
-- `recent_market_trades`, `quote_payload`.
+- compact `order_book_summary` metadata when available;
+- `quote_payload`.
+
+`GET /market/instruments/{instrument_id}/details` returns the same
+`MarketInstrumentOverview` shape for one selected instrument with detailed
+`order_book_summary.bids[]`, `order_book_summary.asks[]` and `recent_market_trades`.
+This endpoint is local/read-model plus cached quote overlay; it must not refresh all
+eight order books or start any runtime stream.
 
 Price source priority for the dashboard is:
 
@@ -225,11 +235,12 @@ Price source priority for the dashboard is:
 Stale data must stay visible with `quote_status=stale` and timestamp. A candle from
 an older trading date must not be labeled as current/live.
 
-`POST /market/quotes/refresh` is the explicit readonly broker path. It may call
-T-Invest `GetLastPrices` and `GetOrderBook` with bounded timeouts, updates the
-response/read-model view, and must not call `PostOrder` or `CancelOrder`. If the
-readonly gateway cannot be constructed, the endpoint returns the local
-`/market/overview` payload quickly so the frontend does not get stuck on 500/504.
+`POST /market/quotes/refresh` is the explicit readonly broker path. It accepts
+`quotes_only=true` and `include_order_book=false` defaults. It may call T-Invest
+`GetLastPrices` and, only when details/order-book refresh is requested, `GetOrderBook`
+with bounded timeouts. It must not call `PostOrder` or `CancelOrder`. If the readonly
+gateway cannot be constructed, the endpoint returns the local `/market/overview`
+payload quickly so the frontend does not get stuck on 500/504.
 When `GetOrderBook` succeeds, the quote is fresh by broker response receipt time;
 the original exchange timestamp is exposed only as diagnostic payload
 (`exchange_ts` / `exchange_age_seconds`).
@@ -407,16 +418,20 @@ Anchor: data-only shadow endpoints are listed above and remain observer/read-onl
 
 `GET /session/preflight` exposes both official exchange status and raw broker
 availability. `official_exchange_open=true` is required before data-only calibration
-collection may start. If `official_exchange_closed=true`, `/robot/start` returns
-`accepted=false`, `status=rejected`, and a concrete `reason_code` such as
-`moex_dsvd_cancelled_platform_update`.
+collection may start. The operator dashboard must not call `/robot/start` when
+preflight returns closed/blocked. If an API client still calls `/robot/start` with a
+closed preflight, the API returns `accepted=false`, `status=rejected`, and a concrete
+`reason_code` such as `moex_dsvd_cancelled_platform_update`.
 
-`GET /market/overview` and `POST /market/quotes/refresh` return one row per core
-instrument. Rows include `venue_type`, `trading_mode`, `official_exchange_open`,
+`GET /market/overview?include_details=false` returns one row per core instrument.
+`POST /market/quotes/refresh?instruments=...` may return the requested subset, and
+`GET /market/instruments/{instrument_id}/details` returns one selected row with heavy
+details. Rows include `venue_type`, `trading_mode`, `official_exchange_open`,
 `official_exchange_closed`, `quote_source`, `quote_allowed_for_data_collection`,
 `spread_abs_rub`, `spread_bps`, `display_market_quality_score`,
-`calibration_market_quality_score`, `market_quality_components`,
-`recent_market_trades`, and explicit reason/warning fields.
+`calibration_market_quality_score`, `market_quality_components`, and explicit
+reason/warning fields. Detailed rows additionally include `recent_market_trades` and
+order-book levels.
 
 Spread units are fixed: `spread_abs`/`spread_abs_rub` are RUB, and
 `spread_bps = (best_ask - best_bid) / mid_price * 10000`.

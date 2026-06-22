@@ -1156,7 +1156,14 @@ New structured events/payloads:
 - `market_quotes_refresh`: explicit readonly T-Invest `GetLastPrices`/`GetOrderBook`
   refresh for dashboard quotes; no order methods are allowed. Payload should include
   `instrument_count`, `live_rows`, `stale_rows`, `cache_ttl_seconds`, timeout/fallback
-  reason when present, and whether `/market/overview` cache overlay was updated.
+  reason when present, `quotes_only`, `include_order_book`, and whether
+  `/market/overview` cache overlay was updated.
+- `market_instrument_details_read`: local/BFF selected-instrument read for
+  `/market/instruments/{instrument_id}/details`. Payload should include
+  `instrument_id`, `quote_source`, `quote_status`, `order_book_source`,
+  `order_book_stale`, `market_trades_source`, and any `schedule_error_code` or
+  status/freshness reason already present in the read model. This event is a read-model
+  access, not a broker refresh and not a stream start.
 - `robot_command_rejected_preflight`: API rejected a Start command because preflight did
   not return `market_open=true`; payload includes `reason_code` and `preflight_result`.
 - `data_only_shadow_collection_started`: trade-core applied Start in data-only mode and

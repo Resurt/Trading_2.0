@@ -170,6 +170,33 @@ describe("LiveDashboardView", () => {
     expect(market.selectedInstrumentId).toBe("MOEX:GAZP");
     expect(wrapper.text()).toContain("GAZP / устарела");
   });
+
+  it("shows explicit no-samples tape and display-only quality without a real book", async () => {
+    const wrapper = mountWithStores();
+    const market = useMarketStore();
+    market.applyOverview({
+      generated_at: "2026-06-13T07:10:30Z",
+      instruments: [
+        {
+          ...quoteFixture("MOEX:SBER", "SBER", "100.05", "stale", "latest_market_candle_close"),
+          display_market_quality_score: "0.35",
+          calibration_market_quality_score: "0",
+          market_quality_label: "no_order_book_samples",
+          market_trades_source: "no_market_trades_samples",
+          recent_market_trades: [],
+          order_book_source: null,
+          best_bid: null,
+          best_ask: null,
+        },
+      ],
+    });
+    await nextTick();
+
+    expect(wrapper.text()).toContain("Лента сделок недоступна");
+    expect(wrapper.text()).toContain("no_market_trades_samples");
+    expect(wrapper.text()).toContain("нет стакана");
+    expect(wrapper.text()).toContain("display-only");
+  });
 });
 
 function quoteFixture(
