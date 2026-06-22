@@ -173,6 +173,27 @@ Legacy aliases `session_phase` and `instrument_id` пока поддержива
 существующего кода, но новый код должен использовать `exchange_phase` и
 `instrument`.
 
+### Preflight diagnostics
+
+Session preflight reports and related technical logs should preserve broker
+schedule/status diagnostics as structured fields when available:
+
+- `schedule_source`
+- `schedule_error_code`
+- `schedule_error_message`
+- `status_source`
+- `status_success_count`
+- `status_error_count`
+- `fallback_used`
+- `working_instruments`
+- `blocked_instruments`
+
+For T-Bank `TradingSchedules INVALID_ARGUMENT 30003`, record
+`schedule_source=tbank_error`, `schedule_error_code=30003`, and keep the
+original broker message in `schedule_error_message`. This error is not by itself
+permission to start collection; fallback schedule decisions must be confirmed by
+per-instrument broker trading status.
+
 ### Strict event types
 
 Строгие `event_type` для доменных событий и корреляции логов:

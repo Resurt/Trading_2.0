@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from trade_core.broker_gateway import BrokerUnaryResponse
+from trade_core.session.moex_calendar import MoexCalendarDecision
 from trading_api import create_fastapi_app
 from trading_api.schemas import (
     DailyReportRunRequest,
@@ -48,6 +49,40 @@ from trading_common.db.service import DatabaseService
 
 def utc(year: int, month: int, day: int, hour: int, minute: int = 0) -> datetime:
     return datetime(year, month, day, hour, minute, tzinfo=UTC)
+
+
+class ClosedMoexCalendarService:
+    def decision(
+        self,
+        calendar_date: date,
+        *,
+        market: str = "stock",
+        now_msk: datetime | None = None,
+    ) -> MoexCalendarDecision:
+        del now_msk
+        return MoexCalendarDecision(
+            official_exchange_open=False,
+            official_exchange_closed=True,
+            exchange="MOEX",
+            market=market,
+            calendar_date=calendar_date,
+            session_type="weekend",
+            reason_code="moex_dsvd_cancelled_platform_update",
+            source="test_closed_calendar",
+            message="test exchange closed",
+            next_possible_session_at=utc(2026, 6, 22, 4),
+            affected_markets=(market,),
+            is_exception_day=True,
+        )
+
+
+def force_exchange_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    read_service_module = importlib.import_module("trading_api.read_service")
+    monkeypatch.setattr(
+        read_service_module,
+        "MoexCalendarService",
+        ClosedMoexCalendarService,
+    )
 
 
 class FakeReportTaskClient:
@@ -697,6 +732,7 @@ def test_robot_status_and_market_overview(
     tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("TRADING_DATA_ONLY_SHADOW", "true")
+    force_exchange_closed(monkeypatch)
     client = make_client(tmp_path)
 
     status = client.get("/robot/status").json()
@@ -858,6 +894,7 @@ def test_market_quotes_refresh_marks_successful_order_book_refresh_display_only_
 ) -> None:
     app_module = importlib.import_module("trading_api.app")
 
+    force_exchange_closed(monkeypatch)
     monkeypatch.setattr(app_module, "_readonly_tbank_gateway", lambda: FakeQuoteGateway())
     client = make_client(tmp_path)
 
@@ -923,6 +960,7 @@ def test_market_overview_uses_recent_readonly_quote_refresh_cache(
 ) -> None:
     app_module = importlib.import_module("trading_api.app")
 
+    force_exchange_closed(monkeypatch)
     monkeypatch.setattr(app_module, "_readonly_tbank_gateway", lambda: FakeQuoteGateway())
     client = make_client(tmp_path)
 
@@ -1052,8 +1090,11 @@ def test_session_preflight_endpoint_returns_closed_market(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    use_cache_values: list[object] = []
+
     async def closed_preflight(*args: object, **kwargs: object) -> SessionPreflightResponse:
-        del args, kwargs
+        del args
+        use_cache_values.append(kwargs.get("use_cache"))
         return preflight_response(market_open=False, reason_code="market_closed_expected")
 
     app_module = importlib.import_module("trading_api.app")
@@ -1063,12 +1104,13 @@ def test_session_preflight_endpoint_returns_closed_market(
     response = client.get(
         "/session/preflight",
         headers={"X-API-Role": "observer"},
-        params={"instruments": "SBER,GAZP"},
+        params={"instruments": "SBER,GAZP", "cache": "false"},
     ).json()
 
     assert response["market_open"] is False
     assert response["market_closed_expected"] is True
     assert response["reason_code"] == "market_closed_expected"
+    assert use_cache_values == [False]
 
 
 def test_intraday_and_calibration_observatory_api_roles(tmp_path: Path) -> None:

@@ -125,7 +125,39 @@ python scripts/run_data_only_shadow_smoke.py --instruments SBER,GAZP,LKOH,YDEX,T
 
 Preflight fields include `market_open`, `market_closed_expected`, `reason_code`,
 `next_session_at`, `session_type`, `session_phase`, `broker_trading_status`,
-`api_trade_available`, `per_instrument_status` and `source`.
+`api_trade_available`, `per_instrument_status`, `source`, `schedule_source`,
+`status_source`, `schedule_error_code`, `schedule_error_message`,
+`status_success_count`, `status_error_count`, `fallback_used`,
+`requested_instruments`, `working_instruments`, and `blocked_instruments`.
+
+CLI smoke and API `/session/preflight` use the same `TradingSessionPreflightService`
+rules. For fresh API comparison during incident triage, call:
+
+```text
+GET /session/preflight?instruments=SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR&mode=data_shadow&cache=false
+```
+
+If T-Bank `TradingSchedules` fails with `INVALID_ARGUMENT 30003`, preflight must
+not silently contradict another caller. The response records
+`schedule_source=tbank_error`, `schedule_error_code=30003`,
+`fallback_used=true`, then falls back to local MOEX time windows and broker
+`GetTradingStatus`:
+
+- if all instrument statuses are unavailable, collection is blocked with
+  `reason_code=broker_status_unavailable`;
+- if at least one instrument has an open broker status during an open fallback
+  window, `working_instruments` contains only those allowed instruments and
+  `blocked_instruments` explains the rest;
+- if broker schedule says closed while statuses look open, preflight stays closed
+  and adds `broker_status_open_schedule_closed`.
+
+The smoke script starts streams only for `working_instruments`. If that list is
+empty, it returns `no_tradeable_instruments` and does not start runtime streams.
+
+Known 30003 context: T-Bank rejects `TradingSchedules` when request `from` is
+earlier than the current broker date/time after timezone conversion. Preflight
+requests schedules from the current preflight timestamp forward; the 30003
+fallback remains only as a defensive path.
 
 If `market_open=false` and `market_closed_expected=true`, the smoke must not start market streams,
 must not subscribe to order book, and must not call the data-only runtime. The JSON result should

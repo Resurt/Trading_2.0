@@ -2,14 +2,19 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from dataclasses import replace
 from datetime import date, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
 import scripts.run_data_only_shadow_smoke as smoke
 
+from trade_core.broker_gateway import InstrumentRef
+from trade_core.runtime import TradeCoreRuntimeConfig
+from trade_core.session import TradingSessionPreflightConfig
 from trading_common.db.base import Base
 from trading_common.db.service import DatabaseService
 
@@ -19,7 +24,12 @@ MSK = ZoneInfo("Europe/Moscow")
 class FakeRuntime:
     instances: list[FakeRuntime] = []
 
-    def __init__(self, *, config: object, launch_policy: object) -> None:
+    def __init__(
+        self,
+        *,
+        config: TradeCoreRuntimeConfig,
+        launch_policy: object,
+    ) -> None:
         del launch_policy
         self.config = config
         self.database = DatabaseService("sqlite+pysqlite:///:memory:")
@@ -28,9 +38,24 @@ class FakeRuntime:
         self._session = None
         self.start_calls = 0
         self.shutdown_calls = 0
+        self.live_market_data_collector = None
+        self.stats = SimpleNamespace(last_stream_message_at=None)
         FakeRuntime.instances.append(self)
 
     async def _resolve_runtime_instruments(self) -> None:
+        self.config = replace(
+            self.config,
+            instruments=tuple(
+                InstrumentRef(
+                    instrument_id=instrument.instrument_id,
+                    instrument_uid=f"uid-{(instrument.ticker or 'unknown').lower()}",
+                    figi=f"figi-{(instrument.ticker or 'unknown').lower()}",
+                    ticker=instrument.ticker,
+                    class_code=instrument.class_code,
+                )
+                for instrument in self.config.instruments
+            ),
+        )
         return None
 
     async def start(self) -> None:
@@ -44,17 +69,21 @@ class FakeRuntime:
 
 
 class FakePreflightService:
+    configs: list[TradingSessionPreflightConfig] = []
+    result: object | None = None
+
     def __init__(self, broker_gateway: object) -> None:
         del broker_gateway
 
-    async def run(self, config: object) -> object:
-        del config
-        return FakePreflightResult()
+    async def run(self, config: TradingSessionPreflightConfig) -> object:
+        self.__class__.configs.append(config)
+        return self.__class__.result or FakePreflightResult()
 
 
 class FakePreflightResult:
     market_open = False
     market_closed_expected = True
+    data_only_collection_allowed = False
     reason_code = "weekend_session_closed"
     session_type = "weekend"
     session_phase = "closed"
@@ -79,6 +108,48 @@ class FakePreflightResult:
             "instruments_checked": [],
             "per_instrument_status": {},
             "source": "fallback_weekend_time_rules",
+            "schedule_source": "fallback_weekend_time_rules",
+            "status_source": "not_requested",
+            "working_instruments": [],
+            "blocked_instruments": [],
+            "warnings": ["fallback_schedule_used"],
+        }
+
+
+class OpenPartialPreflightResult:
+    market_open = True
+    market_closed_expected = False
+    data_only_collection_allowed = True
+    reason_code = "market_open"
+    session_type = "weekday_evening"
+    session_phase = "continuous_trading"
+
+    def as_payload(self) -> dict[str, Any]:
+        now = datetime(2026, 6, 22, 20, tzinfo=MSK)
+        return {
+            "market_open": True,
+            "market_closed_expected": False,
+            "now_msk": now.isoformat(),
+            "trading_date": date(2026, 6, 22).isoformat(),
+            "calendar_date": date(2026, 6, 22).isoformat(),
+            "session_type": "weekday_evening",
+            "session_phase": "continuous_trading",
+            "broker_trading_status": "mixed",
+            "api_trade_available": True,
+            "data_only_collection_allowed": True,
+            "next_session_at": None,
+            "next_session_type": None,
+            "current_window_start_at": "2026-06-22T19:00:00+03:00",
+            "current_window_end_at": "2026-06-22T23:50:00+03:00",
+            "reason_code": "market_open",
+            "instruments_checked": ["MOEX:SBER", "MOEX:GAZP"],
+            "requested_instruments": ["MOEX:SBER", "MOEX:GAZP"],
+            "working_instruments": ["MOEX:SBER"],
+            "blocked_instruments": [{"instrument_id": "MOEX:GAZP"}],
+            "per_instrument_status": {},
+            "source": "fallback_time_rules",
+            "schedule_source": "tbank_error",
+            "status_source": "GetTradingStatus_partial",
             "warnings": ["fallback_schedule_used"],
         }
 
@@ -89,6 +160,8 @@ def test_closed_market_smoke_does_not_start_runtime_streams(
 ) -> None:
     del tmp_path
     FakeRuntime.instances.clear()
+    FakePreflightService.configs.clear()
+    FakePreflightService.result = None
     monkeypatch.setattr(smoke, "TradeCoreRuntime", FakeRuntime)
     monkeypatch.setattr(smoke, "TradingSessionPreflightService", FakePreflightService)
     args = argparse.Namespace(
@@ -118,3 +191,42 @@ def test_closed_market_smoke_does_not_start_runtime_streams(
     assert payload["broker_orders_delta"] == 0
     assert payload["microstructure_snapshots_delta"] == 0
     assert FakeRuntime.instances[0].start_calls == 0
+    assert all(
+        getattr(item, "instrument_uid", None)
+        for item in FakePreflightService.configs[0].instruments
+    )
+
+
+def test_open_market_smoke_uses_working_instruments_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeRuntime.instances.clear()
+    FakePreflightService.configs.clear()
+    FakePreflightService.result = OpenPartialPreflightResult()
+    monkeypatch.setattr(smoke, "TradeCoreRuntime", FakeRuntime)
+    monkeypatch.setattr(smoke, "TradingSessionPreflightService", FakePreflightService)
+
+    async def no_sleep(seconds: float) -> None:
+        del seconds
+
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+    args = argparse.Namespace(
+        instruments="SBER,GAZP",
+        minutes=0,
+        database_url=None,
+        require_dividend_sync=False,
+        require_market_open=True,
+        allow_closed_market_success=True,
+        preflight_only=False,
+        max_instruments_per_stream_batch=4,
+        stream_batch_delay_seconds=2.0,
+        json_output=True,
+        dry_run=False,
+    )
+
+    payload = asyncio.run(smoke.async_main(args))
+
+    assert payload["runtime_started"] is True
+    assert payload["working_instruments"] == ["MOEX:SBER"]
+    assert FakeRuntime.instances[0].start_calls == 1
+    assert [item.ticker for item in FakeRuntime.instances[0].config.instruments] == ["SBER"]

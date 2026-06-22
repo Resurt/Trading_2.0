@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
@@ -70,6 +72,18 @@ class TradingSessionPreflightResult:
     instruments_checked: tuple[str, ...]
     per_instrument_status: Mapping[str, JsonPayload]
     source: str
+    schedule_source: str
+    status_source: str
+    schedule_error_code: str | None = None
+    schedule_error_message: str | None = None
+    status_error_count: int = 0
+    status_success_count: int = 0
+    fallback_used: bool = False
+    cache_hit: bool = False
+    cache_key: str | None = None
+    requested_instruments: tuple[str, ...] = ()
+    working_instruments: tuple[str, ...] = ()
+    blocked_instruments: tuple[JsonPayload, ...] = ()
     warnings: tuple[str, ...] = field(default_factory=tuple)
 
     def as_payload(self) -> JsonPayload:
@@ -120,8 +134,31 @@ class TradingSessionPreflightResult:
             "instruments_checked": list(self.instruments_checked),
             "per_instrument_status": dict(self.per_instrument_status),
             "source": self.source,
+            "schedule_source": self.schedule_source,
+            "status_source": self.status_source,
+            "schedule_error_code": self.schedule_error_code,
+            "schedule_error_message": self.schedule_error_message,
+            "status_error_count": self.status_error_count,
+            "status_success_count": self.status_success_count,
+            "fallback_used": self.fallback_used,
+            "cache_hit": self.cache_hit,
+            "cache_key": self.cache_key,
+            "requested_instruments": list(self.requested_instruments),
+            "working_instruments": list(self.working_instruments),
+            "blocked_instruments": list(self.blocked_instruments),
             "warnings": list(self.warnings),
         }
+
+
+@dataclass(frozen=True, slots=True)
+class _ScheduleProbe:
+    schedule: TradingSchedule
+    source: str
+    schedule_source: str
+    schedule_error_code: str | None = None
+    schedule_error_message: str | None = None
+    fallback_used: bool = False
+    warnings: tuple[str, ...] = ()
 
 
 class TradingSessionPreflightService:
@@ -147,7 +184,10 @@ class TradingSessionPreflightService:
             market="stock",
             now_msk=now_msk,
         )
-        schedule, source, warnings = await self._schedule(cfg, now_msk)
+        schedule_probe = await self._schedule(cfg, now_msk)
+        schedule = schedule_probe.schedule
+        source = schedule_probe.source
+        warnings = schedule_probe.warnings
         current_window = schedule.active_window(now_msk)
         next_window = _next_window(schedule, now_msk)
         per_instrument = await self._instrument_statuses(cfg.instruments)
@@ -157,6 +197,17 @@ class TradingSessionPreflightService:
             for item in per_instrument.values()
             if item.get("status_available") is True
         ]
+        status_success_count = sum(
+            1 for item in per_instrument.values() if item.get("status_available") is True
+        )
+        status_error_count = sum(
+            1 for item in per_instrument.values() if item.get("status_available") is False
+        )
+        status_source = _status_source(
+            requested=bool(cfg.instruments),
+            success_count=status_success_count,
+            error_count=status_error_count,
+        )
         broker_status = (
             "mixed"
             if len(set(str(item) for item in status_values)) > 1
@@ -243,8 +294,30 @@ class TradingSessionPreflightService:
             market_closed_expected = True
         if reason_code == "broker_status_unavailable":
             market_closed_expected = False
+        if (
+            not official_exchange_closed
+            and not market_open
+            and api_trade_available_raw
+            and (current_window is None or session_phase != "continuous_trading")
+        ):
+            warnings = tuple(
+                dict.fromkeys((*warnings, "broker_status_open_schedule_closed"))
+            )
         quote_source_allowed_for_data_collection = market_open and official_exchange_open
-        data_only_collection_allowed = quote_source_allowed_for_data_collection
+        per_instrument = _annotate_collection_allowed(
+            per_instrument,
+            market_open=market_open,
+            reason_code=reason_code,
+        )
+        working_instruments = tuple(
+            key
+            for key, item in per_instrument.items()
+            if item.get("collection_allowed") is True
+        )
+        blocked_instruments = _blocked_instruments(per_instrument)
+        data_only_collection_allowed = quote_source_allowed_for_data_collection and (
+            bool(working_instruments) or not cfg.instruments
+        )
         streams_for_calibration_allowed = quote_source_allowed_for_data_collection
         streams_for_display_allowed = broker_stream_available or market_open
         venue_type = _venue_type(
@@ -321,6 +394,16 @@ class TradingSessionPreflightService:
             instruments_checked=tuple(_instrument_key(item) for item in cfg.instruments),
             per_instrument_status=per_instrument,
             source=source,
+            schedule_source=schedule_probe.schedule_source,
+            status_source=status_source,
+            schedule_error_code=schedule_probe.schedule_error_code,
+            schedule_error_message=schedule_probe.schedule_error_message,
+            status_error_count=status_error_count,
+            status_success_count=status_success_count,
+            fallback_used=schedule_probe.fallback_used,
+            requested_instruments=tuple(_instrument_key(item) for item in cfg.instruments),
+            working_instruments=working_instruments,
+            blocked_instruments=blocked_instruments,
             warnings=warnings,
         )
 
@@ -328,56 +411,101 @@ class TradingSessionPreflightService:
         self,
         config: TradingSessionPreflightConfig,
         now_msk: datetime,
-    ) -> tuple[TradingSchedule, str, tuple[str, ...]]:
+    ) -> _ScheduleProbe:
+        schedule_error: Exception | None = None
         try:
             response = await self._broker_gateway.trading_schedules(
                 TradingSchedulesRequest(
                     exchange=config.exchange,
-                    from_=now_msk - timedelta(days=1),
+                    from_=now_msk,
                     to=now_msk + timedelta(days=config.lookahead_days),
                 )
             )
             schedule = _schedule_from_response(response)
             if isinstance(response.data.get("windows"), list):
-                return schedule, "broker_trading_schedules", ()
-        except Exception:
+                return _ScheduleProbe(
+                    schedule=schedule,
+                    source="broker_trading_schedules",
+                    schedule_source="broker_trading_schedules",
+                )
+        except Exception as exc:
+            schedule_error = exc
             if not config.allow_fallback_schedule:
-                return TradingSchedule(windows=()), "broker_schedule_unavailable", ()
+                return _ScheduleProbe(
+                    schedule=TradingSchedule(windows=()),
+                    source="broker_schedule_unavailable",
+                    schedule_source="tbank_error",
+                    schedule_error_code=_exception_error_code(exc),
+                    schedule_error_message=_exception_error_message(exc),
+                )
         if not config.allow_fallback_schedule:
-            return TradingSchedule(windows=()), "broker_schedule_unavailable", ()
+            return _ScheduleProbe(
+                schedule=TradingSchedule(windows=()),
+                source="broker_schedule_unavailable",
+                schedule_source="broker_schedule_unavailable",
+            )
         source = (
             "fallback_weekend_time_rules"
             if now_msk.weekday() >= 5
             else "fallback_time_rules"
         )
-        return (
-            _fallback_schedule(now_msk, lookahead_days=config.lookahead_days),
-            source,
-            ("fallback_schedule_used",),
+        warnings = ["fallback_schedule_used"]
+        if schedule_error is not None:
+            error_code = _exception_error_code(schedule_error)
+            if error_code:
+                warnings.append(f"broker_schedule_error_{error_code}")
+            return _ScheduleProbe(
+                schedule=_fallback_schedule(now_msk, lookahead_days=config.lookahead_days),
+                source=source,
+                schedule_source="tbank_error",
+                schedule_error_code=error_code,
+                schedule_error_message=_exception_error_message(schedule_error),
+                fallback_used=True,
+                warnings=tuple(dict.fromkeys(warnings)),
+            )
+        return _ScheduleProbe(
+            schedule=_fallback_schedule(now_msk, lookahead_days=config.lookahead_days),
+            source=source,
+            schedule_source=source,
+            fallback_used=True,
+            warnings=tuple(warnings),
         )
 
     async def _instrument_statuses(
         self,
         instruments: tuple[InstrumentRef, ...],
     ) -> dict[str, JsonPayload]:
-        statuses: dict[str, JsonPayload] = {}
-        for instrument in instruments:
+        semaphore = asyncio.Semaphore(4)
+
+        async def fetch(instrument: InstrumentRef) -> tuple[str, JsonPayload]:
             key = _instrument_key(instrument)
             try:
-                response = await self._broker_gateway.get_trading_status(
-                    TradingStatusRequest(instrument=instrument)
-                )
+                async with semaphore:
+                    response = await self._broker_gateway.get_trading_status(
+                        TradingStatusRequest(instrument=instrument)
+                    )
             except Exception as exc:
-                statuses[key] = {
+                error_code = _exception_error_code(exc) or type(exc).__name__
+                return key, {
                     "status_available": False,
+                    "instrument_id": key,
+                    "ticker": instrument.ticker,
+                    "broker_status": "unknown",
                     "api_trade_available": False,
                     "broker_trading_status": "unknown",
+                    "status_source": "error",
+                    "status_error_code": error_code,
+                    "status_error_message": _exception_error_message(exc),
+                    "collection_allowed": False,
+                    "blocked_reason": "broker_status_unavailable",
                     "reason_code": "broker_status_unavailable",
-                    "error_code": type(exc).__name__,
+                    "error_code": error_code,
+                    "error_message": _exception_error_message(exc),
                 }
-                continue
-            statuses[key] = _status_payload(response, instrument_id=key)
-        return statuses
+            return key, _status_payload(response, instrument=instrument, instrument_id=key)
+
+        pairs = await asyncio.gather(*(fetch(instrument) for instrument in instruments))
+        return dict(pairs)
 
 
 def _schedule_from_response(response: BrokerUnaryResponse) -> TradingSchedule:
@@ -450,18 +578,111 @@ def _window(
     )
 
 
-def _status_payload(response: BrokerUnaryResponse, *, instrument_id: str) -> JsonPayload:
+def _status_payload(
+    response: BrokerUnaryResponse,
+    *,
+    instrument: InstrumentRef,
+    instrument_id: str,
+) -> JsonPayload:
     status = str(response.data.get("trading_status", response.data.get("status", "unknown")))
+    normalized_status = status.lower().removeprefix("security_trading_status_")
     api_trade_available = bool(response.data.get("api_trade_available", False))
     return {
         "status_available": True,
         "instrument_id": str(response.data.get("instrument_id") or instrument_id),
-        "broker_trading_status": status.lower().removeprefix("security_trading_status_"),
+        "ticker": instrument.ticker,
+        "broker_status": normalized_status,
+        "broker_trading_status": normalized_status,
         "api_trade_available": api_trade_available,
         "limit_order_available": bool(response.data.get("limit_order_available", False)),
         "market_order_available": bool(response.data.get("market_order_available", False)),
+        "status_source": response.method_name,
+        "status_error_code": None,
+        "status_error_message": None,
+        "collection_allowed": False,
+        "blocked_reason": None,
         "source": response.method_name,
     }
+
+
+def _status_source(*, requested: bool, success_count: int, error_count: int) -> str:
+    if not requested:
+        return "not_requested"
+    if success_count and error_count:
+        return "GetTradingStatus_partial"
+    if success_count:
+        return "GetTradingStatus"
+    if error_count:
+        return "GetTradingStatus_error"
+    return "unknown"
+
+
+def _annotate_collection_allowed(
+    statuses: Mapping[str, JsonPayload],
+    *,
+    market_open: bool,
+    reason_code: str,
+) -> dict[str, JsonPayload]:
+    annotated: dict[str, JsonPayload] = {}
+    for key, item in statuses.items():
+        payload = dict(item)
+        collection_allowed = (
+            market_open
+            and payload.get("status_available") is True
+            and payload.get("api_trade_available") is True
+        )
+        payload["collection_allowed"] = collection_allowed
+        payload["blocked_reason"] = (
+            None
+            if collection_allowed
+            else _instrument_blocked_reason(
+                payload,
+                market_open=market_open,
+                reason_code=reason_code,
+            )
+        )
+        annotated[key] = payload
+    return annotated
+
+
+def _instrument_blocked_reason(
+    payload: Mapping[str, Any],
+    *,
+    market_open: bool,
+    reason_code: str,
+) -> str:
+    if payload.get("status_available") is False:
+        return "broker_status_unavailable"
+    if not market_open:
+        return reason_code
+    if payload.get("api_trade_available") is not True:
+        status = str(payload.get("broker_trading_status") or payload.get("broker_status") or "")
+        if _is_closed_status_value(status):
+            return "broker_status_closed"
+        return "instrument_not_tradeable"
+    return "unknown"
+
+
+def _blocked_instruments(statuses: Mapping[str, JsonPayload]) -> tuple[JsonPayload, ...]:
+    blocked: list[JsonPayload] = []
+    for key, item in statuses.items():
+        if item.get("collection_allowed") is True:
+            continue
+        blocked.append(
+            {
+                "instrument_id": str(item.get("instrument_id") or key),
+                "ticker": item.get("ticker"),
+                "broker_status": item.get("broker_status")
+                or item.get("broker_trading_status"),
+                "api_trade_available": item.get("api_trade_available"),
+                "status_source": item.get("status_source") or item.get("source"),
+                "status_error_code": item.get("status_error_code") or item.get("error_code"),
+                "status_error_message": item.get("status_error_message")
+                or item.get("error_message"),
+                "reason_code": item.get("blocked_reason") or item.get("reason_code"),
+            }
+        )
+    return tuple(blocked)
 
 
 def _broker_otc_or_indicative_available(status_values: list[object]) -> bool:
@@ -531,6 +752,8 @@ def _reason_code(
     if status_unavailable:
         return "broker_status_unavailable"
     if status_values and not api_trade_available:
+        if all(_is_closed_status_value(item) for item in status_values):
+            return "broker_status_closed"
         return "instrument_not_tradeable"
     if current_window.session_phase is SessionPhase.BREAK:
         return "market_closed_expected"
@@ -588,6 +811,44 @@ def _session_type_value(value: SessionType) -> str:
 
 def _instrument_key(instrument: InstrumentRef) -> str:
     return instrument.instrument_id or instrument.instrument_uid or instrument.ticker or "unknown"
+
+
+def _is_closed_status_value(value: object) -> bool:
+    normalized = str(value).lower()
+    return (
+        "closed" in normalized
+        or "break" in normalized
+        or normalized
+        in {
+            "not_available_for_trading",
+            "not_available",
+            "unknown",
+        }
+    )
+
+
+def _exception_error_code(exc: Exception) -> str | None:
+    text = f"{type(exc).__name__}: {exc}"
+    match = re.search(r"\b\d{4,6}\b", text)
+    if match:
+        return match.group(0)
+    for nested in (getattr(exc, "original_error", None), getattr(exc, "__cause__", None)):
+        if isinstance(nested, Exception):
+            nested_code = _exception_error_code(nested)
+            if nested_code:
+                return nested_code
+    for attr in ("error_code", "code", "reason_code"):
+        value = getattr(exc, attr, None)
+        if value not in (None, ""):
+            text = str(value)
+            match = re.search(r"\b\d{4,6}\b", text)
+            return match.group(0) if match else text
+    return None
+
+
+def _exception_error_message(exc: Exception) -> str:
+    text = str(exc).strip()
+    return text or type(exc).__name__
 
 
 def _ensure_msk(value: datetime) -> datetime:

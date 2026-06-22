@@ -303,12 +303,13 @@ def create_fastapi_app(
         instruments: Annotated[str | None, Query()] = None,
         mode: Annotated[str, Query()] = "data_shadow",
         broker_checks: Annotated[bool, Query()] = True,
+        cache: Annotated[bool, Query()] = True,
     ) -> SessionPreflightResponse:
         del mode
         require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
         if not broker_checks:
             return await _run_dashboard_session_preflight(request)
-        return await _run_session_preflight(request, instruments=instruments)
+        return await _run_session_preflight(request, instruments=instruments, use_cache=cache)
 
     @app.get("/positions", response_model=list[PositionResponse], tags=["portfolio"])
     def positions(service: ReadServiceDep) -> list[PositionResponse]:
@@ -1553,6 +1554,7 @@ async def _run_session_preflight(
     request: Request,
     *,
     instruments: str | None,
+    use_cache: bool = True,
 ) -> SessionPreflightResponse:
     from trade_core.broker_gateway import BrokerGateway
     from trade_core.session import (
@@ -1564,17 +1566,27 @@ async def _run_session_preflight(
     refs = _instrument_refs_for_preflight(_database_service(request), instruments)
     config = TradingSessionPreflightConfig(instruments=tuple(refs))
     cache_key = _session_preflight_cache_key(refs)
-    cached = _cached_session_preflight(cast(FastAPI, request.app), cache_key)
-    if cached is not None:
-        return cached
-    timeout_seconds = float(os.environ.get("TRADING_SESSION_PREFLIGHT_TIMEOUT_SECONDS", "8"))
+    if use_cache:
+        cached = _cached_session_preflight(cast(FastAPI, request.app), cache_key)
+        if cached is not None:
+            return cached.model_copy(
+                update={
+                    "cache_hit": True,
+                    "cache_key": cache_key,
+                }
+            )
+    timeout_seconds = float(os.environ.get("TRADING_SESSION_PREFLIGHT_TIMEOUT_SECONDS", "30"))
     try:
         result = await asyncio.wait_for(
             TradingSessionPreflightService(gateway).run(config),
             timeout=timeout_seconds,
         )
-        response = SessionPreflightResponse(**result.as_payload())
-        _store_session_preflight(cast(FastAPI, request.app), cache_key, response)
+        payload = result.as_payload()
+        payload["cache_hit"] = False
+        payload["cache_key"] = cache_key
+        response = SessionPreflightResponse(**payload)
+        if use_cache:
+            _store_session_preflight(cast(FastAPI, request.app), cache_key, response)
         return response
     except TimeoutError:
         fallback_result = await TradingSessionPreflightService(
@@ -1587,8 +1599,11 @@ async def _run_session_preflight(
         "broker_preflight_timeout",
     ]
     payload["source"] = "fallback_preflight_timeout"
+    payload["cache_hit"] = False
+    payload["cache_key"] = cache_key
     response = SessionPreflightResponse(**payload)
-    _store_session_preflight(cast(FastAPI, request.app), cache_key, response)
+    if use_cache:
+        _store_session_preflight(cast(FastAPI, request.app), cache_key, response)
     return response
 
 

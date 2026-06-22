@@ -49,6 +49,32 @@ The API keeps a short server-side preflight cache controlled by
 `TRADING_SESSION_PREFLIGHT_CACHE_TTL_SECONDS`, default 30 seconds. This lets
 `POST /robot/start` reuse the fresh `GET /session/preflight` result that the
 dashboard just received instead of issuing a second slow broker status pass.
+Incident triage can bypass this cache with
+`GET /session/preflight?...&cache=false`; the response includes `cache_hit` and
+`cache_key` so CLI/API comparisons are explicit.
+Fresh broker preflight is bounded by `TRADING_SESSION_PREFLIGHT_TIMEOUT_SECONDS`,
+default 30 seconds, because full-universe readonly broker status checks can take
+longer than a lightweight dashboard calendar pass.
+
+`GET /session/preflight` uses the same `TradingSessionPreflightService` rules as
+the data-only smoke CLI. The response includes schedule/status diagnostics:
+
+- `source`, `schedule_source`, `status_source`;
+- `schedule_error_code`, `schedule_error_message`;
+- `status_success_count`, `status_error_count`;
+- `fallback_used`, `cache_hit`, `cache_key`;
+- `requested_instruments`, `working_instruments`, `blocked_instruments`;
+- per-instrument `broker_status`, `api_trade_available`, `status_source`,
+  `status_error_code`, `status_error_message`, `collection_allowed`, and
+  `blocked_reason`.
+
+When T-Bank `TradingSchedules` returns `INVALID_ARGUMENT 30003`, the API records
+`schedule_source=tbank_error`, `schedule_error_code=30003`, and uses fallback
+schedule rules plus per-instrument broker trading status. A fallback schedule
+alone must not mark the market open when every broker status is unavailable.
+The known 30003 trigger is a `TradingSchedules.from_` value earlier than the
+current broker date/time after timezone conversion; normal preflight requests
+schedules from the current preflight timestamp forward.
 
 `RobotCommandResponse` includes:
 

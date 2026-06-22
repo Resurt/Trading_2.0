@@ -8,6 +8,7 @@ import argparse
 import asyncio
 import json
 import os
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -77,6 +78,7 @@ async def async_main(args: argparse.Namespace) -> dict[str, object]:
     )
     initial_counts = _table_counts(runtime.database)
     resolve_error = await _resolve_instruments_for_preflight(runtime)
+    config = runtime.config
     if resolve_error is not None:
         await _shutdown_runtime(runtime)
         return {
@@ -97,12 +99,19 @@ async def async_main(args: argparse.Namespace) -> dict[str, object]:
 
     preflight = await TradingSessionPreflightService(runtime.broker_gateway).run(
         TradingSessionPreflightConfig(
-            exchange=config.exchange,
-            instruments=config.instruments,
+            exchange=runtime.config.exchange,
+            instruments=runtime.config.instruments,
         )
     )
     preflight_payload = preflight.as_payload()
-    if args.preflight_only or not preflight.market_open:
+    preflight_payload["cache_hit"] = False
+    requested_instruments = _requested_instruments(args.instruments)
+    preflight_payload.setdefault("requested_instruments", requested_instruments)
+    if (
+        args.preflight_only
+        or not preflight.market_open
+        or not getattr(preflight, "data_only_collection_allowed", preflight.market_open)
+    ):
         await _shutdown_runtime(runtime)
         deltas = _count_deltas(initial_counts, _table_counts(runtime.database))
         closed_success = (
@@ -128,6 +137,9 @@ async def async_main(args: argparse.Namespace) -> dict[str, object]:
             "next_session_at": preflight_payload.get("next_session_at"),
             "session_type": preflight.session_type,
             "session_phase": preflight.session_phase,
+            "requested_instruments": requested_instruments,
+            "working_instruments": preflight_payload.get("working_instruments", []),
+            "blocked_instruments": preflight_payload.get("blocked_instruments", []),
             "preflight": preflight_payload,
             "post_order_calls": 0,
             "cancel_order_calls": 0,
@@ -141,6 +153,41 @@ async def async_main(args: argparse.Namespace) -> dict[str, object]:
             "warnings": [warning],
             "warning": warning,
             "errors": [] if passed else ["market_not_open"],
+        }
+
+    working_filter_error = _apply_working_instruments(runtime, preflight_payload)
+    config = runtime.config
+    if working_filter_error is not None:
+        await _shutdown_runtime(runtime)
+        deltas = _count_deltas(initial_counts, _table_counts(runtime.database))
+        return {
+            "passed": False,
+            "runtime_started": False,
+            "preflight_only": False,
+            "data_only_shadow_enabled": config.data_only_shadow_enabled,
+            "real_orders_disabled": True,
+            "market_open": preflight.market_open,
+            "market_closed_expected": preflight.market_closed_expected,
+            "reason_code": working_filter_error,
+            "next_session_at": preflight_payload.get("next_session_at"),
+            "session_type": preflight.session_type,
+            "session_phase": preflight.session_phase,
+            "requested_instruments": requested_instruments,
+            "working_instruments": preflight_payload.get("working_instruments", []),
+            "blocked_instruments": preflight_payload.get("blocked_instruments", []),
+            "preflight": preflight_payload,
+            "post_order_calls": 0,
+            "cancel_order_calls": 0,
+            "signal_candidates_delta": deltas["signal_candidate"],
+            "order_intents_delta": deltas["order_intent"],
+            "broker_orders_delta": deltas["broker_order"],
+            "microstructure_snapshots_delta": deltas["market_microstructure_snapshot"],
+            "candles_received": 0,
+            "order_books_received": 0,
+            "market_state_snapshots_written": 0,
+            "warnings": [],
+            "warning": working_filter_error,
+            "errors": [working_filter_error],
         }
 
     return await _run_open_market_smoke(
@@ -229,6 +276,9 @@ async def _run_open_market_smoke(
         "next_session_at": preflight_payload.get("next_session_at"),
         "session_type": preflight_payload.get("session_type"),
         "session_phase": preflight_payload.get("session_phase"),
+        "requested_instruments": preflight_payload.get("requested_instruments", []),
+        "working_instruments": preflight_payload.get("working_instruments", []),
+        "blocked_instruments": preflight_payload.get("blocked_instruments", []),
         "preflight": preflight_payload,
         "post_order_calls": post_order_calls,
         "cancel_order_calls": cancel_order_calls,
@@ -276,6 +326,7 @@ def parse_args() -> argparse.Namespace:
         default=True,
     )
     parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument("--no-preflight-cache", action="store_true")
     parser.add_argument("--max-instruments-per-stream-batch", type=int, default=4)
     parser.add_argument("--stream-batch-delay-seconds", type=float, default=2.0)
     parser.add_argument("--json-output", action="store_true")
@@ -354,6 +405,58 @@ async def _resolve_instruments_for_preflight(runtime: TradeCoreRuntime) -> str |
             runtime._session.close()
             runtime._session = None
     return None
+
+
+def _requested_instruments(raw: str) -> list[str]:
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def _apply_working_instruments(
+    runtime: TradeCoreRuntime,
+    preflight_payload: dict[str, object],
+) -> str | None:
+    working_raw = preflight_payload.get("working_instruments")
+    if not isinstance(working_raw, list):
+        return None
+    working_keys = {str(item).strip() for item in working_raw if str(item).strip()}
+    if not working_keys:
+        return "no_tradeable_instruments"
+    filtered = tuple(
+        instrument
+        for instrument in runtime.config.instruments
+        if _instrument_matches_working_key(instrument, working_keys)
+    )
+    if not filtered:
+        return "working_instruments_not_in_runtime_config"
+    runtime.config = replace(runtime.config, instruments=filtered)
+    preflight_payload["working_instruments"] = [
+        _instrument_key_for_payload(instrument) for instrument in filtered
+    ]
+    return None
+
+
+def _instrument_matches_working_key(
+    instrument: object,
+    working_keys: set[str],
+) -> bool:
+    return any(
+        value in working_keys
+        for value in (
+            getattr(instrument, "instrument_id", None),
+            getattr(instrument, "instrument_uid", None),
+            getattr(instrument, "figi", None),
+            getattr(instrument, "ticker", None),
+        )
+        if value
+    )
+
+
+def _instrument_key_for_payload(instrument: object) -> str:
+    for attr in ("instrument_id", "ticker", "instrument_uid", "figi"):
+        value = getattr(instrument, attr, None)
+        if value:
+            return str(value)
+    return "unknown"
 
 
 async def _shutdown_runtime(runtime: TradeCoreRuntime) -> str | None:

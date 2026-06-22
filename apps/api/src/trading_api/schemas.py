@@ -157,6 +157,18 @@ class SessionPreflightResponse(BaseModel):
     current_window_end_at: datetime | None = None
     reason_code: str
     source: str
+    schedule_source: str = "unknown"
+    status_source: str = "unknown"
+    schedule_error_code: str | None = None
+    schedule_error_message: str | None = None
+    status_error_count: int = 0
+    status_success_count: int = 0
+    fallback_used: bool = False
+    cache_hit: bool = False
+    cache_key: str | None = None
+    requested_instruments: list[str] = Field(default_factory=list)
+    working_instruments: list[str] = Field(default_factory=list)
+    blocked_instruments: list[JsonPayload] = Field(default_factory=list)
     instruments_checked: list[str]
     per_instrument_status: JsonPayload = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
