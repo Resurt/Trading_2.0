@@ -12,6 +12,9 @@ from urllib.request import Request, urlopen
 EXPECTED_ROUTES = (
     "/robot/status",
     "/dashboard/state",
+    "/dashboard/market-feed/status",
+    "/dashboard/market-feed/snapshot",
+    "/dashboard/market-feed/refresh",
     "/session/preflight",
     "/portfolio/summary",
     "/portfolio/refresh",

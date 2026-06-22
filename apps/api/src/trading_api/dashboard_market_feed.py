@@ -1,0 +1,1035 @@
+"""Readonly dashboard market feed independent from data-only collection."""
+
+from __future__ import annotations
+
+import asyncio
+import os
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, time, timedelta
+from decimal import Decimal
+from typing import Any
+
+from trade_core.session.moex_calendar import MSK
+from trading_api.market_quality import calculate_market_quality, calculate_spread_metrics
+from trading_api.schemas import MarketInstrumentOverview, MarketOverviewResponse
+
+GatewayFactory = Callable[[], Any]
+
+
+@dataclass(frozen=True, slots=True)
+class DashboardMarketFeedConfig:
+    """Runtime knobs for the readonly dashboard feed."""
+
+    enabled: bool = True
+    quote_refresh_seconds: float = 2.0
+    selected_book_refresh_seconds: float = 1.0
+    trades_refresh_seconds: float = 1.0
+    session_refresh_seconds: float = 5.0
+    max_instruments: int = 8
+
+    @classmethod
+    def from_env(cls) -> DashboardMarketFeedConfig:
+        return cls(
+            enabled=_env_bool("DASHBOARD_MARKET_FEED_ENABLED", True),
+            quote_refresh_seconds=_env_float("DASHBOARD_QUOTE_REFRESH_SECONDS", 2.0),
+            selected_book_refresh_seconds=_env_float(
+                "DASHBOARD_SELECTED_BOOK_REFRESH_SECONDS", 1.0
+            ),
+            trades_refresh_seconds=_env_float("DASHBOARD_TRADES_REFRESH_SECONDS", 1.0),
+            session_refresh_seconds=_env_float("DASHBOARD_SESSION_REFRESH_SECONDS", 5.0),
+            max_instruments=max(1, _env_int("DASHBOARD_FEED_MAX_INSTRUMENTS", 8)),
+        )
+
+
+@dataclass(slots=True)
+class DashboardMarketFeedService:
+    """Small in-memory BFF cache for operator display market data.
+
+    The service intentionally does not write market_microstructure_snapshot or any
+    trading entities. It only uses readonly broker unary calls and overlays those
+    values onto the local read-model returned by BffReadService.
+    """
+
+    config: DashboardMarketFeedConfig = field(default_factory=DashboardMarketFeedConfig.from_env)
+    _overview: MarketOverviewResponse | None = None
+    _selected_details: dict[str, MarketInstrumentOverview] = field(default_factory=dict)
+    _last_quote_refresh_at: datetime | None = None
+    _last_details_refresh_at: dict[str, datetime] = field(default_factory=dict)
+    _last_trades_refresh_at: dict[str, datetime] = field(default_factory=dict)
+    _last_status_refresh_at: dict[str, datetime] = field(default_factory=dict)
+    _running: bool = False
+    _selected_instrument: str | None = None
+    _errors: list[str] = field(default_factory=list)
+    _warnings: list[str] = field(default_factory=list)
+
+    def status(self) -> dict[str, object]:
+        overview = self._overview
+        selected = (
+            self._selected_details.get(self._selected_instrument or "")
+            if self._selected_instrument
+            else None
+        )
+        first_live = next(
+            (
+                row
+                for row in (overview.instruments if overview else [])
+                if row.official_exchange_open or row.quote_status == "live"
+            ),
+            None,
+        )
+        session_row = selected or first_live or (overview.instruments[0] if overview else None)
+        last_refresh = self._last_quote_refresh_at
+        if selected is not None:
+            refresh_values = [
+                _ensure_utc(value)
+                for value in (last_refresh, selected.order_book_ts)
+                if value is not None
+            ]
+            last_refresh = max(refresh_values, default=last_refresh)
+        market_open = bool(session_row.official_exchange_open) if session_row else False
+        session_type, session_phase = _clock_session_context(market_open=market_open)
+        if not market_open and session_row and session_row.session_type:
+            session_type = session_row.session_type
+        return {
+            "enabled": self.config.enabled,
+            "running": self._running,
+            "market_open": market_open,
+            "session_type": session_type if session_row else "unknown",
+            "session_phase": session_phase if session_row else "unknown",
+            "venue_type": session_row.venue_type if session_row else "unknown",
+            "last_refresh_at": last_refresh.isoformat() if last_refresh is not None else None,
+            "selected_instrument": self._selected_instrument,
+            "quote_rows_count": len(overview.instruments) if overview else 0,
+            "order_book_available": bool(
+                selected and selected.order_book_source and not selected.order_book_stale
+            ),
+            "trade_tape_available": bool(selected and selected.recent_market_trades),
+            "errors": list(self._errors[-5:]),
+            "warnings": list(self._warnings[-8:]),
+        }
+
+    async def snapshot(
+        self,
+        *,
+        base_overview: MarketOverviewResponse,
+        refs: Sequence[Any],
+        selected_instrument: str | None,
+        gateway_factory: GatewayFactory,
+        include_order_book: bool,
+        include_trades: bool,
+        force: bool = False,
+    ) -> dict[str, object]:
+        self._running = self.config.enabled
+        selected_id = _canonical_moex_instrument(selected_instrument or "MOEX:SBER")
+        self._selected_instrument = selected_id
+        overview = _limit_overview(base_overview, self.config.max_instruments)
+
+        if self.config.enabled:
+            overview = await self._refresh_quotes_if_needed(
+                overview=overview,
+                refs=refs,
+                gateway_factory=gateway_factory,
+                force=force,
+            )
+            if include_order_book or include_trades:
+                selected = await self._refresh_selected_if_needed(
+                    overview=overview,
+                    refs=refs,
+                    selected_instrument=selected_id,
+                    gateway_factory=gateway_factory,
+                    include_order_book=include_order_book,
+                    include_trades=include_trades,
+                    force=force,
+                )
+                if selected is not None:
+                    overview = _replace_instrument(overview, selected)
+        else:
+            self._record_warning("dashboard_market_feed_disabled")
+
+        self._overview = overview
+        selected_details = self._selected_details.get(selected_id) or next(
+            (row for row in overview.instruments if row.instrument_id == selected_id),
+            overview.instruments[0] if overview.instruments else None,
+        )
+        session_row = selected_details or (
+            overview.instruments[0] if overview.instruments else None
+        )
+        return {
+            "generated_at": datetime.now(tz=UTC).isoformat(),
+            "source": "dashboard_market_feed",
+            "data_only_collection_required": False,
+            "session": _session_payload(session_row),
+            "quote_rows": [row.model_dump(mode="json") for row in overview.instruments],
+            "market_overview": overview.model_dump(mode="json"),
+            "selected_instrument": selected_id,
+            "selected_details": (
+                selected_details.model_dump(mode="json") if selected_details is not None else None
+            ),
+            "errors": list(self._errors[-5:]),
+            "warnings": list(self._warnings[-8:]),
+            "status": self.status(),
+        }
+
+    async def _refresh_quotes_if_needed(
+        self,
+        *,
+        overview: MarketOverviewResponse,
+        refs: Sequence[Any],
+        gateway_factory: GatewayFactory,
+        force: bool,
+    ) -> MarketOverviewResponse:
+        now = datetime.now(tz=UTC)
+        if (
+            not force
+            and self._overview is not None
+            and self._last_quote_refresh_at is not None
+            and now - self._last_quote_refresh_at
+            < timedelta(seconds=self.config.quote_refresh_seconds)
+        ):
+            return _merge_overviews(overview, self._overview)
+
+        resolved_refs = _resolved_refs(refs, overview.instruments)
+        if not resolved_refs:
+            self._record_warning("dashboard_feed_no_resolved_instruments")
+            return _merge_overviews(overview, self._overview)
+        try:
+            from trade_core.broker_gateway import LastPricesRequest
+
+            gateway = gateway_factory()
+            timeout_seconds = _env_float("DASHBOARD_LAST_PRICES_TIMEOUT_SECONDS", 3.0)
+            response = await asyncio.wait_for(
+                gateway.get_last_prices(LastPricesRequest(instruments=tuple(resolved_refs))),
+                timeout=timeout_seconds,
+            )
+        except Exception as exc:
+            self._record_error(_reason_from_exception(exc, "dashboard_last_prices_unavailable"))
+            return _merge_overviews(overview, self._overview)
+
+        prices = _prices_by_instrument(response.data, resolved_refs)
+        self._clear_error("dashboard_last_prices_unavailable")
+        refreshed: list[MarketInstrumentOverview] = []
+        for instrument in overview.instruments:
+            price_payload = prices.get(instrument.instrument_id)
+            refreshed.append(_instrument_with_last_price(instrument, price_payload))
+        self._last_quote_refresh_at = now
+        return MarketOverviewResponse(generated_at=now, instruments=refreshed)
+
+    async def _refresh_selected_if_needed(
+        self,
+        *,
+        overview: MarketOverviewResponse,
+        refs: Sequence[Any],
+        selected_instrument: str,
+        gateway_factory: GatewayFactory,
+        include_order_book: bool,
+        include_trades: bool,
+        force: bool,
+    ) -> MarketInstrumentOverview | None:
+        now = datetime.now(tz=UTC)
+        selected = next(
+            (row for row in overview.instruments if row.instrument_id == selected_instrument),
+            None,
+        )
+        if selected is None:
+            return None
+        ref = next(
+            (
+                item
+                for item in refs
+                if _canonical_moex_instrument(str(getattr(item, "instrument_id", "")))
+                == selected_instrument
+            ),
+            None,
+        )
+        if ref is None or not (getattr(ref, "instrument_uid", None) or getattr(ref, "figi", None)):
+            self._record_warning("dashboard_feed_selected_instrument_unresolved")
+            return selected
+
+        last_details_at = self._last_details_refresh_at.get(selected_instrument)
+        last_trades_at = self._last_trades_refresh_at.get(selected_instrument)
+        last_status_at = self._last_status_refresh_at.get(selected_instrument)
+        should_refresh_status = (
+            force
+            or last_status_at is None
+            or now - last_status_at >= timedelta(seconds=self.config.session_refresh_seconds)
+        )
+        should_refresh_book = include_order_book and (
+            force
+            or last_details_at is None
+            or now - last_details_at
+            >= timedelta(seconds=self.config.selected_book_refresh_seconds)
+        )
+        should_refresh_trades = include_trades and (
+            force
+            or last_trades_at is None
+            or now - last_trades_at >= timedelta(seconds=self.config.trades_refresh_seconds)
+        )
+        cached = self._selected_details.get(selected_instrument)
+        current = _prefer_selected_details(selected, cached)
+        if not should_refresh_book and not should_refresh_trades:
+            return current
+
+        try:
+            gateway = gateway_factory()
+        except Exception as exc:
+            self._record_error(_reason_from_exception(exc, "dashboard_gateway_unavailable"))
+            return current
+
+        if should_refresh_status:
+            status_payload = await self._get_trading_status(
+                gateway=gateway,
+                ref=ref,
+                instrument=current,
+            )
+            self._last_status_refresh_at[selected_instrument] = now
+            if status_payload is not None:
+                current = current.model_copy(update=status_payload)
+
+        recent_trades: list[dict[str, object]] = current.recent_market_trades
+        if should_refresh_trades:
+            recent_trades = await self._get_last_trades(
+                gateway=gateway,
+                ref=ref,
+                instrument=current,
+            )
+            self._last_trades_refresh_at[selected_instrument] = now
+
+        if should_refresh_book:
+            payload = await self._get_order_book(
+                gateway=gateway,
+                ref=ref,
+                instrument=current,
+                recent_trades=recent_trades,
+            )
+            self._last_details_refresh_at[selected_instrument] = now
+            if payload is not None:
+                current = current.model_copy(update=payload)
+            elif recent_trades:
+                current = current.model_copy(
+                    update={
+                        "recent_market_trades": recent_trades,
+                        "market_trades_source": "tbank_get_last_trades",
+                        "market_trades_age_ms": _market_trades_age_ms(recent_trades),
+                    }
+                )
+        elif recent_trades:
+            current = current.model_copy(
+                update={
+                    "recent_market_trades": recent_trades,
+                    "market_trades_source": "tbank_get_last_trades",
+                    "market_trades_age_ms": _market_trades_age_ms(recent_trades),
+                }
+            )
+
+        if current.order_book_ts is not None:
+            age_ms = max(
+                0,
+                int((now - current.order_book_ts.astimezone(UTC)).total_seconds() * 1000),
+            )
+            if current.official_exchange_open and age_ms > 5_000:
+                current = current.model_copy(
+                    update={
+                        "order_book_age_ms": age_ms,
+                        "order_book_stale": True,
+                        "warning": "selected_order_book_stale",
+                    }
+                )
+                self._record_warning("selected_order_book_stale")
+        self._selected_details[selected_instrument] = current
+        return current
+
+    async def _get_trading_status(
+        self,
+        *,
+        gateway: Any,
+        ref: Any,
+        instrument: MarketInstrumentOverview,
+    ) -> dict[str, object] | None:
+        try:
+            from trade_core.broker_gateway import TradingStatusRequest
+
+            timeout_seconds = _env_float("DASHBOARD_TRADING_STATUS_TIMEOUT_SECONDS", 1.0)
+            response = await asyncio.wait_for(
+                gateway.get_trading_status(TradingStatusRequest(instrument=ref)),
+                timeout=timeout_seconds,
+            )
+        except AttributeError:
+            self._record_warning("dashboard_trading_status_not_implemented")
+            return None
+        except Exception as exc:
+            self._record_warning(
+                _reason_from_exception(exc, "dashboard_trading_status_unavailable")
+            )
+            return None
+        raw_status = str(
+            response.data.get("trading_status")
+            or response.data.get("status")
+            or instrument.broker_trading_status
+            or "unknown"
+        )
+        normalized_status = raw_status.lower().removeprefix("security_trading_status_")
+        api_trade_available = bool(
+            response.data.get(
+                "api_trade_available",
+                normalized_status
+                in {"normal", "normal_trading", "session_open", "trading", "open"},
+            )
+        )
+        market_open = (
+            api_trade_available
+            and _status_is_open(normalized_status)
+            and not instrument.official_exchange_closed
+        )
+        session_type, session_phase = _clock_session_context(market_open=market_open)
+        venue_type = (
+            "official_exchange"
+            if market_open
+            else "broker_otc"
+            if instrument.last_price is not None
+            else "unknown"
+        )
+        reason_code = (
+            "market_open"
+            if market_open
+            else "official_exchange_closed"
+            if instrument.official_exchange_closed
+            else "market_closed_expected"
+        )
+        self._clear_warning("dashboard_trading_status_unavailable")
+        return {
+            "session_type": session_type,
+            "official_exchange_open": market_open,
+            "official_exchange_closed": not market_open,
+            "venue_type": venue_type,
+            "trading_mode": (
+                "standard_exchange"
+                if market_open
+                else "broker_otc_only"
+                if instrument.official_exchange_closed and instrument.last_price is not None
+                else "exchange_closed"
+            ),
+            "broker_trading_status": normalized_status,
+            "api_trade_available": api_trade_available,
+            "quote_allowed_for_data_collection": market_open,
+            "reason_code": reason_code,
+            "quote_payload": {
+                **instrument.quote_payload,
+                "dashboard_trading_status_source": response.method_name,
+                "broker_trading_status": normalized_status,
+                "api_trade_available": api_trade_available,
+                "session_phase": session_phase,
+                "session_type": session_type,
+            },
+        }
+
+    async def _get_last_trades(
+        self,
+        *,
+        gateway: Any,
+        ref: Any,
+        instrument: MarketInstrumentOverview,
+    ) -> list[dict[str, object]]:
+        try:
+            from trade_core.broker_gateway import LastTradesRequest
+
+            to_ts = datetime.now(tz=UTC)
+            from_ts = to_ts - timedelta(
+                minutes=max(1, _env_int("DASHBOARD_TRADES_LOOKBACK_MINUTES", 30))
+            )
+            trade_source = "exchange" if instrument.official_exchange_open else "all"
+            timeout_seconds = _env_float("DASHBOARD_TRADES_TIMEOUT_SECONDS", 1.0)
+            response = await asyncio.wait_for(
+                gateway.get_last_trades(
+                    LastTradesRequest(
+                        instrument=ref,
+                        from_=from_ts,
+                        to=to_ts,
+                        trade_source=trade_source,
+                    )
+                ),
+                timeout=timeout_seconds,
+            )
+        except AttributeError:
+            self._record_warning("no_market_trades_feed_implemented")
+            return []
+        except Exception as exc:
+            self._record_warning(_reason_from_exception(exc, "no_market_trades_samples"))
+            return []
+        raw_trades = response.data.get("trades")
+        if not isinstance(raw_trades, list):
+            return []
+        limit = max(1, _env_int("DASHBOARD_TRADES_LIMIT", 20))
+        venue_type = "official_exchange" if instrument.official_exchange_open else "broker_otc"
+        source = (
+            "tbank_get_last_trades_exchange"
+            if instrument.official_exchange_open
+            else "tbank_get_last_trades_broker"
+        )
+        normalized: list[dict[str, object]] = []
+        for item in raw_trades[:limit]:
+            if isinstance(item, dict):
+                normalized.append(
+                    {
+                        **item,
+                        "instrument_id": instrument.instrument_id,
+                        "source": source,
+                        "venue_type": venue_type,
+                        "include_in_calibration": instrument.official_exchange_open,
+                    }
+                )
+        if not normalized:
+            self._record_warning("no_market_trades_samples")
+        return normalized
+
+    async def _get_order_book(
+        self,
+        *,
+        gateway: Any,
+        ref: Any,
+        instrument: MarketInstrumentOverview,
+        recent_trades: list[dict[str, object]],
+    ) -> dict[str, object] | None:
+        from trade_core.broker_gateway import OrderBookRequest
+
+        timeout_seconds = _env_float("DASHBOARD_ORDER_BOOK_TIMEOUT_SECONDS", 1.0)
+        response: Any | None = None
+        last_error: Exception | None = None
+        for attempt in range(2):
+            try:
+                response = await asyncio.wait_for(
+                    gateway.get_order_book(OrderBookRequest(instrument=ref, depth=10)),
+                    timeout=timeout_seconds,
+                )
+                break
+            except Exception as exc:
+                last_error = exc
+                if attempt == 0:
+                    await asyncio.sleep(0.2)
+        if response is None:
+            self._record_warning(
+                _reason_from_exception(
+                    last_error or RuntimeError("selected_order_book_unavailable"),
+                    "selected_order_book_unavailable",
+                )
+            )
+            return None
+        payload = _order_book_overview_payload(
+            response.data,
+            official_exchange_open=instrument.official_exchange_open,
+            official_exchange_closed=instrument.official_exchange_closed,
+            recent_market_trades=recent_trades,
+        )
+        if payload is None:
+            self._record_warning("no_order_book_samples")
+        else:
+            self._clear_warning("selected_order_book_unavailable")
+            self._clear_warning("selected_order_book_stale")
+            self._clear_warning("no_order_book_samples")
+        return payload
+
+    def _record_error(self, value: str) -> None:
+        self._errors = _bounded_unique([value, *self._errors], limit=5)
+
+    def _record_warning(self, value: str) -> None:
+        self._warnings = _bounded_unique([value, *self._warnings], limit=8)
+
+    def _clear_error(self, value: str) -> None:
+        self._errors = [item for item in self._errors if item != value]
+
+    def _clear_warning(self, value: str) -> None:
+        self._warnings = [item for item in self._warnings if item != value]
+
+
+def _instrument_with_last_price(
+    instrument: MarketInstrumentOverview,
+    payload: dict[str, object] | None,
+) -> MarketInstrumentOverview:
+    if payload is None:
+        return instrument
+    price = _decimal_or_none(payload.get("price"))
+    if price is None:
+        return instrument
+    now = datetime.now(tz=UTC)
+    exchange_ts = _datetime_or_none(payload.get("exchange_ts")) or now
+    quote_source = (
+        "live_exchange_last_price"
+        if instrument.official_exchange_open
+        else "broker_quote_exchange_closed"
+        if instrument.official_exchange_closed
+        else "broker_indicative_quote"
+    )
+    venue_type = (
+        "official_exchange"
+        if instrument.official_exchange_open
+        else "broker_otc"
+        if instrument.official_exchange_closed
+        else "broker_indicative"
+    )
+    session_type = (
+        _clock_session_context(market_open=True)[0]
+        if instrument.official_exchange_open
+        else instrument.session_type
+    )
+    trading_mode = (
+        "standard_exchange"
+        if instrument.official_exchange_open
+        else instrument.trading_mode
+    )
+    return instrument.model_copy(
+        update={
+            "session_type": session_type,
+            "trading_mode": trading_mode,
+            "last_price": price,
+            "last_price_at": exchange_ts,
+            "last_price_ts": exchange_ts,
+            "last_price_source": quote_source,
+            "quote_source": quote_source,
+            "venue_type": venue_type,
+            "quote_allowed_for_display": True,
+            "quote_allowed_for_data_collection": instrument.official_exchange_open,
+            "quote_status": "live" if instrument.official_exchange_open else "broker_quote",
+            "is_price_stale": False,
+            "price_staleness_seconds": 0,
+            "warning": (
+                "broker_quote_not_for_calibration"
+                if instrument.official_exchange_closed
+                else instrument.warning
+            ),
+            "quote_payload": {
+                **instrument.quote_payload,
+                "source": quote_source,
+                "quote_source": quote_source,
+                "venue_type": venue_type,
+                "dashboard_live_feed": True,
+                "include_in_calibration": instrument.official_exchange_open,
+                "quote_allowed_for_display": True,
+                "quote_allowed_for_data_collection": instrument.official_exchange_open,
+            },
+        }
+    )
+
+
+def _order_book_overview_payload(
+    payload: dict[str, object],
+    *,
+    official_exchange_open: bool,
+    official_exchange_closed: bool,
+    recent_market_trades: list[dict[str, object]] | None,
+) -> dict[str, object] | None:
+    bids = _price_levels(payload.get("bids"), reverse=True)
+    asks = _price_levels(payload.get("asks"), reverse=False)
+    if not bids or not asks:
+        return None
+    now = datetime.now(tz=UTC)
+    exchange_ts = _datetime_or_none(payload.get("exchange_ts"))
+    best_bid_price, best_bid_qty = bids[0]
+    best_ask_price, best_ask_qty = asks[0]
+    bid_depth = sum((qty for _, qty in bids[:5]), Decimal("0"))
+    ask_depth = sum((qty for _, qty in asks[:5]), Decimal("0"))
+    spread_metrics = calculate_spread_metrics(best_bid_price, best_ask_price)
+    if spread_metrics.mid_price is None:
+        return None
+    depth_total = bid_depth + ask_depth
+    imbalance = None if depth_total == 0 else (bid_depth - ask_depth) / depth_total
+    venue_type = (
+        "official_exchange"
+        if official_exchange_open
+        else "broker_otc"
+        if official_exchange_closed
+        else "broker_indicative"
+    )
+    quote_source = (
+        "live_order_book_mid"
+        if official_exchange_open
+        else "broker_quote_exchange_closed"
+        if official_exchange_closed
+        else "broker_indicative_quote"
+    )
+    trades = recent_market_trades or []
+    quality_components = calculate_market_quality(
+        spread_bps=spread_metrics.spread_bps,
+        bid_depth_lots=bid_depth,
+        ask_depth_lots=ask_depth,
+        best_bid_qty_lots=best_bid_qty,
+        best_ask_qty_lots=best_ask_qty,
+        book_imbalance=imbalance,
+        order_book_age_ms=0,
+        order_book_stale=False,
+        venue_type=venue_type,
+        official_exchange_open=official_exchange_open,
+        trades_count=len(trades),
+    )
+    return {
+        "venue_type": venue_type,
+        "trading_mode": (
+            "standard_exchange"
+            if official_exchange_open
+            else "broker_otc_only"
+            if official_exchange_closed
+            else "indicative_only"
+        ),
+        "quote_source": quote_source,
+        "quote_allowed_for_data_collection": official_exchange_open,
+        "quote_allowed_for_display": True,
+        "last_price": spread_metrics.mid_price,
+        "last_price_at": now,
+        "last_price_ts": now,
+        "last_price_source": quote_source,
+        "is_price_stale": False,
+        "price_staleness_seconds": 0,
+        "quote_status": "live" if official_exchange_open else "broker_quote",
+        "spread": spread_metrics.spread_abs,
+        "spread_abs": spread_metrics.spread_abs,
+        "spread_bps": spread_metrics.spread_bps,
+        "spread_abs_rub": spread_metrics.spread_abs,
+        "mid_price": spread_metrics.mid_price,
+        "market_quality": quality_components.get("display_market_quality_score"),
+        "market_quality_score": quality_components.get("display_market_quality_score"),
+        "display_market_quality_score": quality_components.get("display_market_quality_score"),
+        "calibration_market_quality_score": quality_components.get(
+            "calibration_market_quality_score"
+        ),
+        "market_quality_label": quality_components.get("market_quality_label", "unknown"),
+        "market_quality_components": quality_components,
+        "best_bid": best_bid_price,
+        "best_ask": best_ask_price,
+        "bid_depth_lots": bid_depth,
+        "ask_depth_lots": ask_depth,
+        "book_imbalance": imbalance,
+        "order_book_source": quote_source,
+        "order_book_ts": now,
+        "order_book_age_ms": 0,
+        "order_book_stale": False,
+        "recent_market_trades": trades,
+        "market_trades_source": "tbank_get_last_trades" if trades else "no_market_trades_samples",
+        "market_trades_age_ms": _market_trades_age_ms(trades),
+        "warning": "broker_quote_not_for_calibration" if official_exchange_closed else None,
+        "order_book_summary": {
+            "source": quote_source,
+            "venue_type": venue_type,
+            "quote_allowed_for_data_collection": official_exchange_open,
+            "include_in_calibration": official_exchange_open,
+            "depth_levels": len(bids) + len(asks),
+            "bids": [
+                {"price": str(price), "quantity_lots": str(quantity)}
+                for price, quantity in bids[:20]
+            ],
+            "asks": [
+                {"price": str(price), "quantity_lots": str(quantity)}
+                for price, quantity in asks[:20]
+            ],
+            "best_bid_qty_lots": str(best_bid_qty),
+            "best_ask_qty_lots": str(best_ask_qty),
+            "bid_depth_lots": str(bid_depth),
+            "ask_depth_lots": str(ask_depth),
+            "book_imbalance": str(imbalance) if imbalance is not None else None,
+            "spread_abs_rub": str(spread_metrics.spread_abs),
+            "spread_bps": str(spread_metrics.spread_bps),
+            "market_quality_components": quality_components,
+            "exchange_ts": exchange_ts.isoformat() if exchange_ts is not None else None,
+            "received_ts": now.isoformat(),
+            "age_seconds": 0,
+            "is_stale": False,
+        },
+        "quote_payload": {
+            "source": quote_source,
+            "quote_source": quote_source,
+            "venue_type": venue_type,
+            "dashboard_live_feed": True,
+            "include_in_calibration": official_exchange_open,
+            "order_book_stale": False,
+            "market_quality_components": quality_components,
+        },
+    }
+
+
+def _prices_by_instrument(
+    data: dict[str, object],
+    refs: Sequence[Any],
+) -> dict[str, dict[str, object]]:
+    ref_by_broker_id: dict[str, str] = {}
+    for ref in refs:
+        instrument_id = str(getattr(ref, "instrument_id", "") or "")
+        for key in (getattr(ref, "instrument_uid", None), getattr(ref, "figi", None)):
+            if key:
+                ref_by_broker_id[str(key)] = instrument_id
+    prices: dict[str, dict[str, object]] = {}
+    raw_prices = data.get("prices")
+    if not isinstance(raw_prices, list):
+        return prices
+    for item in raw_prices:
+        if not isinstance(item, dict):
+            continue
+        broker_key = str(
+            item.get("instrument_uid")
+            or item.get("figi")
+            or item.get("instrument_id")
+            or ""
+        )
+        target = ref_by_broker_id.get(broker_key)
+        if target:
+            prices[target] = item
+    return prices
+
+
+def _resolved_refs(
+    refs: Sequence[Any],
+    instruments: Sequence[MarketInstrumentOverview],
+) -> list[Any]:
+    allowed = {item.instrument_id for item in instruments}
+    return [
+        ref
+        for ref in refs
+        if str(getattr(ref, "instrument_id", "")) in allowed
+        and (getattr(ref, "instrument_uid", None) or getattr(ref, "figi", None))
+    ]
+
+
+def _merge_overviews(
+    base: MarketOverviewResponse,
+    cached: MarketOverviewResponse | None,
+) -> MarketOverviewResponse:
+    if cached is None:
+        return base
+    cached_by_id = {row.instrument_id: row for row in cached.instruments}
+    rows = [
+        _prefer_live_row(row, cached_by_id.get(row.instrument_id))
+        for row in base.instruments
+    ]
+    return MarketOverviewResponse(
+        generated_at=max(base.generated_at, cached.generated_at),
+        instruments=rows,
+    )
+
+
+def _prefer_live_row(
+    base: MarketInstrumentOverview,
+    cached: MarketInstrumentOverview | None,
+) -> MarketInstrumentOverview:
+    if cached is None:
+        return base
+    cached_priority = _source_priority(cached.last_price_source)
+    base_priority = _source_priority(base.last_price_source)
+    if cached.last_price is not None and cached_priority >= base_priority:
+        return base.model_copy(
+            update=cached.model_dump(
+                exclude={
+                    "instrument_id",
+                    "ticker",
+                    "class_code",
+                    "board",
+                    "exchange",
+                    "session_type",
+                    "broker_trading_status",
+                    "api_trade_available",
+                }
+            )
+        )
+    return base
+
+
+def _prefer_selected_details(
+    base: MarketInstrumentOverview,
+    cached: MarketInstrumentOverview | None,
+) -> MarketInstrumentOverview:
+    if cached is None:
+        return base
+    return _prefer_live_row(base, cached)
+
+
+def _replace_instrument(
+    overview: MarketOverviewResponse,
+    instrument: MarketInstrumentOverview,
+) -> MarketOverviewResponse:
+    return overview.model_copy(
+        update={
+            "generated_at": datetime.now(tz=UTC),
+            "instruments": [
+                instrument if row.instrument_id == instrument.instrument_id else row
+                for row in overview.instruments
+            ],
+        }
+    )
+
+
+def _limit_overview(
+    overview: MarketOverviewResponse,
+    max_instruments: int,
+) -> MarketOverviewResponse:
+    if len(overview.instruments) <= max_instruments:
+        return overview
+    return overview.model_copy(update={"instruments": overview.instruments[:max_instruments]})
+
+
+def _source_priority(source: str | None) -> int:
+    if source in {"live_order_book_mid", "live_exchange_order_book"}:
+        return 6
+    if source == "live_exchange_last_price":
+        return 5
+    if source in {"broker_quote_exchange_closed", "broker_otc_order_book"}:
+        return 4
+    if source in {"broker_indicative_quote", "tbank_last_price"}:
+        return 3
+    if source == "latest_market_candle_close":
+        return 1
+    return 0
+
+
+def _session_payload(instrument: MarketInstrumentOverview | None) -> dict[str, object]:
+    if instrument is None:
+        return {
+            "market_open": False,
+            "session_type": "unknown",
+            "session_phase": "unknown",
+            "venue_type": "unknown",
+            "data_only_collection_allowed": False,
+            "reason_code": "instrument_unavailable",
+            "next_session_at": None,
+        }
+    reason = instrument.reason_code
+    if instrument.official_exchange_open and reason in {"no_price_source_available", None}:
+        reason = "market_open"
+    session_type, session_phase = _clock_session_context(
+        market_open=instrument.official_exchange_open
+    )
+    if not instrument.official_exchange_open and instrument.session_type:
+        session_type = instrument.session_type
+    return {
+        "market_open": instrument.official_exchange_open,
+        "session_type": session_type,
+        "session_phase": session_phase,
+        "venue_type": instrument.venue_type,
+        "data_only_collection_allowed": instrument.quote_allowed_for_data_collection,
+        "reason_code": reason,
+        "next_session_at": None,
+    }
+
+
+def _clock_session_context(*, market_open: bool) -> tuple[str, str]:
+    now_msk = datetime.now(tz=UTC).astimezone(MSK)
+    if market_open:
+        return _clock_open_session_type(now_msk), "continuous_trading"
+    if now_msk.weekday() >= 5:
+        return "weekend", "closed"
+    return _clock_open_session_type(now_msk), "closed"
+
+
+def _clock_open_session_type(now_msk: datetime) -> str:
+    if now_msk.weekday() >= 5:
+        return "weekend"
+    current_time = now_msk.time()
+    if time(7, 0) <= current_time < time(10, 0):
+        return "weekday_morning"
+    if time(10, 0) <= current_time < time(19, 0):
+        return "weekday_main"
+    return "weekday_evening"
+
+
+def _status_is_open(value: str) -> bool:
+    return value in {"normal", "normal_trading", "session_open", "trading", "open"}
+
+
+def _price_levels(value: object, *, reverse: bool) -> list[tuple[Decimal, Decimal]]:
+    if not isinstance(value, list):
+        return []
+    levels: list[tuple[Decimal, Decimal]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        price = _decimal_or_none(item.get("price"))
+        qty = _decimal_or_none(item.get("quantity_lots") or item.get("quantity"))
+        if price is not None and qty is not None:
+            levels.append((price, qty))
+    return sorted(levels, key=lambda item: item[0], reverse=reverse)
+
+
+def _market_trades_age_ms(trades: Sequence[dict[str, object]]) -> int | None:
+    newest: datetime | None = None
+    for trade in trades:
+        ts = _datetime_or_none(
+            trade.get("exchange_ts")
+            or trade.get("ts_utc")
+            or trade.get("time")
+            or trade.get("ts")
+        )
+        if ts is not None and (newest is None or ts > newest):
+            newest = ts
+    if newest is None:
+        return None
+    return max(0, int((datetime.now(tz=UTC) - newest).total_seconds() * 1000))
+
+
+def _decimal_or_none(value: object) -> Decimal | None:
+    if value is None:
+        return None
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return None
+
+
+def _datetime_or_none(value: object) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _ensure_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _canonical_moex_instrument(value: str) -> str:
+    stripped = value.strip().upper()
+    if not stripped:
+        return "MOEX:SBER"
+    if ":" in stripped:
+        return stripped
+    return f"MOEX:{stripped}"
+
+
+def _bounded_unique(values: list[str], *, limit: int) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        if value and value not in result:
+            result.append(value)
+    return result[:limit]
+
+
+def _reason_from_exception(exc: Exception, default: str) -> str:
+    text = str(exc).strip()
+    if text and " " not in text and len(text) <= 96:
+        return text
+    return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return max(0.1, float(os.getenv(name, str(default))))
+    except ValueError:
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+__all__ = ["DashboardMarketFeedConfig", "DashboardMarketFeedService"]

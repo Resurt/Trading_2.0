@@ -72,6 +72,11 @@ async function bootstrapDashboard(): Promise<void> {
     if (snapshot.data?.market) {
       market.applyOverview(snapshot.data.market);
     }
+    void market.fetchDashboardFeedSnapshot({
+      silent: true,
+      includeOrderBook: false,
+      includeTrades: false,
+    });
     void market.refreshSelectedInstrumentDetails();
     portfolio.applySnapshot({
       positions: snapshot.data?.positions,
@@ -80,7 +85,7 @@ async function bootstrapDashboard(): Promise<void> {
   } catch {
     await Promise.allSettled([
       robot.fetchInitialSnapshot(),
-      market.fetchOverview({ silent: true }),
+      market.fetchDashboardFeedSnapshot({ silent: true }),
       market.refreshSelectedInstrumentDetails(),
       portfolio.fetchSnapshot(),
     ]);
@@ -94,12 +99,12 @@ onMounted(() => {
   void market.connectMarketSocket();
   void portfolio.connectOrdersSocket();
   robot.startBalancePolling();
-  market.startMarketPolling();
+  market.startDashboardFeed();
 });
 
 onUnmounted(() => {
   robot.stopBalancePolling();
-  market.stopMarketPolling();
+  market.stopDashboardFeed();
 });
 </script>
 

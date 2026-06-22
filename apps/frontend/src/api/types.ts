@@ -206,6 +206,46 @@ export interface MarketOverviewResponse {
   instruments: MarketInstrumentOverview[];
 }
 
+export interface DashboardMarketFeedSession {
+  market_open: boolean;
+  session_type: string | null;
+  session_phase: string | null;
+  venue_type: string | null;
+  data_only_collection_allowed: boolean;
+  reason_code: string | null;
+  next_session_at: string | null;
+}
+
+export interface DashboardMarketFeedStatus {
+  enabled: boolean;
+  running: boolean;
+  market_open: boolean;
+  session_type: string | null;
+  session_phase: string | null;
+  venue_type: string | null;
+  last_refresh_at: string | null;
+  selected_instrument: string | null;
+  quote_rows_count: number;
+  order_book_available: boolean;
+  trade_tape_available: boolean;
+  errors: string[];
+  warnings: string[];
+}
+
+export interface DashboardMarketFeedSnapshot {
+  generated_at: string;
+  source: string;
+  data_only_collection_required: boolean;
+  session: DashboardMarketFeedSession;
+  quote_rows: MarketInstrumentOverview[];
+  market_overview: MarketOverviewResponse;
+  selected_instrument: string;
+  selected_details: MarketInstrumentOverview | null;
+  errors: string[];
+  warnings: string[];
+  status: DashboardMarketFeedStatus;
+}
+
 export interface MarketMicrostructureSnapshotResponse {
   snapshot_id: string;
   ts_utc: string;

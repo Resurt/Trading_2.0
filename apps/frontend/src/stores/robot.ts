@@ -255,7 +255,7 @@ export const useRobotStore = defineStore("robot", () => {
       commandPhase.value = "start_command";
       setCommandState({
         status: "start_requesting",
-        message: "Запускаем data-only сбор. Торговля отключена, заявки не выставляются.",
+        message: "Запускаем запись data-only логов. Торговля отключена, заявки не выставляются.",
         reasonCode: "data_only_start_requested",
       });
       const response = await apiClient.startRobot({
@@ -422,7 +422,7 @@ export const useRobotStore = defineStore("robot", () => {
       return response.message || "Команда отклонена preflight.";
     }
     if (response.command === "start" && response.status === "requested") {
-      return "Команда Start отправлена в trade-core. Data-only режим активируется без торговли и без заявок.";
+      return "Запись Data-only логов запрошена. Dashboard live feed уже работает отдельно, торговля отключена.";
     }
     if (response.command === "stop" && response.status === "requested") {
       return "Команда Stop отправлена в trade-core. Collector должен перейти в controlled stop.";

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import os
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -218,7 +219,45 @@ class FakeQuoteGateway:
         )
 
 
+class FakeDashboardFeedGateway(FakeQuoteGateway):
+    async def get_last_prices(
+        self,
+        request: object,
+        metadata: object = None,
+    ) -> BrokerUnaryResponse:
+        del request, metadata
+        return BrokerUnaryResponse(
+            method_name="GetLastPrices",
+            data={
+                "prices": [
+                    {
+                        "instrument_uid": "uid-sber",
+                        "figi": "figi-sber",
+                        "price": "313.21",
+                        "exchange_ts": "2026-06-21T10:00:01+00:00",
+                    }
+                ]
+            },
+        )
+
+    async def get_trading_status(
+        self,
+        request: object,
+        metadata: object = None,
+    ) -> BrokerUnaryResponse:
+        del request, metadata
+        return BrokerUnaryResponse(
+            method_name="GetTradingStatus",
+            data={
+                "trading_status": "normal_trading",
+                "status": "normal_trading",
+                "api_trade_available": True,
+            },
+        )
+
+
 def make_client(tmp_path: Path) -> TestClient:
+    os.environ.setdefault("DASHBOARD_MARKET_FEED_ENABLED", "false")
     database = DatabaseService(f"sqlite+pysqlite:///{tmp_path / 'api-bff.db'}")
     Base.metadata.create_all(database.engine)
     seed_database(database)
@@ -852,7 +891,7 @@ def test_market_overview_uses_latest_candle_when_order_book_missing(tmp_path: Pa
     assert market["instruments"][0]["market_quality_label"] == "no_order_book_samples"
 
 
-def test_market_overview_is_local_read_model_not_broker_call(
+def test_market_overview_falls_back_when_dashboard_feed_gateway_unavailable(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -861,15 +900,21 @@ def test_market_overview_is_local_read_model_not_broker_call(
     class FailingGateway:
         def __init__(self, *args: object, **kwargs: object) -> None:
             del args, kwargs
-            raise AssertionError("GET /market/overview must not construct broker gateway")
+            raise RuntimeError("readonly gateway unavailable")
 
+    monkeypatch.setenv("DASHBOARD_MARKET_FEED_ENABLED", "true")
     monkeypatch.setattr(tbank_module, "TBankBrokerGateway", FailingGateway)
     client = make_client(tmp_path)
 
     market = client.get("/market/overview").json()
+    feed_status = client.get(
+        "/dashboard/market-feed/status",
+        headers={"X-API-Role": "observer"},
+    ).json()
 
     assert len(market["instruments"]) == 8
     assert {row["instrument_id"] for row in market["instruments"]} >= {"MOEX:SBER", "MOEX:GAZP"}
+    assert "dashboard_gateway_unavailable" in feed_status["errors"] or feed_status["errors"]
 
 
 def test_market_overview_filter_and_selected_details_endpoint(tmp_path: Path) -> None:
@@ -886,6 +931,126 @@ def test_market_overview_filter_and_selected_details_endpoint(tmp_path: Path) ->
     assert details["instrument_id"] == "MOEX:SBER"
     assert details["order_book_summary"]["bids"][0]["price"] == "100"
     assert details["recent_market_trades"][0]["price"] == "100.04"
+
+
+def test_dashboard_market_feed_snapshot_does_not_require_collector_or_write_db(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app_module = importlib.import_module("trading_api.app")
+    from sqlalchemy import text
+
+    monkeypatch.setenv("DASHBOARD_MARKET_FEED_ENABLED", "true")
+    force_exchange_closed(monkeypatch)
+    monkeypatch.setattr(app_module, "_readonly_tbank_gateway", lambda: FakeDashboardFeedGateway())
+    database = DatabaseService(f"sqlite+pysqlite:///{tmp_path / 'dashboard-feed.db'}")
+    Base.metadata.create_all(database.engine)
+    seed_database(database)
+    app = create_fastapi_app(database=database, report_task_client=FakeReportTaskClient())
+    client = TestClient(app)
+
+    tables = (
+        "market_microstructure_snapshot",
+        "signal_candidate",
+        "order_intent",
+        "broker_order",
+    )
+    with database.session_scope() as session:
+        before = {
+            table: session.execute(text(f"select count(*) from {table}")).scalar()
+            for table in tables
+        }
+    snapshot = client.get(
+        "/dashboard/market-feed/snapshot",
+        headers={"X-API-Role": "observer"},
+        params={
+            "selected_instrument": "MOEX:SBER",
+            "include_order_book": True,
+            "include_trades": True,
+        },
+    ).json()
+    with database.session_scope() as session:
+        after = {
+            table: session.execute(text(f"select count(*) from {table}")).scalar()
+            for table in tables
+        }
+
+    assert snapshot["data_only_collection_required"] is False
+    assert len(snapshot["quote_rows"]) == 8
+    assert snapshot["session"]["market_open"] is False
+    assert snapshot["selected_details"]["instrument_id"] == "MOEX:SBER"
+    assert snapshot["selected_details"]["order_book_source"] == "broker_quote_exchange_closed"
+    assert snapshot["selected_details"]["recent_market_trades"][0]["price"] == "313.20"
+    assert before == after
+
+
+def test_dashboard_market_feed_normalizes_live_session_label_from_broker_status(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app_module = importlib.import_module("trading_api.app")
+    feed_module = importlib.import_module("trading_api.dashboard_market_feed")
+    from sqlalchemy import text
+
+    monkeypatch.setenv("DASHBOARD_MARKET_FEED_ENABLED", "true")
+    monkeypatch.setattr(app_module, "_readonly_tbank_gateway", lambda: FakeDashboardFeedGateway())
+    monkeypatch.setattr(
+        feed_module,
+        "_clock_session_context",
+        lambda *, market_open: (
+            "weekday_evening",
+            "continuous_trading" if market_open else "closed",
+        ),
+    )
+    database = DatabaseService(f"sqlite+pysqlite:///{tmp_path / 'dashboard-feed-live.db'}")
+    Base.metadata.create_all(database.engine)
+    seed_database(database)
+    with database.session_scope() as session:
+        session.execute(
+            text(
+                "update session_run "
+                "set session_type = 'weekend', session_phase = 'continuous_trading'"
+            )
+        )
+    app = create_fastapi_app(database=database, report_task_client=FakeReportTaskClient())
+    client = TestClient(app)
+
+    snapshot = client.get(
+        "/dashboard/market-feed/snapshot",
+        headers={"X-API-Role": "observer"},
+        params={
+            "selected_instrument": "MOEX:SBER",
+            "include_order_book": True,
+            "include_trades": False,
+        },
+    ).json()
+
+    assert snapshot["session"]["market_open"] is True
+    assert snapshot["session"]["session_type"] != "weekend"
+    assert snapshot["session"]["session_phase"] == "continuous_trading"
+    assert snapshot["selected_details"]["broker_trading_status"] == "normal_trading"
+    assert snapshot["selected_details"]["order_book_source"] == "live_order_book_mid"
+
+
+def test_market_overview_uses_dashboard_feed_without_heavy_order_books(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app_module = importlib.import_module("trading_api.app")
+
+    monkeypatch.setenv("DASHBOARD_MARKET_FEED_ENABLED", "true")
+    force_exchange_closed(monkeypatch)
+    monkeypatch.setattr(app_module, "_readonly_tbank_gateway", lambda: FakeDashboardFeedGateway())
+    client = make_client(tmp_path)
+
+    market = client.get("/market/overview").json()
+    sber = next(row for row in market["instruments"] if row["instrument_id"] == "MOEX:SBER")
+
+    assert len(market["instruments"]) == 8
+    assert sber["last_price"] == "313.21"
+    assert sber["last_price_source"] == "broker_quote_exchange_closed"
+    assert sber["order_book_summary"].get("bids") is None
+    assert sber["quote_payload"]["dashboard_live_feed"] is True
 
 
 def test_market_quotes_refresh_falls_back_when_broker_gateway_unavailable(
@@ -1260,6 +1425,9 @@ def test_reports_config_and_openapi(tmp_path: Path) -> None:
     assert updated["version"] == 2
     paths = client.get("/openapi.json").json()["paths"]
     assert "/robot/status" in paths
+    assert "/dashboard/market-feed/status" in paths
+    assert "/dashboard/market-feed/snapshot" in paths
+    assert "/dashboard/market-feed/refresh" in paths
     assert "/market/instruments/{instrument_id}/details" in paths
     assert "/reports/daily/run" in paths
     assert "/analytics/blockers" in paths

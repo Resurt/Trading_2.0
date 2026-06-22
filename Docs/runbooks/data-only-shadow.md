@@ -233,24 +233,33 @@ the masked account id. The manual CLI remains useful for morning preflight and t
 ## Dashboard quotes
 
 The Live Dashboard must show the core universe prices even when live collection is not
-running. `GET /market/overview` is a fast local read-model endpoint and must return one
-row per core universe instrument without calling the broker. It uses fresh
-`order_book_summary` mid when available, then stored `market_candle`/previous-close
-fallbacks, and exposes `last_price_source`, `quote_status`, `is_price_stale` and
-timestamp.
+running. This is not data-only collection. Dashboard display uses
+`DashboardMarketFeedService` through `/dashboard/market-feed/snapshot` and
+`/dashboard/market-feed/status`; Start is only for persistent logging.
 
-Readonly broker quote refresh is explicit: `POST /market/quotes/refresh` may call
-T-Invest `GetLastPrices`/`GetOrderBook` with bounded timeouts. Temporary request
-failures must not clear already displayed frontend quotes. Successful readonly quote
-refresh rows are cached briefly by the API and overlaid into subsequent
-`GET /market/overview` responses so a page reload does not fall back to stale candle
-rows immediately after a live broker refresh.
+Dashboard Live Feed may call readonly T-Invest methods (`GetLastPrices`,
+`GetOrderBook`, `GetTradingStatus`, last trades/status display) with bounded timeouts.
+It must not write
+`market_microstructure_snapshot` calibration logs, create trading entities, or call
+`PostOrder`/`CancelOrder`. `GET /market/overview` is the cheap BFF read-model backed
+by that feed cache first, then stored `order_book_summary`, `market_candle` and
+previous-close fallbacks. It must return one row per core universe instrument and
+expose `last_price_source`, `quote_status`, `is_price_stale` and timestamp.
+
+Readonly broker quote refresh remains explicit for diagnostics:
+`POST /market/quotes/refresh` may call T-Invest `GetLastPrices`/`GetOrderBook` with
+bounded timeouts. Temporary request failures must not clear already displayed
+frontend quotes. Successful readonly quote/feed rows are cached briefly by the API
+and overlaid into subsequent `GET /market/overview` responses so a page reload does
+not fall back to stale candle rows immediately after a live broker refresh.
 
 Operator dashboard polling while open:
 
-- `/market/overview` and `/runtime/data-shadow/status`: every 5 seconds;
-- `/market/instruments/{instrument_id}/details`: selected instrument only, every
-  2 seconds while market/collector is active and every 8 seconds while idle;
+- `/dashboard/market-feed/snapshot` quote board: every 2 seconds;
+- `/dashboard/market-feed/snapshot` selected instrument details: every 1 second while
+  dashboard feed sees `market_open=true`, otherwise every 5 seconds;
+- selected broker trading status inside the dashboard feed: every 5 seconds;
+- `/runtime/data-shadow/status`: every 2-5 seconds;
 - `/market/quotes/refresh`: explicit readonly diagnostic/operator action, not an
   all-instruments dashboard mount poll;
 - `/portfolio/refresh`: every 60 seconds.

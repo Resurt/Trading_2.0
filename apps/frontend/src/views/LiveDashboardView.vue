@@ -157,6 +157,12 @@ function reasonLabel(reason: string | null | undefined): string {
     broker_quote_not_for_calibration: "брокерская котировка только для отображения",
     stale_order_book: "стакан устарел",
     no_order_book_samples: "нет samples стакана",
+    no_market_trades_feed_implemented: "market trades feed ещё не реализован",
+    dashboard_market_feed_unavailable: "dashboard live feed временно недоступен",
+    dashboard_last_prices_unavailable: "last prices временно недоступны",
+    dashboard_gateway_unavailable: "readonly broker gateway недоступен",
+    selected_order_book_unavailable: "стакан выбранного инструмента недоступен",
+    selected_order_book_stale: "стакан выбранного инструмента устарел",
     empty_market_ws_snapshot: "пустой market WS snapshot проигнорирован",
     selected_instrument_details_unavailable: "details выбранного инструмента недоступны",
     data_shadow_status_unavailable: "статус data-only временно недоступен",
@@ -207,13 +213,16 @@ function dashboardStatusText(): string {
 
 function marketStatusText(): string {
   if (market.loading) {
-    return "Обновляю локальный market read-model. Медленный брокерский refresh не блокирует экран.";
+    return "Обновляю dashboard live feed. Уже полученные котировки и стакан остаются на экране.";
   }
   if (market.error) {
     return operatorError(market.error);
   }
   if (!market.quoteRows.length) {
     return "Жду строки core universe. Если цены нет, строка всё равно должна показать причину.";
+  }
+  if (market.dashboardFeedStatus.running && !market.feedErrors.length) {
+    return "Рынок отображается через readonly dashboard feed. Start нужен только для записи data-only логов.";
   }
   return "Котировки загружены. Stale и source показываются явно, старые цены не помечаются live.";
 }
@@ -264,16 +273,22 @@ function blockedCash(): string {
 }
 
 function sessionDetail(): string {
-  const preflight = robot.lastSessionPreflight;
   const date = robot.session.trading_date ?? robot.session.calendar_date ?? "нет даты";
-  const marketOpen = market.dataShadowStatus.market_open;
-  const openLabel = marketOpen === null ? "проверяю календарь" : marketOpen ? "рынок открыт" : "рынок закрыт";
-  const reason = market.dataShadowStatus.reason_code ?? robot.lastCommandReasonCode;
+  const marketOpen = market.dashboardFeedStatus.market_open;
+  const openLabel = marketOpen ? "рынок открыт" : "рынок закрыт или уточняется";
+  const reason =
+    selectedInstrument.value?.reason_code ??
+    market.dashboardFeedStatus.warnings[0] ??
+    market.dataShadowStatus.reason_code ??
+    robot.lastCommandReasonCode;
   return `${date} · ${openLabel}${reason ? ` · ${reasonLabel(reason)}` : ""}`;
 }
 
 function venueStatusValue(): string {
   const preflight = robot.lastSessionPreflight;
+  if (market.dashboardFeedStatus.venue_type && market.dashboardFeedStatus.venue_type !== "unknown") {
+    return venueLabel(market.dashboardFeedStatus.venue_type);
+  }
   if (
     preflight?.venue_type === "official_exchange" ||
     preflight?.official_exchange_open ||
@@ -294,7 +309,11 @@ function venueStatusValue(): string {
   ) {
     return "Индикативные котировки";
   }
-  if (preflight?.official_exchange_closed || market.dataShadowStatus.market_closed_expected) {
+  if (
+    preflight?.official_exchange_closed ||
+    market.dataShadowStatus.market_closed_expected ||
+    market.dashboardFeedStatus.market_open === false
+  ) {
     return "Площадка закрыта";
   }
   return "Площадка уточняется";
@@ -302,6 +321,9 @@ function venueStatusValue(): string {
 
 function phaseDetail(): string {
   const preflight = robot.lastSessionPreflight;
+  if (market.dashboardFeedStatus.last_refresh_at) {
+    return `feed ${compactDateTime(market.dashboardFeedStatus.last_refresh_at)}`;
+  }
   if (preflight?.official_exchange_closed) {
     return `Следующая: ${compactDateTime(preflight.next_session_at)}`;
   }
@@ -340,7 +362,10 @@ function tradingModeValue(): string {
 }
 
 function tradingModeDetail(): string {
-  return "Data-only: заявок, pseudo-orders и signal_candidate нет.";
+  if (market.dashboardFeedStatus.running && market.dataShadowStatus.collector_state !== "collecting") {
+    return "Рынок отображается. Запись data-only логов остановлена.";
+  }
+  return "Data-only Start управляет только записью логов; заявок, pseudo-orders и signal_candidate нет.";
 }
 
 function formatBps(value: string | null | undefined): string {
@@ -437,6 +462,32 @@ function collectionReason(): string {
   return reasonLabel(reason);
 }
 
+function dashboardFeedValue(): string {
+  if (market.feedErrors.length) {
+    return "ошибка";
+  }
+  if (market.dashboardFeedStatus.running) {
+    return market.dashboardFeedStatus.market_open ? "online" : "stale/closed";
+  }
+  return "запускается";
+}
+
+function dashboardFeedDetail(): string {
+  if (market.feedErrors.length) {
+    return reasonLabel(market.feedErrors[0]);
+  }
+  if (market.feedWarnings.length) {
+    return reasonLabel(market.feedWarnings[0]);
+  }
+  return market.dashboardFeedStatus.last_refresh_at
+    ? `refresh ${compactDateTime(market.dashboardFeedStatus.last_refresh_at)}`
+    : "Start не требуется";
+}
+
+function tradeTapeReason(): string {
+  return reasonLabel(selectedInstrument.value?.market_trades_source ?? "no_market_trades_samples");
+}
+
 function nextSessionLabel(): string {
   const nextSession = robot.lastSessionPreflight?.next_session_at ?? market.dataShadowStatus.next_session_at;
   return nextSession ? `Следующая: ${compactDateTime(nextSession)}` : "Следующая сессия не указана";
@@ -510,19 +561,19 @@ function orderBookReason(): string {
   if (instrument.order_book_stale && instrument.order_book_ts) {
     return `Стакан устарел: ${compactDateTime(instrument.order_book_ts)}.`;
   }
-  if (market.dataShadowStatus.collector_state === "stopped") {
-    return "Стакан не собран: data-only сбор выключен.";
+  if (market.dashboardFeedStatus.errors.length) {
+    return `Dashboard feed не получил стакан: ${reasonLabel(market.dashboardFeedStatus.errors[0])}.`;
   }
-  if (market.dataShadowStatus.collector_state === "preflight_blocked") {
-    return `Стакан не собран: ${reasonLabel(market.dataShadowStatus.reason_code)}.`;
+  if (market.dashboardFeedStatus.warnings.length) {
+    return `Dashboard feed: ${reasonLabel(market.dashboardFeedStatus.warnings[0])}.`;
   }
-  if (market.dataShadowStatus.market_closed_expected) {
-    return "Стакан не собран: рынок закрыт по расписанию.";
+  if (!market.dashboardFeedStatus.running) {
+    return "Dashboard feed ещё запускается. Data-only Start для отображения стакана не нужен.";
   }
-  if (market.dataShadowStatus.warning) {
-    return `Стакан не собран: ${market.dataShadowStatus.warning}.`;
+  if (market.dashboardFeedStatus.market_open === false) {
+    return "Стакан не обновляется: рынок закрыт или брокер отдаёт только последнюю цену.";
   }
-  return "Стакан не собран: нет свежих order book samples.";
+  return "Стакан не получен из readonly GetOrderBook. Экран держит последнюю цену и повторяет запрос.";
 }
 
 function tradeTime(trade: JsonPayload): string {
@@ -603,18 +654,23 @@ function degradedFlagLabel(flag: string): string {
     <section class="session-ribbon" data-testid="session-ribbon">
       <div>
         <span class="eyebrow">session</span>
-        <strong>{{ sessionLabel(robot.status.session_type) }}</strong>
+        <strong>{{ sessionLabel(market.dashboardFeedStatus.session_type ?? robot.status.session_type) }}</strong>
         <small>{{ sessionDetail() }}</small>
       </div>
       <div>
         <span class="eyebrow">phase</span>
-        <strong>{{ phaseLabel(robot.status.session_phase) }}</strong>
+        <strong>{{ phaseLabel(market.dashboardFeedStatus.session_phase ?? robot.status.session_phase) }}</strong>
         <small>{{ brokerStatusValue() }}</small>
       </div>
       <div>
         <span class="eyebrow">venue</span>
         <strong>{{ venueStatusValue() }}</strong>
         <small>{{ nextSessionLabel() }}</small>
+      </div>
+      <div>
+        <span class="eyebrow">dashboard feed</span>
+        <strong>{{ dashboardFeedValue() }}</strong>
+        <small>{{ dashboardFeedDetail() }}</small>
       </div>
       <div>
         <span class="eyebrow">data-only</span>
@@ -644,7 +700,7 @@ function degradedFlagLabel(flag: string): string {
       </section>
 
       <MetricTile label="Площадка" :value="venueStatusValue()" />
-      <MetricTile label="Фаза рынка" :value="phaseLabel(robot.status.session_phase)" :detail="phaseDetail()" />
+      <MetricTile label="Фаза рынка" :value="phaseLabel(market.dashboardFeedStatus.session_phase ?? robot.status.session_phase)" :detail="phaseDetail()" />
       <MetricTile label="Торговля" :value="tradingModeValue()" :detail="tradingModeDetail()" tone="info" />
     </div>
 
@@ -758,7 +814,7 @@ function degradedFlagLabel(flag: string): string {
               <EmptyState
                 v-else
                 title="Лента сделок недоступна"
-                detail="Причина: no_market_trades_samples. Появится после market trades stream; отсутствие ленты не скрывается."
+                :detail="`Причина: ${selectedInstrument?.market_trades_source ?? 'no_market_trades_samples'} (${tradeTapeReason()}). Появится после market trades feed; отсутствие ленты не скрывается.`"
                 tone="warn"
               />
             </section>
@@ -770,6 +826,9 @@ function degradedFlagLabel(flag: string): string {
         <DataPanel>
           <template #eyebrow>collector</template>
           <template #title>Data-only сбор</template>
+          <p class="operator-note">
+            {{ market.dashboardFeedStatus.running && market.dataShadowStatus.collector_state !== "collecting" ? "Рынок отображается. Запись логов остановлена." : "Start управляет только записью data-only логов." }}
+          </p>
           <dl class="definition-grid">
             <dt>состояние</dt>
             <dd>{{ collectorLabel(market.dataShadowStatus.collector_state) }}</dd>

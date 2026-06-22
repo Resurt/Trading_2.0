@@ -1158,12 +1158,18 @@ New structured events/payloads:
   `instrument_count`, `live_rows`, `stale_rows`, `cache_ttl_seconds`, timeout/fallback
   reason when present, `quotes_only`, `include_order_book`, and whether
   `/market/overview` cache overlay was updated.
+- `dashboard_market_feed_snapshot`: readonly display feed refresh for the Live
+  Dashboard. It may include `GetLastPrices` for the quote board and `GetOrderBook` /
+  last trades only for the selected instrument. Payload should include
+  `selected_instrument`, `quote_rows_count`, `order_book_available`,
+  `trade_tape_status`, `last_refresh_at`, `warnings`, and `errors`. This event is
+  display-only and must not write `market_microstructure_snapshot` calibration logs.
 - `market_instrument_details_read`: local/BFF selected-instrument read for
   `/market/instruments/{instrument_id}/details`. Payload should include
   `instrument_id`, `quote_source`, `quote_status`, `order_book_source`,
   `order_book_stale`, `market_trades_source`, and any `schedule_error_code` or
-  status/freshness reason already present in the read model. This event is a read-model
-  access, not a broker refresh and not a stream start.
+  status/freshness reason already present in the read model. This event is a
+  read-model/live-display access, not a data-only collection start.
 - `robot_command_rejected_preflight`: API rejected a Start command because preflight did
   not return `market_open=true`; payload includes `reason_code` and `preflight_result`.
 - `data_only_shadow_collection_started`: trade-core applied Start in data-only mode and
@@ -1187,6 +1193,12 @@ Market-source payloads must include official exchange and venue context:
 `quote_source`, `quote_allowed_for_data_collection`, and `include_in_calibration`.
 Broker OTC/indicative quotes are display-only by default and must not silently enter
 calibration reports.
+
+Dashboard Live Feed and data-only collection remain separate. Dashboard feed freshness
+fields (`last_refresh_at`, `order_book_age_ms`, `market_trades_source`,
+`selected_order_book_stale`) are display diagnostics. Persistent calibration evidence
+is created only by data-only collection after Start/preflight and should be visible as
+`market_microstructure_snapshot` deltas.
 
 Order-book analytics store spread in separate units: `spread_abs_rub` and `spread_bps`.
 Quality payloads store display and calibration scores plus transparent components. Trade

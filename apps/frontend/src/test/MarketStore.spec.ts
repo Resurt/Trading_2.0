@@ -1,10 +1,12 @@
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { MarketInstrumentOverview } from "../api/types";
+import type { DashboardMarketFeedSnapshot, MarketInstrumentOverview } from "../api/types";
 import { useMarketStore } from "../stores/market";
 
 const apiClientMock = vi.hoisted(() => ({
+  dashboardMarketFeedSnapshot: vi.fn(),
+  refreshDashboardMarketFeed: vi.fn(),
   marketOverview: vi.fn(),
   refreshMarketQuotes: vi.fn(),
   marketInstrumentDetails: vi.fn(),
@@ -78,6 +80,53 @@ function instrument(
   };
 }
 
+function feedSnapshot(
+  rows: MarketInstrumentOverview[],
+  selectedInstrumentId = "MOEX:SBER",
+): DashboardMarketFeedSnapshot {
+  const selected =
+    rows.find((row) => row.instrument_id === selectedInstrumentId) ?? rows[0] ?? null;
+  const generatedAt = new Date().toISOString();
+  return {
+    generated_at: generatedAt,
+    source: "dashboard_market_feed",
+    data_only_collection_required: false,
+    session: {
+      market_open: true,
+      session_type: "weekday_main",
+      session_phase: "continuous_trading",
+      venue_type: "official_exchange",
+      data_only_collection_allowed: true,
+      reason_code: "market_open",
+      next_session_at: null,
+    },
+    quote_rows: rows,
+    market_overview: {
+      generated_at: generatedAt,
+      instruments: rows,
+    },
+    selected_instrument: selectedInstrumentId,
+    selected_details: selected,
+    errors: [],
+    warnings: [],
+    status: {
+      enabled: true,
+      running: true,
+      market_open: true,
+      session_type: "weekday_main",
+      session_phase: "continuous_trading",
+      venue_type: "official_exchange",
+      last_refresh_at: generatedAt,
+      selected_instrument: selectedInstrumentId,
+      quote_rows_count: rows.length,
+      order_book_available: Boolean(selected?.order_book_source),
+      trade_tape_available: Boolean(selected?.recent_market_trades.length),
+      errors: [],
+      warnings: [],
+    },
+  };
+}
+
 describe("market store", () => {
   beforeEach(() => {
     setActivePinia(createPinia());
@@ -134,7 +183,7 @@ describe("market store", () => {
       generated_at: new Date().toISOString(),
       instruments: [instrument({ last_price: "313.10", quote_status: "live" })],
     });
-    apiClientMock.marketOverview.mockRejectedValue(new Error("temporary API failure"));
+    apiClientMock.dashboardMarketFeedSnapshot.mockRejectedValue(new Error("temporary API failure"));
 
     await market.fetchOverview({ silent: true });
 
@@ -145,17 +194,64 @@ describe("market store", () => {
     const market = useMarketStore();
     const gazp = instrument({ instrument_id: "MOEX:GAZP", ticker: "GAZP", last_price: "144.20" });
     market.applyOverview({ generated_at: new Date().toISOString(), instruments: [gazp] });
-    apiClientMock.marketInstrumentDetails.mockResolvedValue({
-      ...gazp,
-      best_bid: "144.18",
-      best_ask: "144.22",
-    });
+    apiClientMock.dashboardMarketFeedSnapshot.mockResolvedValue(
+      feedSnapshot([{ ...gazp, best_bid: "144.18", best_ask: "144.22" }], "MOEX:GAZP"),
+    );
     market.selectedInstrumentId = "MOEX:GAZP";
 
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(apiClientMock.marketInstrumentDetails).toHaveBeenCalledWith("MOEX:GAZP");
+    expect(apiClientMock.dashboardMarketFeedSnapshot).toHaveBeenCalledWith(
+      expect.objectContaining({
+        selected_instrument: "MOEX:GAZP",
+        include_order_book: true,
+        include_trades: true,
+      }),
+    );
     expect(market.currentInstrument?.best_bid).toBe("144.18");
+  });
+
+  it("starts dashboard feed polling without requiring Start", async () => {
+    const market = useMarketStore();
+    apiClientMock.dashboardMarketFeedSnapshot.mockResolvedValue(
+      feedSnapshot([instrument({ last_price: "313.10", quote_status: "live" })]),
+    );
+    apiClientMock.dataShadowStatus.mockResolvedValue({
+      enabled: true,
+      collector_state: "stopped",
+      strategy_trading_disabled: true,
+      real_orders_disabled: true,
+      market_open: null,
+      market_closed_expected: null,
+      reason_code: null,
+      next_session_at: null,
+      stream_alive: false,
+      last_message_age_seconds: null,
+      candles_received: null,
+      order_book_snapshots: 0,
+      market_microstructure_snapshots: 0,
+      avg_spread_bps: null,
+      p95_spread_bps: null,
+      avg_market_quality_score: null,
+      current_session: null,
+      started_at: null,
+      stopped_at: null,
+      last_command_id: null,
+      last_command_status: null,
+      last_command_reason_code: null,
+      instruments: [],
+      stream_batches: [],
+      warnings: [],
+      warning: null,
+    });
+
+    market.startDashboardFeed();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(apiClientMock.dashboardMarketFeedSnapshot).toHaveBeenCalled();
+    expect(market.currentInstrument?.last_price).toBe("313.10");
+    expect(market.dataShadowStatus.collector_state).toBe("stopped");
+    market.stopDashboardFeed();
   });
 
   it("keeps broker order book metrics when weaker snapshots arrive later", () => {

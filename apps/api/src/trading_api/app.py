@@ -32,6 +32,10 @@ from trading_api.auth import (
     build_ws_ticket_manager,
     require_role,
 )
+from trading_api.dashboard_market_feed import (
+    DashboardMarketFeedConfig,
+    DashboardMarketFeedService,
+)
 from trading_api.market_quality import calculate_market_quality, calculate_spread_metrics
 from trading_api.read_service import BffReadService
 from trading_api.report_tasks import CeleryReportTaskClient, ReportTaskClient
@@ -144,6 +148,9 @@ def create_fastapi_app(
     app.state.robot_control = None
     app.state.metrics = TradingMetrics(identity)
     app.state.ws_push_interval_seconds = _ws_push_interval_from_env()
+    app.state.dashboard_market_feed = DashboardMarketFeedService(
+        DashboardMarketFeedConfig.from_env()
+    )
 
     @app.get("/health", tags=["health"])
     def get_health() -> Response:
@@ -353,8 +360,54 @@ def create_fastapi_app(
     def current_signals(service: ReadServiceDep) -> list[SignalResponse]:
         return service.current_signals()
 
+    @app.get("/dashboard/market-feed/status", tags=["dashboard"])
+    def dashboard_market_feed_status(request: Request, auth: AuthDep) -> dict[str, object]:
+        require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
+        return _dashboard_market_feed(request.app).status()
+
+    @app.get("/dashboard/market-feed/snapshot", tags=["dashboard"])
+    async def dashboard_market_feed_snapshot(
+        request: Request,
+        auth: AuthDep,
+        service: ReadServiceDep,
+        instruments: Annotated[str | None, Query()] = None,
+        selected_instrument: Annotated[str, Query()] = "MOEX:SBER",
+        include_order_book: Annotated[bool, Query()] = True,
+        include_trades: Annotated[bool, Query()] = True,
+    ) -> dict[str, object]:
+        require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
+        return await _dashboard_market_feed_snapshot(
+            request,
+            service=service,
+            instruments=instruments,
+            selected_instrument=selected_instrument,
+            include_order_book=include_order_book,
+            include_trades=include_trades,
+        )
+
+    @app.post("/dashboard/market-feed/refresh", tags=["dashboard"])
+    async def dashboard_market_feed_refresh(
+        request: Request,
+        auth: AuthDep,
+        service: ReadServiceDep,
+        instruments: Annotated[str | None, Query()] = None,
+        selected_instrument: Annotated[str, Query()] = "MOEX:SBER",
+        include_order_book: Annotated[bool, Query()] = True,
+        include_trades: Annotated[bool, Query()] = True,
+    ) -> dict[str, object]:
+        require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
+        return await _dashboard_market_feed_snapshot(
+            request,
+            service=service,
+            instruments=instruments,
+            selected_instrument=selected_instrument,
+            include_order_book=include_order_book,
+            include_trades=include_trades,
+            force=True,
+        )
+
     @app.get("/market/overview", response_model=MarketOverviewResponse, tags=["market"])
-    def market_overview(
+    async def market_overview(
         request: Request,
         service: ReadServiceDep,
         refresh: Annotated[bool, Query()] = True,
@@ -362,30 +415,56 @@ def create_fastapi_app(
         include_details: Annotated[bool, Query()] = False,
     ) -> MarketOverviewResponse:
         del refresh
-        return _market_overview_with_cached_quotes(
-            request.app,
-            service.market_overview(
-                instruments=instruments,
-                include_details=include_details,
-            ),
+        snapshot = await _dashboard_market_feed_snapshot(
+            request,
+            service=service,
+            instruments=instruments,
+            selected_instrument="MOEX:SBER",
+            include_order_book=include_details,
+            include_trades=include_details,
         )
+        overview = MarketOverviewResponse(**cast(dict[str, Any], snapshot["market_overview"]))
+        _store_market_quote_cache(request.app, overview)
+        return overview
 
     @app.get(
         "/market/instruments/{instrument_id}/details",
         response_model=MarketInstrumentOverview,
         tags=["market"],
     )
-    def market_instrument_details(
+    async def market_instrument_details(
         instrument_id: str,
         request: Request,
         service: ReadServiceDep,
     ) -> MarketInstrumentOverview:
-        overview = MarketOverviewResponse(
-            generated_at=datetime.now(tz=UTC),
-            instruments=[service.market_instrument_details(instrument_id)],
+        selected_base = service.market_instrument_details(instrument_id)
+        quote_overview = service.market_overview(instruments=None, include_details=False)
+        base = quote_overview.model_copy(
+            update={
+                "generated_at": datetime.now(tz=UTC),
+                "instruments": [
+                    selected_base
+                    if row.instrument_id == selected_base.instrument_id
+                    else row
+                    for row in quote_overview.instruments
+                ],
+            }
         )
-        cached = _market_overview_with_cached_quotes(request.app, overview)
-        return cached.instruments[0]
+        snapshot = await _dashboard_market_feed(request.app).snapshot(
+            base_overview=base,
+            refs=_instrument_refs_for_preflight(
+                _database_service(request),
+                _default_preflight_instruments(),
+            ),
+            selected_instrument=instrument_id,
+            gateway_factory=_readonly_tbank_gateway,
+            include_order_book=True,
+            include_trades=True,
+        )
+        details = snapshot.get("selected_details")
+        if not isinstance(details, dict):
+            return selected_base
+        return MarketInstrumentOverview(**details)
 
     @app.post("/market/quotes/refresh", response_model=MarketOverviewResponse, tags=["market"])
     async def market_quotes_refresh(
@@ -407,12 +486,30 @@ def create_fastapi_app(
         if lock.locked():
             return _market_overview_with_cached_quotes(request.app, base_overview)
         async with lock:
-            refreshed = await _market_overview_with_broker_quotes(
-                request,
-                overview=base_overview,
-                instruments=instruments or _default_preflight_instruments(),
-                include_details=include_details,
+            snapshot = await _dashboard_market_feed(request.app).snapshot(
+                base_overview=base_overview,
+                refs=_instrument_refs_for_preflight(
+                    _database_service(request),
+                    instruments or _default_preflight_instruments(),
+                ),
+                selected_instrument="MOEX:SBER",
+                gateway_factory=_readonly_tbank_gateway,
+                include_order_book=include_details,
+                include_trades=include_details,
+                force=True,
             )
+            refreshed = MarketOverviewResponse(
+                **cast(dict[str, Any], snapshot["market_overview"])
+            )
+            if include_details:
+                refreshed = await _market_overview_with_broker_quotes(
+                    request,
+                    overview=refreshed,
+                    instruments=instruments or _default_preflight_instruments(),
+                    include_details=include_details,
+                )
+            else:
+                del snapshot
             _store_market_quote_cache(request.app, refreshed)
             return refreshed
 
@@ -2434,6 +2531,43 @@ def _robot_control_from_app(app: FastAPI) -> RobotControlService:
         control = RobotControlService(_database_service_from_app(app))
         app.state.robot_control = control
     return cast(RobotControlService, control)
+
+
+def _dashboard_market_feed(app: FastAPI) -> DashboardMarketFeedService:
+    service = getattr(app.state, "dashboard_market_feed", None)
+    if not isinstance(service, DashboardMarketFeedService):
+        service = DashboardMarketFeedService(DashboardMarketFeedConfig.from_env())
+        app.state.dashboard_market_feed = service
+    return service
+
+
+async def _dashboard_market_feed_snapshot(
+    request: Request,
+    *,
+    service: BffReadService,
+    instruments: str | None,
+    selected_instrument: str,
+    include_order_book: bool,
+    include_trades: bool,
+    force: bool = False,
+) -> dict[str, object]:
+    base_overview = _market_overview_with_cached_quotes(
+        request.app,
+        service.market_overview(instruments=instruments, include_details=False),
+    )
+    refs = _instrument_refs_for_preflight(
+        _database_service(request),
+        instruments or _default_preflight_instruments(),
+    )
+    return await _dashboard_market_feed(request.app).snapshot(
+        base_overview=base_overview,
+        refs=refs,
+        selected_instrument=selected_instrument,
+        gateway_factory=_readonly_tbank_gateway,
+        include_order_book=include_order_book,
+        include_trades=include_trades,
+        force=force,
+    )
 
 
 def _report_task_client(request: Request) -> ReportTaskClient:

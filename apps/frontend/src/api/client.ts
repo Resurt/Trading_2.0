@@ -11,6 +11,8 @@ import type {
   CorporateActionResponse,
   CounterfactualResponse,
   DailyReportResponse,
+  DashboardMarketFeedSnapshot,
+  DashboardMarketFeedStatus,
   DashboardSnapshotPayload,
   DataShadowStatusResponse,
   DividendSyncStatusResponse,
@@ -206,6 +208,21 @@ export const apiClient = {
   openOrders: () => requestJson<OrderResponse[]>("/orders/open"),
   currentSignals: () =>
     requestJson<SignalResponse[]>("/signals/current", { timeoutMs: 8000 }),
+  dashboardMarketFeedStatus: () =>
+    requestJson<DashboardMarketFeedStatus>("/dashboard/market-feed/status", {
+      timeoutMs: 5000,
+    }),
+  dashboardMarketFeedSnapshot: (query: Record<string, QueryValue> = {}) =>
+    requestJson<DashboardMarketFeedSnapshot>(
+      withQuery("/dashboard/market-feed/snapshot", query),
+      { timeoutMs: 10000 },
+    ),
+  refreshDashboardMarketFeed: (query: Record<string, QueryValue> = {}) =>
+    requestJson<DashboardMarketFeedSnapshot>(
+      withQuery("/dashboard/market-feed/refresh", query),
+      { method: "POST", timeoutMs: 12000 },
+      "observer",
+    ),
   marketOverview: (query: Record<string, QueryValue> = {}) =>
     requestJson<MarketOverviewResponse>(withQuery("/market/overview", query), {
       timeoutMs: 10000,

@@ -329,25 +329,32 @@ if `GetAccounts` is unavailable but `TRADING_ACCOUNT_ID` is set, refresh can sti
 that account id internally. The main dashboard card shows portfolio value, available
 cash and blocked cash only; full account ids are never rendered.
 
-The Live Dashboard also shows quotes for the core universe. `GET /market/overview` is
-a fast local read-model endpoint: it always returns one row per core instrument, shows
-source/freshness/stale status, and does not call T-Invest. The quote board uses
-`/market/overview?include_details=false`; selected-instrument bid/ask ladder and
-trade tape load lazily from `GET /market/instruments/{instrument_id}/details`.
-Explicit readonly broker quote refresh remains `POST /market/quotes/refresh`, which
-may call `GetLastPrices` and `GetOrderBook` with bounded timeouts, but it is not part
-of the dashboard mount/poll loop. Temporary request failures must not clear already
-displayed quotes; if the readonly gateway is unavailable, refresh falls back to the
-local overview instead of blocking the dashboard. A successful readonly quote refresh
-is cached briefly by the API, so the next `/market/overview` and dashboard snapshot do
-not overwrite live broker quotes with old candle fallback rows.
+The Live Dashboard also shows quotes for the core universe through a readonly
+Dashboard Live Feed. This feed is independent from the Start button: it can display
+last prices, selected-instrument order book and trade-tape status while the
+data-only collector is stopped. Start controls only persistent data-only log writing.
 
-Dashboard polling is intentionally split: local market overview and data-only status
-poll every 5 seconds, selected-instrument details poll every 2 seconds while the
-market/collector is active and every 8 seconds while idle, and broker balance refresh
-polls every 60 seconds. Polling is silent and must not clear the last good balance or
-quote rows on timeout. Empty or partial `/ws/market` snapshots are merged into the
-existing board and never delete missing core-universe rows.
+The feed is exposed through `/dashboard/market-feed/status` and
+`/dashboard/market-feed/snapshot`. `GET /market/overview` is the cheap quote-board
+read-model backed by the feed cache first, then stored `order_book_summary`,
+`market_candle` and previous-close fallbacks. It always returns one row per core
+instrument and avoids heavy all-instrument order-book calls. Selected-instrument
+bid/ask ladder and trade tape load lazily from
+`GET /market/instruments/{instrument_id}/details` or the selected snapshot fields.
+
+Explicit readonly broker quote refresh remains `POST /market/quotes/refresh`.
+Temporary request failures must not clear already displayed quotes; if the readonly
+gateway is unavailable, refresh falls back to the local overview instead of blocking
+the dashboard. Dashboard feed calls are readonly and must not write calibration logs,
+create trading entities, or call `PostOrder`/`CancelOrder`.
+
+Dashboard polling is intentionally split: quote board every 2 seconds, selected
+instrument every 1 second while the feed sees the market open and every 5 seconds
+when closed/stale, selected broker trading status every 5 seconds for the session
+ribbon, data-only status every 2-5 seconds, and broker balance refresh every
+60 seconds. Polling is silent and must not clear the last good balance or quote rows
+on timeout. Empty or partial `/ws/market` snapshots are merged into the existing board
+and never delete missing core-universe rows.
 
 Runbook: `Docs/runbooks/data-only-shadow.md`.
 

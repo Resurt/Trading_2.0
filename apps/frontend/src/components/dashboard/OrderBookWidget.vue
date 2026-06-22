@@ -187,7 +187,7 @@ function timeOnly(value: string | null | undefined): string {
   <EmptyState
     v-else
     title="Стакан пока не получен"
-    detail="Нет уровней bid/ask. Показываем последнюю цену; ladder появится после read-only GetOrderBook или live data-only потока."
+    detail="Нет уровней bid/ask. Показываем последнюю цену; ladder появится после readonly dashboard GetOrderBook."
     tone="warn"
   />
 </template>

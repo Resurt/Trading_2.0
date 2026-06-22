@@ -4,6 +4,8 @@ import { defineStore } from "pinia";
 import { apiClient, openAuthenticatedWebSocket } from "../api/client";
 import type {
   ConnectionState,
+  DashboardMarketFeedSnapshot,
+  DashboardMarketFeedStatus,
   DataShadowStatusResponse,
   JsonPayload,
   MarketInstrumentOverview,
@@ -61,10 +63,33 @@ const EMPTY_DATA_SHADOW_STATUS: DataShadowStatusResponse = {
   warning: null,
 };
 
+const EMPTY_DASHBOARD_FEED_STATUS: DashboardMarketFeedStatus = {
+  enabled: true,
+  running: false,
+  market_open: false,
+  session_type: "unknown",
+  session_phase: "unknown",
+  venue_type: "unknown",
+  last_refresh_at: null,
+  selected_instrument: DEFAULT_SELECTED_INSTRUMENT_ID,
+  quote_rows_count: CORE_INSTRUMENT_IDS.length,
+  order_book_available: false,
+  trade_tape_available: false,
+  errors: [],
+  warnings: [],
+};
+
 export const useMarketStore = defineStore("market", () => {
   const overview = ref<MarketOverviewResponse>(EMPTY_OVERVIEW);
   const dataShadowStatus = ref<DataShadowStatusResponse>(EMPTY_DATA_SHADOW_STATUS);
+  const dashboardFeedStatus = ref<DashboardMarketFeedStatus>(EMPTY_DASHBOARD_FEED_STATUS);
   const selectedInstrumentId = ref<string | null>(DEFAULT_SELECTED_INSTRUMENT_ID);
+  const quoteBoardLoading = ref(false);
+  const selectedDetailsLoading = ref(false);
+  const feedErrors = ref<string[]>([]);
+  const feedWarnings = ref<string[]>([]);
+  const lastQuoteRefreshAt = ref<string | null>(null);
+  const lastDetailsRefreshAt = ref<string | null>(null);
   const loading = ref(false);
   const error = ref<string | null>(null);
   const warnings = ref<string[]>([]);
@@ -75,6 +100,7 @@ export const useMarketStore = defineStore("market", () => {
   let selectedDetailsTimer: number | null = null;
   let lastSelectedDetailsFetchAt = 0;
   let overviewInFlight = false;
+  let dashboardFeedInFlight = false;
   let quoteRefreshInFlight = false;
   let selectedDetailsInFlight = false;
   let dataShadowStatusInFlight = false;
@@ -120,27 +146,11 @@ export const useMarketStore = defineStore("market", () => {
   const quoteRows = computed(() => sortInstrumentRows(overview.value.instruments));
 
   async function fetchOverview(options: { silent?: boolean } = {}): Promise<void> {
-    if (overviewInFlight) {
-      return;
-    }
-    overviewInFlight = true;
-    if (!options.silent) {
-      loading.value = true;
-    }
-    error.value = null;
-    try {
-      applyOverview(await apiClient.marketOverview({ include_details: false }));
-      ensureSelectedInstrument();
-    } catch (unknownError) {
-      if (overview.value.instruments.length === 0) {
-        error.value = unknownError instanceof Error ? unknownError.message : "Market overview failed";
-      }
-    } finally {
-      if (!options.silent) {
-        loading.value = false;
-      }
-      overviewInFlight = false;
-    }
+    await fetchDashboardFeedSnapshot({
+      silent: options.silent,
+      includeOrderBook: false,
+      includeTrades: false,
+    });
   }
 
   async function refreshQuotes(): Promise<void> {
@@ -149,13 +159,10 @@ export const useMarketStore = defineStore("market", () => {
     }
     quoteRefreshInFlight = true;
     try {
-      applyOverview(
-        await apiClient.refreshMarketQuotes({
-          details: false,
-          quotes_only: true,
-          include_order_book: false,
-        }),
-      );
+      await refreshDashboardFeed({
+        includeOrderBook: false,
+        includeTrades: false,
+      });
       await refreshSelectedInstrumentDetails();
     } catch (unknownError) {
       if (overview.value.instruments.length === 0) {
@@ -166,6 +173,56 @@ export const useMarketStore = defineStore("market", () => {
     }
   }
 
+  async function fetchDashboardFeedSnapshot(options: {
+    silent?: boolean;
+    includeOrderBook?: boolean;
+    includeTrades?: boolean;
+  } = {}): Promise<void> {
+    if (dashboardFeedInFlight || overviewInFlight) {
+      return;
+    }
+    dashboardFeedInFlight = true;
+    overviewInFlight = true;
+    quoteBoardLoading.value = !options.silent;
+    if (!options.silent) {
+      loading.value = true;
+    }
+    error.value = null;
+    try {
+      const snapshot = await apiClient.dashboardMarketFeedSnapshot({
+        selected_instrument: selectedInstrumentId.value ?? DEFAULT_SELECTED_INSTRUMENT_ID,
+        include_order_book: options.includeOrderBook ?? false,
+        include_trades: options.includeTrades ?? false,
+      });
+      applyDashboardFeedSnapshot(snapshot);
+    } catch (unknownError) {
+      recordWarning("dashboard_market_feed_unavailable");
+      feedErrors.value = [errorText(unknownError)];
+      if (overview.value.instruments.length === 0) {
+        error.value = unknownError instanceof Error ? unknownError.message : "Dashboard market feed failed";
+      }
+    } finally {
+      quoteBoardLoading.value = false;
+      if (!options.silent) {
+        loading.value = false;
+      }
+      dashboardFeedInFlight = false;
+      overviewInFlight = false;
+    }
+  }
+
+  async function refreshDashboardFeed(options: {
+    includeOrderBook?: boolean;
+    includeTrades?: boolean;
+  } = {}): Promise<void> {
+    const snapshot = await apiClient.refreshDashboardMarketFeed({
+      selected_instrument: selectedInstrumentId.value ?? DEFAULT_SELECTED_INSTRUMENT_ID,
+      include_order_book: options.includeOrderBook ?? true,
+      include_trades: options.includeTrades ?? true,
+    });
+    applyDashboardFeedSnapshot(snapshot);
+  }
+
   async function refreshSelectedInstrumentDetails(): Promise<void> {
     const instrument = currentInstrument.value;
     const instrumentId = instrument?.instrument_id ?? selectedInstrumentId.value;
@@ -173,19 +230,54 @@ export const useMarketStore = defineStore("market", () => {
       return;
     }
     selectedDetailsInFlight = true;
+    selectedDetailsLoading.value = true;
     lastSelectedDetailsFetchAt = Date.now();
     try {
-      const details = await apiClient.marketInstrumentDetails(instrumentId);
-      applyOverview({ generated_at: new Date().toISOString(), instruments: [details] });
+      const snapshot = await apiClient.dashboardMarketFeedSnapshot({
+        selected_instrument: instrumentId,
+        include_order_book: true,
+        include_trades: true,
+      });
+      applyDashboardFeedSnapshot(snapshot);
     } catch (unknownError) {
       recordWarning("selected_instrument_details_unavailable");
       if (overview.value.instruments.length === 0) {
         error.value = unknownError instanceof Error ? unknownError.message : "Selected market details failed";
       }
     } finally {
+      selectedDetailsLoading.value = false;
       selectedDetailsInFlight = false;
     }
   }
+
+  function applyDashboardFeedSnapshot(snapshot: DashboardMarketFeedSnapshot): void {
+    dashboardFeedStatus.value = snapshot.status ?? {
+      ...dashboardFeedStatus.value,
+      running: true,
+      market_open: Boolean(snapshot.session?.market_open),
+      session_type: snapshot.session?.session_type ?? dashboardFeedStatus.value.session_type,
+      session_phase: snapshot.session?.session_phase ?? dashboardFeedStatus.value.session_phase,
+      venue_type: snapshot.session?.venue_type ?? dashboardFeedStatus.value.venue_type,
+      last_refresh_at: snapshot.generated_at,
+    };
+    feedErrors.value = snapshot.errors ?? [];
+    feedWarnings.value = snapshot.warnings ?? [];
+    feedWarnings.value.forEach(recordWarning);
+    if (snapshot.market_overview) {
+      applyOverview(snapshot.market_overview);
+      lastQuoteRefreshAt.value = snapshot.generated_at;
+    } else if (snapshot.quote_rows?.length) {
+      applyOverview({ generated_at: snapshot.generated_at, instruments: snapshot.quote_rows });
+      lastQuoteRefreshAt.value = snapshot.generated_at;
+    }
+    if (snapshot.selected_details) {
+      selectedInstrumentId.value = snapshot.selected_details.instrument_id;
+      applyOverview({ generated_at: snapshot.generated_at, instruments: [snapshot.selected_details] });
+      lastDetailsRefreshAt.value = snapshot.generated_at;
+    }
+    liveConnection.value = feedErrors.value.length ? "degraded" : "live";
+  }
+
 
   function applyOverview(nextOverview: MarketOverviewResponse): void {
     if (!nextOverview.instruments.length) {
@@ -266,35 +358,36 @@ export const useMarketStore = defineStore("market", () => {
     };
   }
 
-  function startMarketPolling(
-    intervalMs = 5_000,
-    selectedActiveIntervalMs = 2_000,
-    selectedIdleIntervalMs = 8_000,
+  function startDashboardFeed(
+    intervalMs = 2_000,
+    selectedActiveIntervalMs = 1_000,
+    selectedIdleIntervalMs = 5_000,
   ): void {
     if (marketPollTimer !== null) {
       return;
     }
-    void fetchOverview({ silent: true });
+    void fetchDashboardFeedSnapshot({ silent: true, includeOrderBook: false, includeTrades: false });
     void refreshSelectedInstrumentDetails();
     void fetchDataShadowStatus();
     marketPollTimer = window.setInterval(() => {
-      void fetchOverview({ silent: true });
+      void fetchDashboardFeedSnapshot({
+        silent: true,
+        includeOrderBook: false,
+        includeTrades: false,
+      });
       void fetchDataShadowStatus();
     }, intervalMs);
     selectedDetailsTimer = window.setInterval(() => {
-      const targetInterval =
-        dataShadowStatus.value.stream_alive ||
-        dataShadowStatus.value.market_open === true ||
-        dataShadowStatus.value.collector_state === "collecting"
-          ? selectedActiveIntervalMs
-          : selectedIdleIntervalMs;
+      const targetInterval = dashboardFeedStatus.value.market_open
+        ? selectedActiveIntervalMs
+        : selectedIdleIntervalMs;
       if (Date.now() - lastSelectedDetailsFetchAt >= targetInterval) {
         void refreshSelectedInstrumentDetails();
       }
     }, 1_000);
   }
 
-  function stopMarketPolling(): void {
+  function stopDashboardFeed(): void {
     if (marketPollTimer === null) {
       return;
     }
@@ -308,6 +401,18 @@ export const useMarketStore = defineStore("market", () => {
       window.clearInterval(selectedDetailsTimer);
       selectedDetailsTimer = null;
     }
+  }
+
+  function startMarketPolling(
+    intervalMs = 2_000,
+    selectedActiveIntervalMs = 1_000,
+    selectedIdleIntervalMs = 5_000,
+  ): void {
+    startDashboardFeed(intervalMs, selectedActiveIntervalMs, selectedIdleIntervalMs);
+  }
+
+  function stopMarketPolling(): void {
+    stopDashboardFeed();
   }
 
   watch(selectedInstrumentId, () => {
@@ -332,7 +437,14 @@ export const useMarketStore = defineStore("market", () => {
   return {
     overview,
     dataShadowStatus,
+    dashboardFeedStatus,
     selectedInstrumentId,
+    quoteBoardLoading,
+    selectedDetailsLoading,
+    feedErrors,
+    feedWarnings,
+    lastQuoteRefreshAt,
+    lastDetailsRefreshAt,
     loading,
     error,
     warnings,
@@ -344,10 +456,15 @@ export const useMarketStore = defineStore("market", () => {
     recentTrades,
     fetchOverview,
     refreshQuotes,
+    fetchDashboardFeedSnapshot,
+    refreshDashboardFeed,
     refreshSelectedInstrumentDetails,
+    applyDashboardFeedSnapshot,
     applyOverview,
     fetchDataShadowStatus,
     connectMarketSocket,
+    startDashboardFeed,
+    stopDashboardFeed,
     startMarketPolling,
     stopMarketPolling,
   };
@@ -612,4 +729,8 @@ function quoteTimestamp(value: string | null): number {
   }
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function errorText(value: unknown): string {
+  return value instanceof Error ? value.message : String(value);
 }

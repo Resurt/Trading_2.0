@@ -228,8 +228,9 @@ Pinia stores:
 - Live Dashboard bootstrap - one aggregated `GET /dashboard/state` snapshot.
 - `robot` - dashboard snapshot, `/session/preflight`, `/portfolio/refresh`,
   `/ws/dashboard`, start/stop commands and last command result.
-- `market` - dashboard snapshot, `/market/overview`, `/ws/market`, selected instrument
-  details endpoint and top-of-book read model.
+- `market` - dashboard snapshot, `/dashboard/market-feed/snapshot`,
+  `/dashboard/market-feed/status`, `/market/overview`, `/ws/market`, selected
+  instrument details endpoint and top-of-book read model.
 - `portfolio` - dashboard snapshot, `/positions`, `/orders/open`, `/ws/orders`.
 - `reports` - loaded on the Reports page only: `/reports/hourly`, `/reports/daily`,
   `/reports/counterfactual`, `/reports/daily/run`, `/ws/reports`.
@@ -313,16 +314,21 @@ Start/Stop command feedback:
 
 Quotes:
 
-- `GET /market/overview?include_details=false` is fast and local. It must return all
-  eight core universe rows without synchronous broker calls or heavy order-book level
-  payloads.
-- `GET /market/instruments/{instrument_id}/details` loads bid/ask ladder, market
-  trades and detailed source/freshness only for the selected instrument. SBER is the
-  default selection.
+- Dashboard Live Feed is independent from the data-only Start button. It starts on
+  page mount through `/dashboard/market-feed/snapshot` and may run while
+  `collector_state=stopped`.
+- Start controls only persistent data-only logging. If dashboard feed is online and
+  data-only is stopped, the UI says: “Рынок отображается. Запись логов остановлена.”
+- `GET /market/overview?include_details=false` is cheap and must return all eight
+  core universe rows without heavy all-instrument order-book level payloads.
+- `GET /market/instruments/{instrument_id}/details` and
+  `/dashboard/market-feed/snapshot?selected_instrument=...` load bid/ask ladder,
+  market trades and detailed source/freshness only for the selected instrument.
+  SBER is the default selection.
 - Quote rows show `last_price`, `last_price_at`, `last_price_source`,
   `quote_status`, `is_price_stale`, `price_staleness_seconds`, spread bps, bid/ask,
   depth, imbalance and book quality where available.
-- Source priority is fresh order-book mid, explicit readonly T-Bank quote refresh,
+- Source priority is fresh Dashboard Live Feed order-book mid, readonly T-Bank quote,
   latest known candle close, previous close, then unavailable.
 - `POST /market/quotes/refresh` is an explicit operator/diagnostic readonly broker
   refresh path for `GetLastPrices`/`GetOrderBook`; dashboard mount and polling do not
@@ -333,10 +339,10 @@ Quotes:
 - Successful readonly quote refresh rows are cached briefly by the API, so a later
   `/market/overview` or dashboard snapshot cannot immediately replace live broker
   quotes with older candle fallback rows.
-- Polling model while the dashboard is open: local `/market/overview` and
-  `/runtime/data-shadow/status` every 5 seconds; selected-instrument details every
-  2 seconds while market/collector is active and every 8 seconds while idle; broker
-  `/portfolio/refresh` every 60 seconds.
+- Polling model while the dashboard is open: quote board dashboard feed every
+  2 seconds; selected-instrument details every 1 second while the display feed sees
+  `market_open=true` and every 5 seconds when closed/stale; `/runtime/data-shadow/status`
+  every 2-5 seconds; broker `/portfolio/refresh` every 60 seconds.
 - If a refresh request times out, the dashboard keeps the last good quote instead of
   clearing the quote grid.
 - `/ws/market` updates merge by `instrument_id`. Empty `instruments=[]` snapshots add
@@ -346,8 +352,9 @@ Quotes:
   eight core instruments.
 - Stale candles/order books remain visible with timestamp and stale badge, never as
   current live prices.
-- Balance, session state and current/last prices must be visible without starting
-  strategy shadow or live trading.
+- Balance, session state, current/last prices, selected order book and explicit trade
+  tape status must be visible without starting strategy shadow, live trading, or
+  data-only collection.
 
 Selected instrument depth:
 
