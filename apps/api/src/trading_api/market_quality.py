@@ -84,7 +84,7 @@ def calculate_market_quality(
     if spread_bps is None:
         reason_codes.append("spread_unavailable")
 
-    final_display_score = (
+    raw_display_score = (
         spread_score * Decimal("0.22")
         + depth_score * Decimal("0.17")
         + touch_depth_score * Decimal("0.13")
@@ -94,6 +94,13 @@ def calculate_market_quality(
         + venue_score * Decimal("0.10")
         + trade_tape_score * Decimal("0.05")
     )
+    final_display_score = _venue_display_cap(
+        raw_display_score,
+        venue_type=venue_type,
+        official_exchange_open=official_exchange_open,
+    )
+    if final_display_score != raw_display_score:
+        reason_codes.append("display_quality_capped_by_venue")
     calibration_allowed = official_exchange_open and venue_type == "official_exchange"
     final_calibration_score = final_display_score if calibration_allowed else Decimal("0")
     label = _quality_label(
@@ -111,6 +118,7 @@ def calculate_market_quality(
         "freshness_score": _q(freshness_score),
         "venue_score": _q(venue_score),
         "trade_tape_score": _q(trade_tape_score),
+        "raw_display_score": _q(raw_display_score),
         "final_display_score": _q(final_display_score),
         "final_calibration_score": _q(final_calibration_score),
         "display_market_quality_score": _q(final_display_score),
@@ -236,6 +244,23 @@ def _venue_score(venue_type: str, official_exchange_open: bool) -> Decimal:
     if venue_type == "stale_local":
         return Decimal("0.20")
     return Decimal("0.25")
+
+
+def _venue_display_cap(
+    score: Decimal,
+    *,
+    venue_type: str,
+    official_exchange_open: bool,
+) -> Decimal:
+    if official_exchange_open and venue_type == "official_exchange":
+        return score
+    caps = {
+        "broker_otc": Decimal("0.600"),
+        "broker_indicative": Decimal("0.500"),
+        "stale_local": Decimal("0.350"),
+    }
+    cap = caps.get(venue_type, Decimal("0.400"))
+    return min(score, cap)
 
 
 def _quality_label(

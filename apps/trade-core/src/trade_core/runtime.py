@@ -29,6 +29,7 @@ from trade_core.broker_gateway import (
     InstrumentRef,
     InstrumentResolveRequest,
     LastPricesRequest,
+    LastTradesRequest,
     OrderBookRequest,
     OrderPlacementRequest,
     OrdersRequest,
@@ -380,6 +381,14 @@ class SafeNoopBrokerGateway:
     ) -> BrokerUnaryResponse:
         del request, metadata
         return BrokerUnaryResponse(method_name="GetLastPrices", data={"prices": []}, headers={})
+
+    async def get_last_trades(
+        self,
+        request: LastTradesRequest,
+        metadata: RequestMetadata | None = None,
+    ) -> BrokerUnaryResponse:
+        del request, metadata
+        return BrokerUnaryResponse(method_name="GetLastTrades", data={"trades": []}, headers={})
 
     async def get_order_book(
         self,

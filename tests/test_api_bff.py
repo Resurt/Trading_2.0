@@ -160,6 +160,28 @@ class FakeQuoteGateway:
             },
         )
 
+    async def get_last_trades(
+        self,
+        request: object,
+        metadata: object = None,
+    ) -> BrokerUnaryResponse:
+        del request, metadata
+        return BrokerUnaryResponse(
+            method_name="GetLastTrades",
+            data={
+                "trades": [
+                    {
+                        "instrument_uid": "uid-sber",
+                        "figi": "figi-sber",
+                        "price": "313.20",
+                        "quantity_lots": "5",
+                        "side": "buy",
+                        "ts_utc": "2026-06-21T10:00:02+00:00",
+                    }
+                ]
+            },
+        )
+
 
 def make_client(tmp_path: Path) -> TestClient:
     database = DatabaseService(f"sqlite+pysqlite:///{tmp_path / 'api-bff.db'}")
@@ -819,7 +841,10 @@ def test_market_quotes_refresh_falls_back_when_broker_gateway_unavailable(
     monkeypatch.setattr(app_module, "_readonly_tbank_gateway", unavailable_gateway)
     client = make_client(tmp_path)
 
-    response = client.post("/market/quotes/refresh", headers={"X-API-Role": "observer"})
+    response = client.post(
+        "/market/quotes/refresh?instruments=SBER&details=true",
+        headers={"X-API-Role": "observer"},
+    )
 
     assert response.status_code == 200
     market = response.json()
@@ -836,7 +861,10 @@ def test_market_quotes_refresh_marks_successful_order_book_refresh_display_only_
     monkeypatch.setattr(app_module, "_readonly_tbank_gateway", lambda: FakeQuoteGateway())
     client = make_client(tmp_path)
 
-    response = client.post("/market/quotes/refresh", headers={"X-API-Role": "observer"})
+    response = client.post(
+        "/market/quotes/refresh?instruments=SBER&details=true",
+        headers={"X-API-Role": "observer"},
+    )
 
     assert response.status_code == 200
     market = response.json()
@@ -852,6 +880,10 @@ def test_market_quotes_refresh_marks_successful_order_book_refresh_display_only_
     assert sber["price_staleness_seconds"] == 0
     assert sber["order_book_summary"]["exchange_ts"] == "2026-06-21T10:00:00+00:00"
     assert sber["order_book_summary"]["exchange_age_seconds"] is not None
+    assert sber["market_trades_source"] == "tbank_get_last_trades"
+    assert sber["recent_market_trades"][0]["price"] == "313.20"
+    assert sber["recent_market_trades"][0]["venue_type"] == "broker_otc"
+    assert sber["recent_market_trades"][0]["include_in_calibration"] is False
 
 
 def test_order_book_payload_on_official_closed_is_display_only_broker_quote() -> None:
@@ -894,7 +926,10 @@ def test_market_overview_uses_recent_readonly_quote_refresh_cache(
     monkeypatch.setattr(app_module, "_readonly_tbank_gateway", lambda: FakeQuoteGateway())
     client = make_client(tmp_path)
 
-    refreshed = client.post("/market/quotes/refresh", headers={"X-API-Role": "observer"})
+    refreshed = client.post(
+        "/market/quotes/refresh?instruments=SBER&details=true",
+        headers={"X-API-Role": "observer"},
+    )
     overview = client.get("/market/overview")
 
     assert refreshed.status_code == 200
@@ -909,6 +944,8 @@ def test_market_overview_uses_recent_readonly_quote_refresh_cache(
     assert sber["is_price_stale"] is False
     assert sber["best_bid"] == "312.98"
     assert sber["best_ask"] == "313.40"
+    assert sber["market_trades_source"] == "tbank_get_last_trades"
+    assert sber["recent_market_trades"][0]["price"] == "313.20"
 
 
 def test_portfolio_refresh_masks_account_id_and_updates_summary(

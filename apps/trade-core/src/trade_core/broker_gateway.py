@@ -55,6 +55,14 @@ class LastPricesRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class LastTradesRequest:
+    instrument: InstrumentRef
+    from_: datetime
+    to: datetime
+    trade_source: str = "all"
+
+
+@dataclass(frozen=True, slots=True)
 class OrderBookRequest:
     instrument: InstrumentRef
     depth: int
@@ -219,6 +227,12 @@ class BrokerGateway(Protocol):
     async def get_last_prices(
         self,
         request: LastPricesRequest,
+        metadata: RequestMetadata | None = None,
+    ) -> BrokerUnaryResponse: ...
+
+    async def get_last_trades(
+        self,
+        request: LastTradesRequest,
         metadata: RequestMetadata | None = None,
     ) -> BrokerUnaryResponse: ...
 

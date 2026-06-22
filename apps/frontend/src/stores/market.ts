@@ -1,4 +1,4 @@
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { defineStore } from "pinia";
 
 import { apiClient, openAuthenticatedWebSocket } from "../api/client";
@@ -55,6 +55,10 @@ export const useMarketStore = defineStore("market", () => {
   let marketSocket: WebSocket | null = null;
   let marketPollTimer: number | null = null;
   let quoteRefreshTimer: number | null = null;
+  let overviewInFlight = false;
+  let quoteRefreshInFlight = false;
+  let selectedDetailsInFlight = false;
+  let dataShadowStatusInFlight = false;
 
   const currentInstrument = computed<MarketInstrumentOverview | null>(() => {
     if (overview.value.instruments.length === 0) {
@@ -86,6 +90,10 @@ export const useMarketStore = defineStore("market", () => {
   const quoteRows = computed(() => overview.value.instruments);
 
   async function fetchOverview(options: { silent?: boolean } = {}): Promise<void> {
+    if (overviewInFlight) {
+      return;
+    }
+    overviewInFlight = true;
     if (!options.silent) {
       loading.value = true;
     }
@@ -103,16 +111,47 @@ export const useMarketStore = defineStore("market", () => {
       if (!options.silent) {
         loading.value = false;
       }
+      overviewInFlight = false;
     }
   }
 
   async function refreshQuotes(): Promise<void> {
+    if (quoteRefreshInFlight) {
+      return;
+    }
+    quoteRefreshInFlight = true;
     try {
-      applyOverview(await apiClient.refreshMarketQuotes());
+      applyOverview(await apiClient.refreshMarketQuotes({ details: false }));
+      await refreshSelectedInstrumentDetails();
     } catch (unknownError) {
       if (overview.value.instruments.length === 0) {
         error.value = unknownError instanceof Error ? unknownError.message : "Market quote refresh failed";
       }
+    } finally {
+      quoteRefreshInFlight = false;
+    }
+  }
+
+  async function refreshSelectedInstrumentDetails(): Promise<void> {
+    const instrument = currentInstrument.value;
+    const ticker = instrument?.ticker ?? instrument?.instrument_id?.replace(/^MOEX:/, "");
+    if (!ticker || selectedDetailsInFlight) {
+      return;
+    }
+    selectedDetailsInFlight = true;
+    try {
+      applyOverview(
+        await apiClient.refreshMarketQuotes({
+          instruments: ticker,
+          details: true,
+        }),
+      );
+    } catch (unknownError) {
+      if (overview.value.instruments.length === 0) {
+        error.value = unknownError instanceof Error ? unknownError.message : "Selected market details failed";
+      }
+    } finally {
+      selectedDetailsInFlight = false;
     }
   }
 
@@ -136,10 +175,16 @@ export const useMarketStore = defineStore("market", () => {
   }
 
   async function fetchDataShadowStatus(): Promise<void> {
+    if (dataShadowStatusInFlight) {
+      return;
+    }
+    dataShadowStatusInFlight = true;
     try {
       dataShadowStatus.value = await apiClient.dataShadowStatus();
     } catch (unknownError) {
       error.value = unknownError instanceof Error ? unknownError.message : "Data shadow status failed";
+    } finally {
+      dataShadowStatusInFlight = false;
     }
   }
 
@@ -201,6 +246,10 @@ export const useMarketStore = defineStore("market", () => {
     }
   }
 
+  watch(selectedInstrumentId, () => {
+    void refreshSelectedInstrumentDetails();
+  });
+
   return {
     overview,
     dataShadowStatus,
@@ -215,6 +264,7 @@ export const useMarketStore = defineStore("market", () => {
     recentTrades,
     fetchOverview,
     refreshQuotes,
+    refreshSelectedInstrumentDetails,
     applyOverview,
     fetchDataShadowStatus,
     connectMarketSocket,
@@ -236,7 +286,35 @@ function mergeInstrumentOverview(
       ...quoteSnapshotFields(previous),
     };
   }
-  return next;
+  return withPreservedRecentTrades(previous, next);
+}
+
+function withPreservedRecentTrades(
+  previous: MarketInstrumentOverview,
+  next: MarketInstrumentOverview,
+): MarketInstrumentOverview {
+  if ((next.recent_market_trades?.length ?? 0) > 0) {
+    return next;
+  }
+  if ((previous.recent_market_trades?.length ?? 0) === 0) {
+    return next;
+  }
+  if (!isTradeTapeStillFresh(previous)) {
+    return next;
+  }
+  return {
+    ...next,
+    recent_market_trades: previous.recent_market_trades,
+    market_trades_source: previous.market_trades_source,
+    market_trades_age_ms: previous.market_trades_age_ms,
+  };
+}
+
+function isTradeTapeStillFresh(instrument: MarketInstrumentOverview): boolean {
+  if (instrument.market_trades_age_ms === null || instrument.market_trades_age_ms === undefined) {
+    return true;
+  }
+  return Number(instrument.market_trades_age_ms) <= 30 * 60 * 1000;
 }
 
 function quoteSnapshotFields(instrument: MarketInstrumentOverview): Partial<MarketInstrumentOverview> {

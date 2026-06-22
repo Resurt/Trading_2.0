@@ -235,6 +235,13 @@ def normalize_sdk_response(
                 for item in _list_attr(response, "last_prices")
             ]
         }
+    if method_name == "GetLastTrades":
+        return {
+            "trades": [
+                _market_trade_payload(item)
+                for item in _list_attr(response, "trades")
+            ]
+        }
     if method_name == "GetOrderBook":
         return _order_book_payload(response)
     if method_name == "PostOrder":
@@ -414,6 +421,13 @@ def _call_sdk_method(sdk: Any, services: Any, method_name: str, payload: JsonPay
         return services.market_data.get_last_prices(
             instrument_id=[_instrument_id(item) for item in last_price_instruments],
             last_price_type=_enum_or_none(sdk, "LastPriceType", "LAST_PRICE_EXCHANGE"),
+        )
+    if method_name == "GetLastTrades":
+        return services.market_data.get_last_trades(
+            instrument_id=_instrument_id(payload["instrument"]),
+            from_=_datetime_from_payload(payload["from"]),
+            to=_datetime_from_payload(payload["to"]),
+            trade_source=_trade_source_type(sdk, str(payload.get("trade_source") or "all")),
         )
     if method_name == "GetOrderBook":
         return services.market_data.get_order_book(
@@ -676,6 +690,20 @@ def _candle_interval(sdk: Any, interval: str) -> Any:
         "1h": "CANDLE_INTERVAL_HOUR",
     }
     return _enum(sdk, "CandleInterval", mapping.get(interval.lower(), "CANDLE_INTERVAL_1_MIN"))
+
+
+def _trade_source_type(sdk: Any, value: str) -> Any | None:
+    mapping = {
+        "all": "TRADE_SOURCE_ALL",
+        "dealer": "TRADE_SOURCE_DEALER",
+        "otc": "TRADE_SOURCE_DEALER",
+        "exchange": "TRADE_SOURCE_EXCHANGE",
+    }
+    return _enum_or_none(
+        sdk,
+        "TradeSourceType",
+        mapping.get(value.lower(), "TRADE_SOURCE_ALL"),
+    )
 
 
 def _order_direction(sdk: Any, side: str) -> Any:

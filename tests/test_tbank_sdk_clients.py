@@ -68,7 +68,9 @@ class FakeOrderBookType(Enum):
 
 
 class FakeTradeSourceType(Enum):
+    TRADE_SOURCE_ALL = 0
     TRADE_SOURCE_EXCHANGE = 1
+    TRADE_SOURCE_DEALER = 2
 
 
 class FakeOrderDirection(Enum):
@@ -157,6 +159,7 @@ class FakeMarketDataService:
         self.get_candles_kwargs: dict[str, object] | None = None
         self.get_trading_status_kwargs: dict[str, object] | None = None
         self.get_last_prices_kwargs: dict[str, object] | None = None
+        self.get_last_trades_kwargs: dict[str, object] | None = None
         self.get_order_book_kwargs: dict[str, object] | None = None
 
     def get_trading_status(self, **kwargs: object) -> Box:
@@ -212,6 +215,21 @@ class FakeMarketDataService:
             bids=[Box(price=Box(units=300, nano=0), quantity=10)],
             asks=[Box(price=Box(units=301, nano=0), quantity=8)],
             is_consistent=True,
+        )
+
+    def get_last_trades(self, **kwargs: object) -> Box:
+        self.get_last_trades_kwargs = dict(kwargs)
+        return Box(
+            trades=[
+                Box(
+                    instrument_uid="uid-sber",
+                    figi="figi-sber",
+                    price=Box(units=300, nano=700_000_000),
+                    quantity=3,
+                    direction=FakeTradeDirection.TRADE_DIRECTION_BUY,
+                    time=datetime(2026, 6, 15, 7, 2, tzinfo=UTC),
+                )
+            ]
         )
 
 
@@ -776,6 +794,19 @@ def test_sdk_unary_maps_market_payload_shapes() -> None:
             timeout_seconds=1.0,
         )
     )
+    last_trades = asyncio.run(
+        client.call_unary(
+            "GetLastTrades",
+            {
+                "instrument": {"instrument_uid": "uid-sber"},
+                "from": "2026-06-15T07:00:00+00:00",
+                "to": "2026-06-15T07:05:00+00:00",
+                "trade_source": "all",
+            },
+            metadata=metadata,
+            timeout_seconds=1.0,
+        )
+    )
     order_book = asyncio.run(
         client.call_unary(
             "GetOrderBook",
@@ -797,6 +828,12 @@ def test_sdk_unary_maps_market_payload_shapes() -> None:
     assert services.market_data.get_last_prices_kwargs is not None
     assert services.market_data.get_last_prices_kwargs["last_price_type"] is (
         FakeLastPriceType.LAST_PRICE_EXCHANGE
+    )
+    assert last_trades.data["trades"][0]["price"] == "300.7"
+    assert last_trades.data["trades"][0]["side"] == "trade_direction_buy"
+    assert services.market_data.get_last_trades_kwargs is not None
+    assert services.market_data.get_last_trades_kwargs["trade_source"] is (
+        FakeTradeSourceType.TRADE_SOURCE_ALL
     )
     assert order_book.data["bids"][0]["price"] == "300"
     assert order_book.data["asks"][0]["quantity_lots"] == "8"

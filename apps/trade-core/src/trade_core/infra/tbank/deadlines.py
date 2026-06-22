@@ -24,6 +24,7 @@ RECOMMENDED_DEADLINES_MS: Mapping[str, int] = MappingProxyType(
         "GetCandles": 500,
         "GetDividends": 500,
         "GetLastPrices": 500,
+        "GetLastTrades": 500,
         "GetOrderBook": 500,
         "PostOrder": 1500,
         "CancelOrder": 1500,

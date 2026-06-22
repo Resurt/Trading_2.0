@@ -81,12 +81,17 @@ export const useRobotStore = defineStore("robot", () => {
   const lastSessionPreflight = ref<SessionPreflightResponse | null>(null);
   let dashboardSocket: WebSocket | null = null;
   let balancePollTimer: number | null = null;
+  let snapshotInFlight = false;
 
   const currentSignal = computed(() => signals.value[0] ?? null);
   const currentBlockerCode = computed(() => currentSignal.value?.final_blocker_code ?? null);
   const degraded = computed(() => status.value.degraded_flags.length > 0 || error.value !== null);
 
   async function fetchInitialSnapshot(): Promise<void> {
+    if (snapshotInFlight) {
+      return;
+    }
+    snapshotInFlight = true;
     loading.value = true;
     error.value = null;
     snapshotWarnings.value = [];
@@ -94,6 +99,7 @@ export const useRobotStore = defineStore("robot", () => {
       const dashboard = await apiClient.dashboardState();
       applyDashboardSnapshot(dashboard);
       loading.value = false;
+      snapshotInFlight = false;
       return;
     } catch (unknownError) {
       snapshotWarnings.value.push(`dashboard_state_unavailable: ${errorMessage(unknownError)}`);
@@ -141,6 +147,7 @@ export const useRobotStore = defineStore("robot", () => {
 
     error.value = snapshotWarnings.value.length ? snapshotWarnings.value.join("; ") : null;
     loading.value = false;
+    snapshotInFlight = false;
   }
 
   async function connectDashboardSocket(): Promise<void> {

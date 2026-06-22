@@ -1,5 +1,22 @@
 # Спецификация frontend dashboard
 
+## Live Market Refresh Model
+
+Live Dashboard keeps the last good market snapshot on screen. A failed or slow
+refresh must not erase existing quotes, order book, balance, or trade tape.
+
+The dashboard uses two refresh levels:
+
+- fast universe refresh: `/market/quotes/refresh?details=false` updates readonly
+  prices for the core universe without loading order book/trade tape for every
+  instrument;
+- selected instrument refresh:
+  `/market/quotes/refresh?instruments=<ticker>&details=true` loads order book
+  and recent broker trades only for the selected instrument.
+
+Broker OTC/indicative trades are shown only as operator display data. They must
+not be treated as official MOEX tape or calibration samples.
+
 Frontend - это Vue 3 dark-theme интерфейс оператора и аналитика. Это не landing page и не декоративная витрина.
 
 ## Технологии

@@ -18,6 +18,7 @@ from trade_core.broker_gateway import (
     InstrumentRef,
     InstrumentResolveRequest,
     LastPricesRequest,
+    LastTradesRequest,
     OrderBookRequest,
     OrderPlacementRequest,
     OrdersRequest,
@@ -183,6 +184,23 @@ class TBankBrokerGateway:
                     _instrument_payload(instrument)
                     for instrument in request.instruments
                 ]
+            },
+            metadata,
+        )
+
+    async def get_last_trades(
+        self,
+        request: LastTradesRequest,
+        metadata: RequestMetadata | None = None,
+    ) -> BrokerUnaryResponse:
+        _ensure_resolved_broker_identity(request.instrument, operation_name="GetLastTrades")
+        return await self._call_readonly(
+            "GetLastTrades",
+            {
+                "instrument": _instrument_payload(request.instrument),
+                "from": _datetime_to_iso(request.from_),
+                "to": _datetime_to_iso(request.to),
+                "trade_source": request.trade_source,
             },
             metadata,
         )

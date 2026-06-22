@@ -1,5 +1,15 @@
 # Market Data Pipeline и Bar Engine
 
+## Broker Display Refresh
+
+The BFF separates fast quote refresh from selected-instrument detail refresh.
+Universe refresh uses readonly last prices and must stay fast. Order book and
+recent trade tape refresh are limited to the selected instrument to avoid
+overloading the broker SDK/threadpool and to keep `/market/overview` responsive.
+
+Broker OTC/indicative quote and trade rows are tagged as display-only and are
+excluded from calibration by default.
+
 Этот документ фиксирует реализацию шага 06. Он дополняет `Docs/architecture.md`,
 `Docs/broker-gateway.md`, `Docs/session-manager.md` и `Docs/logging-analytics-spec.md`.
 

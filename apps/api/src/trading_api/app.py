@@ -368,15 +368,22 @@ def create_fastapi_app(
         auth: AuthDep,
         service: ReadServiceDep,
         instruments: Annotated[str | None, Query()] = None,
+        details: Annotated[bool, Query()] = False,
     ) -> MarketOverviewResponse:
         require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
-        refreshed = await _market_overview_with_broker_quotes(
-            request,
-            overview=service.market_overview(),
-            instruments=instruments or _default_preflight_instruments(),
-        )
-        _store_market_quote_cache(request.app, refreshed)
-        return refreshed
+        base_overview = service.market_overview()
+        lock = _market_quote_refresh_lock(cast(FastAPI, request.app))
+        if lock.locked():
+            return _market_overview_with_cached_quotes(request.app, base_overview)
+        async with lock:
+            refreshed = await _market_overview_with_broker_quotes(
+                request,
+                overview=base_overview,
+                instruments=instruments or _default_preflight_instruments(),
+                include_details=details,
+            )
+            _store_market_quote_cache(request.app, refreshed)
+            return refreshed
 
     @app.get(
         "/market/microstructure/latest",
@@ -1714,6 +1721,7 @@ async def _market_overview_with_broker_quotes(
     *,
     overview: MarketOverviewResponse,
     instruments: str,
+    include_details: bool = False,
 ) -> MarketOverviewResponse:
     from trade_core.broker_gateway import LastPricesRequest
 
@@ -1770,11 +1778,21 @@ async def _market_overview_with_broker_quotes(
         }
         for instrument in overview.instruments
     }
-    order_books_by_instrument = await _broker_order_books_by_instrument(
-        gateway=gateway,
-        refs=refs,
-        context_by_instrument=context_by_instrument,
-    )
+    recent_trades_by_instrument: dict[str, list[dict[str, object]]] = {}
+    order_books_by_instrument: dict[str, dict[str, object]] = {}
+    if include_details:
+        detailed_refs = refs[: int(os.environ.get("MARKET_DETAILED_REFRESH_MAX_INSTRUMENTS", "1"))]
+        recent_trades_by_instrument = await _broker_market_trades_by_instrument(
+            gateway=gateway,
+            refs=detailed_refs,
+            context_by_instrument=context_by_instrument,
+        )
+        order_books_by_instrument = await _broker_order_books_by_instrument(
+            gateway=gateway,
+            refs=detailed_refs,
+            context_by_instrument=context_by_instrument,
+            recent_trades_by_instrument=recent_trades_by_instrument,
+        )
 
     refreshed = []
     for instrument in overview.instruments:
@@ -1789,8 +1807,26 @@ async def _market_overview_with_broker_quotes(
             )
             continue
         price_payload = prices_by_instrument.get(instrument.instrument_id)
+        recent_trades = cast(
+            list[dict[str, object]],
+            order_books_by_instrument.get(instrument.instrument_id, {}).get(
+                "recent_market_trades",
+                [],
+            ),
+        )
         if price_payload is None:
-            refreshed.append(instrument)
+            if recent_trades:
+                refreshed.append(
+                    instrument.model_copy(
+                        update={
+                            "recent_market_trades": recent_trades,
+                            "market_trades_source": "tbank_get_last_trades",
+                            "market_trades_age_ms": _market_trades_age_ms(recent_trades),
+                        }
+                    )
+                )
+            else:
+                refreshed.append(instrument)
             continue
         price = _decimal_or_none(price_payload.get("price"))
         if price is None:
@@ -1832,6 +1868,13 @@ async def _market_overview_with_broker_quotes(
                         if official_exchange_closed
                         else None
                     ),
+                    "recent_market_trades": recent_trades,
+                    "market_trades_source": (
+                        "tbank_get_last_trades"
+                        if recent_trades
+                        else "no_market_trades_samples"
+                    ),
+                    "market_trades_age_ms": _market_trades_age_ms(recent_trades),
                     "quote_payload": {
                         **instrument.quote_payload,
                         "source": last_price_source,
@@ -1853,18 +1896,22 @@ async def _broker_order_books_by_instrument(
     gateway: Any,
     refs: list[Any],
     context_by_instrument: dict[str, dict[str, object]],
+    recent_trades_by_instrument: dict[str, list[dict[str, object]]],
 ) -> dict[str, dict[str, object]]:
     from trade_core.broker_gateway import OrderBookRequest
 
-    timeout_seconds = float(os.environ.get("MARKET_ORDER_BOOK_REFRESH_TIMEOUT_SECONDS", "2.5"))
+    timeout_seconds = float(os.environ.get("MARKET_ORDER_BOOK_REFRESH_TIMEOUT_SECONDS", "1.0"))
+    concurrency = max(1, int(os.environ.get("MARKET_ORDER_BOOK_REFRESH_CONCURRENCY", "4")))
+    semaphore = asyncio.Semaphore(concurrency)
 
     async def fetch(ref: Any) -> tuple[str, dict[str, object] | None]:
         instrument_id = str(getattr(ref, "instrument_id", "") or "")
         try:
-            response = await asyncio.wait_for(
-                gateway.get_order_book(OrderBookRequest(instrument=ref, depth=10)),
-                timeout=timeout_seconds,
-            )
+            async with semaphore:
+                response = await asyncio.wait_for(
+                    gateway.get_order_book(OrderBookRequest(instrument=ref, depth=10)),
+                    timeout=timeout_seconds,
+                )
         except Exception:
             return instrument_id, None
         return instrument_id, _order_book_overview_payload(
@@ -1875,6 +1922,7 @@ async def _broker_order_books_by_instrument(
             official_exchange_closed=bool(
                 context_by_instrument.get(instrument_id, {}).get("official_exchange_closed")
             ),
+            recent_market_trades=recent_trades_by_instrument.get(instrument_id, []),
         )
 
     results = await asyncio.gather(*(fetch(ref) for ref in refs))
@@ -1885,11 +1933,79 @@ async def _broker_order_books_by_instrument(
     }
 
 
+async def _broker_market_trades_by_instrument(
+    *,
+    gateway: Any,
+    refs: list[Any],
+    context_by_instrument: dict[str, dict[str, object]],
+) -> dict[str, list[dict[str, object]]]:
+    from trade_core.broker_gateway import LastTradesRequest
+
+    timeout_seconds = float(os.environ.get("MARKET_TRADES_REFRESH_TIMEOUT_SECONDS", "1.0"))
+    lookback_minutes = int(os.environ.get("MARKET_TRADES_REFRESH_LOOKBACK_MINUTES", "30"))
+    limit = int(os.environ.get("MARKET_TRADES_REFRESH_LIMIT", "12"))
+    concurrency = max(1, int(os.environ.get("MARKET_TRADES_REFRESH_CONCURRENCY", "4")))
+    semaphore = asyncio.Semaphore(concurrency)
+    to_ts = datetime.now(tz=UTC)
+    from_ts = to_ts - timedelta(minutes=max(1, lookback_minutes))
+
+    async def fetch(ref: Any) -> tuple[str, list[dict[str, object]]]:
+        instrument_id = str(getattr(ref, "instrument_id", "") or "")
+        context = context_by_instrument.get(instrument_id, {})
+        official_exchange_open = bool(context.get("official_exchange_open"))
+        official_exchange_closed = bool(context.get("official_exchange_closed"))
+        trade_source = "exchange" if official_exchange_open else "all"
+        venue_type = "official_exchange" if official_exchange_open else "broker_otc"
+        source = (
+            "tbank_get_last_trades_exchange"
+            if official_exchange_open
+            else "tbank_get_last_trades_broker"
+        )
+        include_in_calibration = official_exchange_open and not official_exchange_closed
+        try:
+            async with semaphore:
+                response = await asyncio.wait_for(
+                    gateway.get_last_trades(
+                        LastTradesRequest(
+                            instrument=ref,
+                            from_=from_ts,
+                            to=to_ts,
+                            trade_source=trade_source,
+                        )
+                    ),
+                    timeout=timeout_seconds,
+                )
+        except Exception:
+            return instrument_id, []
+        trades = response.data.get("trades")
+        if not isinstance(trades, list):
+            return instrument_id, []
+        normalized: list[dict[str, object]] = []
+        for item in trades[:limit]:
+            if not isinstance(item, dict):
+                continue
+            normalized.append(
+                {
+                    **item,
+                    "instrument_id": instrument_id,
+                    "source": source,
+                    "venue_type": venue_type,
+                    "quote_allowed_for_data_collection": include_in_calibration,
+                    "include_in_calibration": include_in_calibration,
+                }
+            )
+        return instrument_id, normalized
+
+    results = await asyncio.gather(*(fetch(ref) for ref in refs))
+    return {instrument_id: trades for instrument_id, trades in results if instrument_id}
+
+
 def _order_book_overview_payload(
     payload: dict[str, object],
     *,
     official_exchange_open: bool = False,
     official_exchange_closed: bool = False,
+    recent_market_trades: list[dict[str, object]] | None = None,
 ) -> dict[str, object] | None:
     bids = _price_levels(payload.get("bids"), reverse=True)
     asks = _price_levels(payload.get("asks"), reverse=False)
@@ -1930,6 +2046,7 @@ def _order_book_overview_payload(
         if official_exchange_closed
         else "broker_indicative_quote"
     )
+    recent_market_trades = recent_market_trades or []
     quality_components = calculate_market_quality(
         spread_bps=spread_bps,
         bid_depth_lots=bid_depth,
@@ -1941,7 +2058,7 @@ def _order_book_overview_payload(
         order_book_stale=False,
         venue_type=venue_type,
         official_exchange_open=official_exchange_open,
-        trades_count=0,
+        trades_count=len(recent_market_trades),
     )
     return {
         "venue_type": venue_type,
@@ -1989,9 +2106,13 @@ def _order_book_overview_payload(
         "order_book_ts": received_ts,
         "order_book_age_ms": int(age_seconds * 1000),
         "order_book_stale": False,
-        "recent_market_trades": [],
-        "market_trades_source": "no_market_trades_samples",
-        "market_trades_age_ms": None,
+        "recent_market_trades": recent_market_trades,
+        "market_trades_source": (
+            "tbank_get_last_trades"
+            if recent_market_trades
+            else "no_market_trades_samples"
+        ),
+        "market_trades_age_ms": _market_trades_age_ms(recent_market_trades),
         "reason_code": (
             "moex_dsvd_cancelled_platform_update"
             if official_exchange_closed
@@ -2217,6 +2338,22 @@ def _datetime_or_none(value: object) -> datetime | None:
     return parsed.astimezone(UTC)
 
 
+def _market_trades_age_ms(trades: list[dict[str, object]]) -> int | None:
+    newest: datetime | None = None
+    for trade in trades:
+        ts = _datetime_or_none(
+            trade.get("exchange_ts")
+            or trade.get("ts_utc")
+            or trade.get("time")
+            or trade.get("ts")
+        )
+        if ts is not None and (newest is None or ts > newest):
+            newest = ts
+    if newest is None:
+        return None
+    return max(0, int((datetime.now(tz=UTC) - newest).total_seconds() * 1000))
+
+
 def _read_service(request: Request) -> Iterator[BffReadService]:
     database = _database_service(request)
     with database.session_scope() as session:
@@ -2429,6 +2566,14 @@ def _market_quote_cache(
         cache = {}
         app.state.market_quote_refresh_cache = cache
     return cast(dict[str, tuple[MarketInstrumentOverview, datetime]], cache)
+
+
+def _market_quote_refresh_lock(app: FastAPI) -> asyncio.Lock:
+    lock = getattr(app.state, "market_quote_refresh_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        app.state.market_quote_refresh_lock = lock
+    return cast(asyncio.Lock, lock)
 
 
 def _market_quote_cache_ttl_seconds() -> float:
