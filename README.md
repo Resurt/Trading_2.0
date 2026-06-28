@@ -300,9 +300,8 @@ python scripts/run_data_only_shadow_smoke.py --instruments SBER,GAZP,LKOH,YDEX,T
 
 The dashboard Start action calls `/session/preflight` first. If `market_open=false`,
 the UI shows a rejected/preflight-blocked command with `reason_code` and
-`next_session_at`. The frontend then calls `POST /robot/start` once so the API can
-persist a rejected `robot_command`/audit event; trade-core does not start streams.
-Direct `POST /robot/start` calls are also guarded by API preflight and return
+`next_session_at` and does not call `POST /robot/start`. Direct `POST /robot/start`
+calls are also guarded by API preflight and return
 `accepted=false` when the market is closed or unavailable.
 The API keeps a short 30-second server-side preflight cache so the Start request can
 reuse the fresh dashboard preflight result instead of repeating a slow broker status pass.
@@ -328,6 +327,14 @@ entities.
 Data-only Start is market-data-only. Runtime micro-session position snapshots are
 skipped, so account-level `GetPositions`/`GetPortfolio` calls happen only through
 explicit balance diagnostics such as `/portfolio/refresh`.
+
+Known-invalid primary data-only rows are not retained as rejected calibration
+samples. If a bug writes `market_microstructure_snapshot` or `order_book_summary`
+after the session cutoff, during official closure, in OTC/indicative mode, from
+stale local history, or with wrong session context, maintenance must write a
+purge manifest, preserve the incident in `audit_event`, and remove those rows
+from primary calibration/logging tables. The protected CLI is
+`scripts/run_purge_invalid_data_shadow_rows.py`.
 
 The Start button must show an animated preflight/start progress state, not a silent
 disabled button. The command strip shows the phase, message, reason code and next

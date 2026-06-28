@@ -132,6 +132,39 @@ describe("robot store", () => {
     expect(robot.lastCommandMessage).toContain("Data-only");
   });
 
+  it("shows concise already-running feedback and auto-dismisses it", async () => {
+    vi.useFakeTimers();
+    apiClientMock.sessionPreflight.mockResolvedValue(preflightFixture(true));
+    apiClientMock.startRobot.mockResolvedValue({
+      ...commandFixture("start", "already_running"),
+      reason_code: "data_only_collection_already_collecting",
+      message: "Data-only collector is already running.",
+    });
+    apiClientMock.dataShadowStatus.mockResolvedValue(dataShadowStatusFixture("collecting"));
+    apiClientMock.robotStatus.mockResolvedValue(statusFixture());
+    apiClientMock.currentSession.mockResolvedValue(sessionFixture());
+    apiClientMock.currentSignals.mockResolvedValue([]);
+    const robot = useRobotStore();
+
+    try {
+      await robot.startRobot();
+
+      expect(apiClientMock.startRobot).toHaveBeenCalledTimes(1);
+      expect(robot.lastCommandStatus).toBe("already_running");
+      expect(robot.lastCommandMessage).toBe(
+        "\u0421\u0431\u043e\u0440 \u043b\u043e\u0433\u043e\u0432 \u0443\u0436\u0435 \u0437\u0430\u043f\u0443\u0449\u0435\u043d.",
+      );
+
+      vi.advanceTimersByTime(12_000);
+      await Promise.resolve();
+
+      expect(robot.lastCommandStatus).toBeNull();
+      expect(robot.lastCommandMessage).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("shows stop command result", async () => {
     apiClientMock.stopRobot.mockResolvedValue(commandFixture("stop", "requested"));
     apiClientMock.robotStatus.mockResolvedValue(statusFixture());

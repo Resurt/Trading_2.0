@@ -345,7 +345,22 @@ preflight context. If the current time is outside `current_window_start_at` /
 stops streams and polling, emits `data_only_shadow_collection_auto_stopped`, and
 keeps `stream_alive=false` in `/runtime/data-shadow/status`.
 
-Historical rows are not rewritten. If an older run produced snapshots after the
-session close, analytics must classify those rows as
-`late_after_session_close`, exclude them from calibration metrics, and keep them
-available only for incident review.
+Known-invalid primary market-data rows are purged, not merely hidden by
+`not_for_calibration` flags. If a run produced `market_microstructure_snapshot`
+or `order_book_summary` rows after the session close, during an official exchange
+closed override, in OTC/dealer/indicative mode, from stale/local history, or with
+bugged session context, those primary rows must be removed from calibration and
+logging tables after a purge manifest is written. Incident evidence stays in
+`.local` reports and `audit_event`; the invalid primary rows do not remain as
+calibration inputs.
+
+Use the protected purge CLI for known late data-shadow rows:
+
+```bash
+python scripts/run_purge_invalid_data_shadow_rows.py --date TODAY --reason late_after_session_close_bug --dry-run --json-output
+python scripts/run_purge_invalid_data_shadow_rows.py --date TODAY --reason late_after_session_close_bug --apply --json-output
+```
+
+The purge must record `data_only_invalid_rows_purged` in `audit_event` and must
+not delete valid rows before the cutoff, `audit_event`, `robot_command`, or
+historical candle backfill data.

@@ -16,6 +16,7 @@ import type {
 import { useMarketStore } from "./market";
 
 const CORE_UNIVERSE = "SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR";
+const COMMAND_AUTO_DISMISS_MS = 12_000;
 
 const EMPTY_STATUS: RobotStatusResponse = {
   balance: {
@@ -81,6 +82,7 @@ export const useRobotStore = defineStore("robot", () => {
   const lastSessionPreflight = ref<SessionPreflightResponse | null>(null);
   let dashboardSocket: WebSocket | null = null;
   let balancePollTimer: number | null = null;
+  let commandDismissTimer: number | null = null;
   let snapshotInFlight = false;
 
   const currentSignal = computed(() => signals.value[0] ?? null);
@@ -387,6 +389,7 @@ export const useRobotStore = defineStore("robot", () => {
       message: `${prefix} Причина: ${preflight.reason_code}.${nextSession}`,
       reasonCode: preflight.reason_code,
       nextSessionAt: preflight.next_session_at,
+      autoDismissMs: COMMAND_AUTO_DISMISS_MS,
     });
   }
 
@@ -397,6 +400,7 @@ export const useRobotStore = defineStore("robot", () => {
       message: commandMessageFromResponse(response),
       reasonCode: response.reason_code,
       nextSessionAt: preflight?.next_session_at ?? null,
+      autoDismissMs: COMMAND_AUTO_DISMISS_MS,
     });
   }
 
@@ -405,12 +409,35 @@ export const useRobotStore = defineStore("robot", () => {
     message: string;
     reasonCode?: string | null;
     nextSessionAt?: string | null;
+    autoDismissMs?: number | null;
   }): void {
+    clearCommandDismissTimer();
     lastCommandStatus.value = payload.status;
     lastCommandMessage.value = payload.message;
     lastCommandReasonCode.value = payload.reasonCode ?? null;
     lastCommandNextSessionAt.value = payload.nextSessionAt ?? null;
     lastCommandAt.value = new Date().toISOString();
+    if (payload.autoDismissMs && payload.autoDismissMs > 0) {
+      commandDismissTimer = window.setTimeout(() => {
+        dismissCommand();
+      }, payload.autoDismissMs);
+    }
+  }
+
+  function clearCommandDismissTimer(): void {
+    if (commandDismissTimer === null) {
+      return;
+    }
+    window.clearTimeout(commandDismissTimer);
+    commandDismissTimer = null;
+  }
+
+  function dismissCommand(): void {
+    clearCommandDismissTimer();
+    lastCommandStatus.value = null;
+    lastCommandMessage.value = null;
+    lastCommandReasonCode.value = null;
+    lastCommandNextSessionAt.value = null;
   }
 
   function errorMessage(value: unknown): string {
@@ -418,6 +445,14 @@ export const useRobotStore = defineStore("robot", () => {
   }
 
   function commandMessageFromResponse(response: RobotCommandResponse): string {
+    if (
+      response.reason_code === "data_only_collection_already_collecting" ||
+      response.reason_code === "data_only_collection_already_running" ||
+      response.status === "already_running" ||
+      response.status === "already_collecting"
+    ) {
+      return "\u0421\u0431\u043e\u0440 \u043b\u043e\u0433\u043e\u0432 \u0443\u0436\u0435 \u0437\u0430\u043f\u0443\u0449\u0435\u043d.";
+    }
     if (!response.accepted) {
       return response.message || "Команда отклонена preflight.";
     }
@@ -476,6 +511,7 @@ export const useRobotStore = defineStore("robot", () => {
     startRobot,
     stopRobot,
     refreshBalance,
+    dismissCommand,
     startBalancePolling,
     stopBalancePolling,
   };

@@ -1260,8 +1260,18 @@ are rejected as `late_after_session_close` even if older snapshot payloads
 incorrectly contain `include_in_calibration=true` or `calibration_allowed=true`.
 Analytics payloads expose `microstructure_rows_total`,
 `calibration_microstructure_rows`, `calibration_rejected_rows`, and
-`calibration_rejection_reasons`; rejected rows may remain in PostgreSQL for audit
-but must not affect spread/depth/imbalance/quality calibration metrics.
+`calibration_rejection_reasons`.
+
+Known-invalid primary market-data rows must not remain in PostgreSQL primary
+calibration/logging tables. Rows created after session close, during an official
+exchange closed override, in OTC/dealer/indicative mode, from stale/local
+history, or with bugged session context must be purged from
+`market_microstructure_snapshot` and dependent primary read models after a
+manifest is written. Diagnostic metadata may remain in `.local` reports and
+`audit_event`, but the invalid rows themselves are not kept as rejected
+calibration rows. A purge writes an audit event with
+`action=data_only_invalid_rows_purged`, reason, cutoff, affected tables, deleted
+counts, and manifest path.
 ## Market Source And Quality Events
 
 Market-source payloads must include official exchange and venue context:

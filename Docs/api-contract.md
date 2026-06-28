@@ -349,6 +349,15 @@ and must set `calibration_market_quality_score=0` or not applicable. Only an
 open session accepted by fresh data-only preflight may produce calibration-eligible
 market quality.
 
+Known-invalid primary market-data rows are not retained as rejected calibration
+samples. If a bug writes `market_microstructure_snapshot` or dependent primary
+rows after the session cutoff, during official closure, in OTC/indicative mode,
+from stale local history, or with wrong session context, maintenance must create
+a purge manifest, write `audit_event.action=data_only_invalid_rows_purged`, and
+remove those rows from primary calibration/logging tables. Audit metadata may
+remain in `audit_event` and `.local` reports; invalid primary rows must not stay
+in the tables consumed by calibration.
+
 ## `/runtime/data-shadow/status`
 
 The data-shadow status payload includes observable supervisor fields:
