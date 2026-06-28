@@ -194,6 +194,16 @@ original broker message in `schedule_error_message`. This error is not by itself
 permission to start collection; fallback schedule decisions must be confirmed by
 per-instrument broker trading status.
 
+When broker schedules are syntactically valid but miss the active evening window
+for the current calendar date while `GetTradingStatus` succeeds with exchange
+trading available, preflight logs should keep the contradiction visible:
+`source=broker_status_fallback_time_rules`,
+`schedule_source=broker_trading_schedules_status_fallback`,
+`fallback_used=true`, and warnings
+`broker_schedule_missing_active_window` plus
+`broker_status_open_schedule_closed`. If all broker status calls fail, the same
+fallback window must not start collection.
+
 ### Strict event types
 
 Строгие `event_type` для доменных событий и корреляции логов:

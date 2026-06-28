@@ -148,8 +148,18 @@ not silently contradict another caller. The response records
 - if at least one instrument has an open broker status during an open fallback
   window, `working_instruments` contains only those allowed instruments and
   `blocked_instruments` explains the rest;
-- if broker schedule says closed while statuses look open, preflight stays closed
-  and adds `broker_status_open_schedule_closed`.
+- if broker schedule has no active window for the current calendar date but
+  broker statuses report exchange trading during a local MOEX fallback window,
+  preflight may open data-only collection with
+  `source=broker_status_fallback_time_rules`,
+  `schedule_source=broker_trading_schedules_status_fallback`,
+  `fallback_used=true`, and warnings
+  `broker_schedule_missing_active_window` and
+  `broker_status_open_schedule_closed`;
+- if broker schedule is empty for the day, the fallback window is not used just
+  because statuses look open; collection stays closed until a usable broker
+  schedule, explicit schedule error fallback, or another documented session
+  source is available.
 
 The smoke script starts streams only for `working_instruments`. If that list is
 empty, it returns `no_tradeable_instruments` and does not start runtime streams.

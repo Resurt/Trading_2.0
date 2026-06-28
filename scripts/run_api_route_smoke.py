@@ -32,6 +32,7 @@ EXPECTED_ROUTES = (
     "/calibration/config-candidates",
 )
 REBUILD_HINT = "docker compose up -d --build api frontend"
+REQUEST_TIMEOUT_SECONDS = 30
 
 
 def main() -> None:
@@ -100,7 +101,10 @@ def _run(argv: Sequence[str]) -> dict[str, object]:
 
 def _get_json(url: str) -> dict[str, object]:
     try:
-        with urlopen(Request(url, headers={"Accept": "application/json"}), timeout=10) as response:
+        with urlopen(
+            Request(url, headers={"Accept": "application/json"}),
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        ) as response:
             body = response.read().decode("utf-8")
             return {
                 "ok": 200 <= response.status < 300,
@@ -113,7 +117,7 @@ def _get_json(url: str) -> dict[str, object]:
 
 def _get_text(url: str) -> dict[str, object]:
     try:
-        with urlopen(Request(url), timeout=10) as response:
+        with urlopen(Request(url), timeout=REQUEST_TIMEOUT_SECONDS) as response:
             response.read(512)
             return {"ok": 200 <= response.status < 500, "status": response.status}
     except (OSError, URLError) as exc:

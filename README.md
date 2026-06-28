@@ -306,6 +306,13 @@ Direct `POST /robot/start` calls are also guarded by API preflight and return
 `accepted=false` when the market is closed or unavailable.
 The API keeps a short 30-second server-side preflight cache so the Start request can
 reuse the fresh dashboard preflight result instead of repeating a slow broker status pass.
+For incident triage, compare the CLI result with
+`GET /session/preflight?...&cache=false`. If T-Bank `TradingSchedules` omits the
+current evening window but broker `GetTradingStatus` reports exchange trading,
+preflight uses `source=broker_status_fallback_time_rules` and only opens data-only
+collection for instruments with available tradeable broker statuses. If every
+status call is unavailable, Start stays blocked with
+`reason_code=broker_status_unavailable`.
 
 The Start button must show an animated preflight/start progress state, not a silent
 disabled button. The command strip shows the phase, message, reason code and next

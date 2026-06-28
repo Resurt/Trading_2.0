@@ -245,6 +245,43 @@ def test_schedule_30003_and_some_statuses_open_returns_working_instruments() -> 
     assert [item["instrument_id"] for item in result.blocked_instruments] == ["MOEX:GAZP"]
 
 
+def test_broker_schedule_missing_evening_uses_status_fallback_window() -> None:
+    gateway = FakePreflightGateway(
+        windows=[
+            {
+                "session_type": "weekday_main",
+                "session_phase": "continuous_trading",
+                "start_at": "2026-06-22T07:00:00+00:00",
+                "end_at": "2026-06-22T15:54:59+00:00",
+                "trading_date": "2026-06-22",
+                "calendar_date": "2026-06-22",
+            }
+        ],
+        api_trade_available=True,
+        trading_status="normal_trading",
+    )
+
+    result = asyncio.run(
+        TradingSessionPreflightService(cast(BrokerGateway, gateway)).run(
+            TradingSessionPreflightConfig(
+                instruments=(instrument("SBER"), instrument("GAZP")),
+                now=msk(2026, 6, 22, 22),
+            )
+        )
+    )
+
+    assert result.market_open is True
+    assert result.data_only_collection_allowed is True
+    assert result.session_type == "weekday_evening"
+    assert result.source == "broker_status_fallback_time_rules"
+    assert result.schedule_source == "broker_trading_schedules_status_fallback"
+    assert result.status_source == "GetTradingStatus"
+    assert result.fallback_used is True
+    assert result.working_instruments == ("MOEX:SBER", "MOEX:GAZP")
+    assert "broker_schedule_missing_active_window" in result.warnings
+    assert "broker_status_open_schedule_closed" in result.warnings
+
+
 def test_broker_schedule_closed_with_open_status_warns_and_stays_closed() -> None:
     gateway = FakePreflightGateway(windows=[], api_trade_available=True)
 

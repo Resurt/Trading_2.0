@@ -53,8 +53,10 @@ Incident triage can bypass this cache with
 `GET /session/preflight?...&cache=false`; the response includes `cache_hit` and
 `cache_key` so CLI/API comparisons are explicit.
 Fresh broker preflight is bounded by `TRADING_SESSION_PREFLIGHT_TIMEOUT_SECONDS`,
-default 30 seconds, because full-universe readonly broker status checks can take
-longer than a lightweight dashboard calendar pass.
+default 30 seconds in code and 45 seconds in Docker Compose, because
+full-universe readonly broker status checks can take longer than a lightweight
+dashboard calendar pass, especially while the dashboard live feed is polling
+readonly quotes.
 
 `GET /session/preflight` uses the same `TradingSessionPreflightService` rules as
 the data-only smoke CLI. The response includes schedule/status diagnostics:
@@ -75,6 +77,18 @@ alone must not mark the market open when every broker status is unavailable.
 The known 30003 trigger is a `TradingSchedules.from_` value earlier than the
 current broker date/time after timezone conversion; normal preflight requests
 schedules from the current preflight timestamp forward.
+
+T-Bank `TradingSchedules` can also return a valid payload that omits an active
+evening window while `GetTradingStatus` reports exchange `normal_trading` for
+the requested instruments. In that case preflight treats the schedule as
+incomplete for the current calendar date, uses the local MOEX evening fallback
+window, and returns `source=broker_status_fallback_time_rules`,
+`schedule_source=broker_trading_schedules_status_fallback`,
+`fallback_used=true`, and warnings including
+`broker_schedule_missing_active_window` and
+`broker_status_open_schedule_closed`. This fallback is allowed only when broker
+statuses are available and tradeable; if every status call is unavailable, Start
+remains blocked with `reason_code=broker_status_unavailable`.
 
 `RobotCommandResponse` includes:
 

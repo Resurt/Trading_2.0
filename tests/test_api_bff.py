@@ -779,9 +779,13 @@ def test_robot_status_and_market_overview(
     sber_details = client.get("/market/instruments/MOEX%3ASBER/details").json()
     sber_details = client.get("/market/instruments/MOEX%3ASBER/details").json()
     latest_microstructure = client.get("/market/microstructure/latest").json()
+    seed_ts = utc(2026, 6, 12, 7)
+    lookback_minutes = (
+        int((datetime.now(tz=UTC) - seed_ts).total_seconds() // 60) + 60
+    )
     microstructure_summary = client.get(
         "/market/microstructure/summary",
-        params={"lookback_minutes": 20000},
+        params={"lookback_minutes": lookback_minutes},
     ).json()
     data_shadow_status = client.get("/runtime/data-shadow/status").json()
 

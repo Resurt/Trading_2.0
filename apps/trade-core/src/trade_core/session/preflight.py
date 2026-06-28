@@ -187,6 +187,8 @@ class TradingSessionPreflightService:
         schedule_probe = await self._schedule(cfg, now_msk)
         schedule = schedule_probe.schedule
         source = schedule_probe.source
+        schedule_source = schedule_probe.schedule_source
+        fallback_used = schedule_probe.fallback_used
         warnings = schedule_probe.warnings
         current_window = schedule.active_window(now_msk)
         next_window = _next_window(schedule, now_msk)
@@ -225,6 +227,42 @@ class TradingSessionPreflightService:
             api_trade_available_raw or broker_otc_or_indicative_available
         )
         status_unavailable = bool(cfg.instruments) and not status_values
+        if (
+            current_window is None
+            and not official_decision.official_exchange_closed
+            and not status_unavailable
+            and api_trade_available_raw
+            and not broker_otc_or_indicative_available
+            and _schedule_has_calendar_date(schedule, now_msk.date())
+        ):
+            fallback_schedule = _fallback_schedule(
+                now_msk,
+                lookahead_days=cfg.lookahead_days,
+            )
+            fallback_window = fallback_schedule.active_window(now_msk)
+            if (
+                fallback_window is not None
+                and _public_phase(fallback_window.session_phase) == "continuous_trading"
+            ):
+                current_window = fallback_window
+                next_window = _next_window(fallback_schedule, now_msk)
+                source = "broker_status_fallback_time_rules"
+                schedule_source = (
+                    "broker_trading_schedules_status_fallback"
+                    if schedule_probe.schedule_source == "broker_trading_schedules"
+                    else schedule_probe.schedule_source
+                )
+                fallback_used = True
+                warnings = tuple(
+                    dict.fromkeys(
+                        (
+                            *warnings,
+                            "broker_schedule_missing_active_window",
+                            "broker_status_open_schedule_closed",
+                            "fallback_schedule_used",
+                        )
+                    )
+                )
 
         session_type = (
             _session_type_value(current_window.session_type)
@@ -394,13 +432,13 @@ class TradingSessionPreflightService:
             instruments_checked=tuple(_instrument_key(item) for item in cfg.instruments),
             per_instrument_status=per_instrument,
             source=source,
-            schedule_source=schedule_probe.schedule_source,
+            schedule_source=schedule_source,
             status_source=status_source,
             schedule_error_code=schedule_probe.schedule_error_code,
             schedule_error_message=schedule_probe.schedule_error_message,
             status_error_count=status_error_count,
             status_success_count=status_success_count,
-            fallback_used=schedule_probe.fallback_used,
+            fallback_used=fallback_used,
             requested_instruments=tuple(_instrument_key(item) for item in cfg.instruments),
             working_instruments=working_instruments,
             blocked_instruments=blocked_instruments,
@@ -560,6 +598,13 @@ def _fallback_schedule(now_msk: datetime, *, lookahead_days: int) -> TradingSche
             )
         )
     return TradingSchedule(windows=tuple(windows))
+
+
+def _schedule_has_calendar_date(schedule: TradingSchedule, calendar_date: date) -> bool:
+    return any(
+        (window.calendar_date or window.start_at.date()) == calendar_date
+        for window in schedule.windows
+    )
 
 
 def _window(
