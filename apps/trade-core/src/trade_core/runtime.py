@@ -954,6 +954,19 @@ class TradeCoreRuntime:
                 )
         self._current_snapshot = result.snapshot
         self.stats.cycles += 1
+        if await self._stop_data_only_collection_if_window_closed(now=observed_at):
+            self.flush_domain_events()
+            self.dispatch_report_jobs()
+            return result.snapshot
+        if (
+            self.config.data_only_shadow_enabled
+            and self.stats.collector_state == "collecting"
+            and self._data_only_preflight_payload is not None
+        ):
+            self._data_only_session_context = self._session_context_from_data_only_preflight(
+                preflight=self._data_only_preflight_payload,
+                observed_at=observed_at,
+            )
         await self._poll_data_only_order_books_if_due(now=observed_at)
         self.flush_domain_events()
         self.dispatch_report_jobs()
@@ -1066,6 +1079,8 @@ class TradeCoreRuntime:
             return
         if self.stats.collector_state != "collecting":
             return
+        if not self._data_only_collection_window_open(now=now):
+            return
         interval = max(1.0, self.config.data_only_order_book_poll_interval_seconds)
         now_utc = now.astimezone(UTC)
         last_poll = self._last_data_only_order_book_poll_at
@@ -1073,7 +1088,7 @@ class TradeCoreRuntime:
             return
         self._last_data_only_order_book_poll_at = now_utc
         self.stats.last_data_only_order_book_poll_at = now_utc
-        calibration_allowed = self._data_only_polling_calibration_allowed()
+        calibration_allowed = self._data_only_polling_calibration_allowed(now=now)
         successful = 0
         failed = 0
         for instrument in self.config.instruments:
@@ -1122,13 +1137,76 @@ class TradeCoreRuntime:
             },
         )
 
-    def _data_only_polling_calibration_allowed(self) -> bool:
+    async def _stop_data_only_collection_if_window_closed(self, *, now: datetime) -> bool:
+        if not self.config.data_only_shadow_enabled:
+            return False
+        if self.stats.collector_state != "collecting":
+            return False
+        if self._data_only_collection_window_open(now=now):
+            return False
+
+        preflight = dict(self._data_only_preflight_payload or {})
+        now_utc = now.astimezone(UTC)
+        previous_task_count = len(self._stream_tasks)
+        await self._stop_market_streams()
+        reason_code = self._data_only_collection_closed_reason(now=now)
+        self.robot_control_state = "stopped_session_closed"
+        self.stats.collector_state = "stopped_session_closed"
+        self.stats.collector_stopped_at = now_utc
+        self._data_only_preflight_payload = None
+        self._data_only_session_context = None
+        self._last_data_only_order_book_poll_at = None
+        self._write_audit_event(
+            action="data_only_shadow_collection_auto_stopped",
+            severity="warning",
+            payload={
+                "runtime_id": str(self.runtime_id),
+                "reason_code": reason_code,
+                "stopped_at": now_utc.isoformat(),
+                "previous_stream_tasks": previous_task_count,
+                "collector_state": self.stats.collector_state,
+                "preflight_result": preflight,
+                "current_window_end_at": preflight.get("current_window_end_at"),
+                "real_orders_disabled": True,
+                "strategy_trading_disabled": True,
+            },
+        )
+        return True
+
+    def _data_only_polling_calibration_allowed(self, *, now: datetime) -> bool:
         preflight = self._data_only_preflight_payload or {}
         return bool(
             preflight.get("streams_for_calibration_allowed") is True
             and preflight.get("data_only_collection_allowed") is True
             and preflight.get("market_open") is True
+            and self._data_only_collection_window_open(now=now)
         )
+
+    def _data_only_collection_window_open(self, *, now: datetime) -> bool:
+        preflight = self._data_only_preflight_payload or {}
+        if not preflight:
+            return False
+        if (
+            preflight.get("data_only_collection_allowed") is not True
+            or preflight.get("market_open") is not True
+            or preflight.get("market_window_open") is False
+        ):
+            return False
+        now_msk = _ensure_msk(now)
+        window_start = _preflight_datetime_msk(preflight, "current_window_start_at")
+        window_end = _preflight_datetime_msk(preflight, "current_window_end_at")
+        if window_start is not None and now_msk < window_start:
+            return False
+        return not (window_end is not None and now_msk >= window_end)
+
+    def _data_only_collection_closed_reason(self, *, now: datetime) -> str:
+        preflight = self._data_only_preflight_payload or {}
+        window_end = _preflight_datetime_msk(preflight, "current_window_end_at")
+        if window_end is not None and _ensure_msk(now) >= window_end:
+            return "data_only_session_window_closed"
+        if preflight.get("data_only_collection_allowed") is not True:
+            return str(preflight.get("reason_code") or "data_only_collection_not_allowed")
+        return "data_only_collection_window_not_open"
 
     def _session_context_from_data_only_preflight(
         self,
@@ -1136,12 +1214,13 @@ class TradeCoreRuntime:
         preflight: Mapping[str, object],
         observed_at: datetime,
     ) -> SessionEventContext:
-        now_msk = _preflight_now_msk(preflight) or _ensure_msk(observed_at)
+        now_msk = _ensure_msk(observed_at)
         session_type = _enum_payload(
             preflight.get("session_type"),
             SessionType,
             default=SessionType.WEEKEND if now_msk.weekday() >= 5 else SessionType.WEEKDAY_MAIN,
         )
+        window_open = self._data_only_collection_window_open(now=now_msk)
         session_phase = _enum_payload(
             preflight.get("session_phase"),
             SessionPhase,
@@ -1149,6 +1228,8 @@ class TradeCoreRuntime:
             if preflight.get("market_open") is True
             else SessionPhase.CLOSED,
         )
+        if not window_open:
+            session_phase = SessionPhase.CLOSED
         trading_date = now_msk.date()
         micro_session_id = (
             f"{trading_date.isoformat()}:{session_type.value}:"
@@ -1161,7 +1242,11 @@ class TradeCoreRuntime:
             session_phase=session_phase,
             micro_session_id=micro_session_id,
             broker_trading_status=str(
-                preflight.get("broker_trading_status")
+                (
+                    preflight.get("broker_trading_status")
+                    if window_open
+                    else self._data_only_collection_closed_reason(now=now_msk)
+                )
                 or preflight.get("reason_code")
                 or "unknown"
             ),
@@ -2807,6 +2892,16 @@ def _ensure_msk(value: datetime) -> datetime:
 
 def _preflight_now_msk(preflight: Mapping[str, object]) -> datetime | None:
     raw = preflight.get("now_msk") or preflight.get("observed_at")
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        return _ensure_msk(datetime.fromisoformat(raw))
+    except ValueError:
+        return None
+
+
+def _preflight_datetime_msk(preflight: Mapping[str, object], key: str) -> datetime | None:
+    raw = preflight.get(key)
     if not isinstance(raw, str) or not raw:
         return None
     try:

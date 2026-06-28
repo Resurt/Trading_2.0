@@ -340,6 +340,56 @@ def test_intraday_data_shadow_broker_sources_not_calibration_eligible() -> None:
         assert summary["analytics_payload"]["calibration_eligible"] is False
 
 
+def test_intraday_data_shadow_excludes_late_after_session_close_from_calibration() -> None:
+    for session in make_session():
+        valid_weekend = datetime(2026, 6, 28, 12, 0, tzinfo=UTC)
+        late_weekend = datetime(2026, 6, 28, 17, 0, tzinfo=UTC)
+        add_microstructure(
+            session,
+            valid_weekend,
+            count=5,
+            session_type="weekend",
+            spread_bps=Decimal("5"),
+            depth=Decimal("40"),
+        )
+        add_microstructure(
+            session,
+            late_weekend,
+            count=4,
+            session_type="weekend",
+            spread_bps=Decimal("100"),
+            depth=Decimal("1"),
+        )
+        late_rows = session.execute(
+            select(MarketMicrostructureSnapshot).where(
+                MarketMicrostructureSnapshot.ts_utc >= late_weekend
+            )
+        ).scalars()
+        for row in late_rows:
+            row.snapshot_payload = {
+                "source": "data_only_shadow",
+                "venue_type": "official_exchange",
+                "calibration_allowed": True,
+                "include_in_calibration": True,
+            }
+
+        payload = IntradayAnalyticsService(session).build_for_session(
+            valid_weekend.date(),
+            "weekend",
+            mode="data_shadow",
+        )
+        summary = payload["session_summaries"][0]
+
+        assert summary["avg_spread_bps"] == "5.0000"
+        assert summary["avg_depth"] == "40.0000"
+        assert summary["analytics_payload"]["calibration_eligible"] is True
+        assert summary["analytics_payload"]["calibration_microstructure_rows"] == 5
+        assert summary["analytics_payload"]["calibration_rejected_rows"] == 4
+        assert summary["analytics_payload"]["calibration_rejection_reasons"] == {
+            "late_after_session_close": 4
+        }
+
+
 def test_intraday_running_session_does_not_overwrite_completed_session() -> None:
     for session in make_session():
         now = utc_now() - timedelta(hours=3)

@@ -755,18 +755,30 @@ def _intraday_summary_from_facts(
     micro_session_id: str | None = None,
 ) -> JsonPayload:
     row_mode = _summary_mode(facts, requested_mode=mode)
+    calibration_microstructure, calibration_rejection_reasons = (
+        _calibration_microstructure_with_reasons(facts.microstructure)
+    )
+    market_activity_microstructure = (
+        calibration_microstructure
+        if mode == "data_shadow" and facts.microstructure
+        else facts.microstructure
+    )
     market_bias, trend_strength = _market_bias(facts.candles, facts.candidates)
-    market_activity = _market_activity(facts.microstructure, facts.candidates, facts.candles)
+    market_activity = _market_activity(
+        market_activity_microstructure,
+        facts.candidates,
+        facts.candles,
+    )
     blocked_count = _blocked_count(facts.candidates, facts.blockers)
     near_miss_count = _near_miss_count(facts.counterfactuals)
     spread_values = _decimal_values(
-        [row.spread_bps for row in facts.microstructure]
+        [row.spread_bps for row in calibration_microstructure]
         + [row.spread_bps for row in facts.candidates]
         + [row.spread_bps for row in facts.blockers]
     )
-    depth_values = _depth_values(facts.microstructure)
-    imbalance_values = _decimal_values(row.book_imbalance for row in facts.microstructure)
-    quality_values = _decimal_values(row.market_quality_score for row in facts.microstructure)
+    depth_values = _depth_values(calibration_microstructure)
+    imbalance_values = _decimal_values(row.book_imbalance for row in calibration_microstructure)
+    quality_values = _decimal_values(row.market_quality_score for row in calibration_microstructure)
     no_trade_reason = _no_trade_reason(
         market_activity=market_activity,
         candidate_count=len(facts.candidates),
@@ -783,8 +795,19 @@ def _intraday_summary_from_facts(
     if no_samples:
         warnings = [*warnings, "no_data_shadow_samples"]
     session_status = "no_samples" if no_samples else _session_status(facts.session_runs)
-    session_phase = "closed" if no_samples else _session_phase(facts)
-    calibration_eligible = _calibration_eligible_microstructure(facts.microstructure)
+    if (
+        facts.microstructure
+        and not calibration_microstructure
+        and set(calibration_rejection_reasons) <= {"late_after_session_close"}
+    ):
+        session_phase = "closed"
+        no_trade_reason = "market_closed_or_no_calibration_samples"
+        warnings = [*warnings, "late_after_session_close"]
+    else:
+        session_phase = "closed" if no_samples else _session_phase(facts)
+    calibration_eligible = bool(calibration_microstructure)
+    if facts.microstructure and not calibration_microstructure:
+        warnings = [*warnings, "no_calibration_eligible_microstructure"]
     payload = {
         "generated_at": generated_at.isoformat(),
         "trading_date": facts.trading_date.isoformat(),
@@ -835,6 +858,11 @@ def _intraday_summary_from_facts(
             "requested_mode": mode,
             "data_status": "no_samples" if no_samples else "has_samples",
             "calibration_eligible": calibration_eligible,
+            "microstructure_rows_total": len(facts.microstructure),
+            "calibration_microstructure_rows": len(calibration_microstructure),
+            "calibration_rejected_rows": len(facts.microstructure)
+            - len(calibration_microstructure),
+            "calibration_rejection_reasons": dict(calibration_rejection_reasons),
             "no_trade_reason_code": no_trade_reason,
             "no_trade_reason": no_trade_reason,
             "closest_to_entry": _closest_to_entry(facts.blockers, facts.counterfactuals),
@@ -1705,26 +1733,90 @@ def _default_session_type_for_date(trading_date: date) -> str:
 def _calibration_eligible_microstructure(
     rows: list[MarketMicrostructureSnapshot],
 ) -> bool:
+    eligible, _ = _calibration_microstructure_with_reasons(rows)
+    return bool(eligible)
+
+
+def _calibration_microstructure_with_reasons(
+    rows: list[MarketMicrostructureSnapshot],
+) -> tuple[list[MarketMicrostructureSnapshot], Counter[str]]:
+    eligible: list[MarketMicrostructureSnapshot] = []
+    rejection_reasons: Counter[str] = Counter()
     for row in rows:
-        payload = row.snapshot_payload if isinstance(row.snapshot_payload, dict) else {}
-        if row.is_stale:
-            continue
-        if payload.get("include_in_calibration") is False:
-            continue
-        if payload.get("calibration_allowed") is False:
-            continue
-        source = str(row.source or "")
-        venue_type = str(payload.get("venue_type") or "")
-        if source.startswith("broker") or source in {
-            "stale_local",
-            "local_history",
-            "latest_market_candle_close",
-            "previous_close",
-        }:
-            continue
-        if venue_type in {"broker_otc", "broker_indicative", "stale_local"}:
-            continue
-        return True
+        reason = _microstructure_calibration_rejection_reason(row)
+        if reason is None:
+            eligible.append(row)
+        else:
+            rejection_reasons[reason] += 1
+    return eligible, rejection_reasons
+
+
+def _microstructure_calibration_rejection_reason(
+    row: MarketMicrostructureSnapshot,
+) -> str | None:
+    payload = row.snapshot_payload if isinstance(row.snapshot_payload, dict) else {}
+    if row.is_stale:
+        return "stale"
+    if not row.instrument_id:
+        return "instrument_unknown"
+    if not row.session_type or not row.session_phase:
+        return "missing_session_context"
+    if not _microstructure_inside_session_window(row):
+        return "late_after_session_close"
+    if row.best_bid is None or row.best_ask is None:
+        return "no_bid_ask"
+    if row.best_ask < row.best_bid:
+        return "invalid_spread"
+    if row.spread_abs is None or row.spread_bps is None:
+        return "invalid_spread"
+    expected_spread = row.best_ask - row.best_bid
+    if abs(row.spread_abs - expected_spread) > Decimal("0.0001"):
+        return "invalid_spread"
+    expected_mid = (row.best_bid + row.best_ask) / Decimal("2")
+    if row.mid_price is None or abs(row.mid_price - expected_mid) > Decimal("0.0001"):
+        return "invalid_spread"
+    if expected_mid <= ZERO:
+        return "invalid_spread"
+    expected_spread_bps = (expected_spread / expected_mid) * Decimal("10000")
+    if abs(row.spread_bps - expected_spread_bps) > Decimal("0.01"):
+        return "invalid_spread"
+    if row.bid_depth_lots is None or row.ask_depth_lots is None:
+        return "no_depth"
+    if row.bid_depth_lots < ZERO or row.ask_depth_lots < ZERO:
+        return "invalid_depth"
+    if row.book_imbalance is None or not (Decimal("-1") <= row.book_imbalance <= Decimal("1")):
+        return "invalid_imbalance"
+    if _payload_bool(payload, "include_in_calibration") is False:
+        return "calibration_flag_false"
+    if _payload_bool(payload, "calibration_allowed") is False:
+        return "calibration_flag_false"
+    source = str(row.source or payload.get("source") or "").lower()
+    venue_type = str(payload.get("venue_type") or "").lower()
+    if source.startswith("broker") or source in {
+        "stale_local",
+        "local_history",
+        "latest_market_candle_close",
+        "previous_close",
+    }:
+        return "source_not_allowed"
+    if venue_type in {"broker_otc", "broker_indicative", "stale_local", "display_only"}:
+        return "broker_otc_or_indicative"
+    return None
+
+
+def _microstructure_inside_session_window(row: MarketMicrostructureSnapshot) -> bool:
+    if row.session_phase == "closed":
+        return False
+    ts = _ensure_utc(row.ts_utc).astimezone(MOSCOW_TZ)
+    minutes = ts.hour * 60 + ts.minute
+    if row.session_type == "weekend":
+        return 10 * 60 <= minutes < 19 * 60
+    if row.session_type == "weekday_morning":
+        return 7 * 60 <= minutes < 10 * 60
+    if row.session_type == "weekday_main":
+        return 10 * 60 <= minutes < 19 * 60
+    if row.session_type == "weekday_evening":
+        return 19 * 60 <= minutes < 23 * 60 + 50
     return False
 
 

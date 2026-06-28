@@ -760,9 +760,12 @@ class BffReadService:
         collector_state = _collector_state_from_command(command, stream_alive=False)
         last_message_age_seconds: Decimal | None = None
         if latest_ts is not None:
+            latest_ts_utc = (
+                latest_ts if latest_ts.tzinfo is not None else latest_ts.replace(tzinfo=UTC)
+            )
             age_seconds = max(
                 Decimal("0"),
-                Decimal(str((datetime.now(tz=UTC) - latest_ts).total_seconds())),
+                Decimal(str((datetime.now(tz=UTC) - latest_ts_utc).total_seconds())),
             )
             last_message_age_seconds = age_seconds.quantize(Decimal("0.001"))
         stream_alive = (
@@ -770,6 +773,18 @@ class BffReadService:
             and last_message_age_seconds <= Decimal("30")
         )
         collector_state = _collector_state_from_command(command, stream_alive=stream_alive)
+        auto_stop_event = self._latest_data_shadow_auto_stop_after(command)
+        auto_stop_payload = (
+            auto_stop_event.audit_payload
+            if auto_stop_event is not None and isinstance(auto_stop_event.audit_payload, dict)
+            else {}
+        )
+        if auto_stop_event is not None:
+            collector_state = str(
+                auto_stop_payload.get("collector_state") or "stopped_session_closed"
+            )
+        if _collector_state_is_stopped(collector_state):
+            stream_alive = False
         warnings = []
         if enabled and collector_state in {"collecting", "starting"} and not stream_alive:
             warnings.append("collector_no_recent_samples")
@@ -791,7 +806,9 @@ class BffReadService:
                 preflight_payload,
                 "market_closed_expected",
             ),
-            reason_code=_str_payload_value(preflight_payload, "reason_code")
+            reason_code=str(auto_stop_payload.get("reason_code"))
+            if auto_stop_payload.get("reason_code")
+            else _str_payload_value(preflight_payload, "reason_code")
             or (command.reason_code if command is not None else None),
             next_session_at=_next_session_from_preflight(preflight_payload),
             stream_alive=stream_alive,
@@ -804,7 +821,8 @@ class BffReadService:
             avg_market_quality_score=_decimal_or_none(avg_quality),
             current_session=latest_session or _str_payload_value(preflight_payload, "session_type"),
             started_at=_datetime_payload_value(result_payload, "started_at"),
-            stopped_at=_datetime_payload_value(result_payload, "stopped_at"),
+            stopped_at=_datetime_payload_value(auto_stop_payload, "stopped_at")
+            or _datetime_payload_value(result_payload, "stopped_at"),
             last_command_id=command.command_id if command is not None else None,
             last_command_status=command.status if command is not None else None,
             last_command_reason_code=command.reason_code if command is not None else None,
@@ -878,6 +896,7 @@ class BffReadService:
         elif collector_state in {
             "stopped",
             "stopped_by_operator",
+            "stopped_session_closed",
             "preflight_blocked",
             "emergency_stopped",
             "stopping",
@@ -907,6 +926,22 @@ class BffReadService:
     def _latest_robot_command(self) -> RobotCommand | None:
         return self._session.execute(
             select(RobotCommand).order_by(RobotCommand.requested_at.desc()).limit(1)
+        ).scalars().first()
+
+    def _latest_data_shadow_auto_stop_after(
+        self,
+        command: RobotCommand | None,
+    ) -> AuditEvent | None:
+        if command is None or command.command_type not in {"start", "resume"}:
+            return None
+        return self._session.execute(
+            select(AuditEvent)
+            .where(
+                AuditEvent.action == "data_only_shadow_collection_auto_stopped",
+                AuditEvent.ts_utc >= command.requested_at,
+            )
+            .order_by(AuditEvent.ts_utc.desc())
+            .limit(1)
         ).scalars().first()
 
     def hourly_reports(
@@ -2367,6 +2402,17 @@ def _collector_state_from_command(command: RobotCommand | None, *, stream_alive:
     if command.status == "failed":
         return "degraded"
     return "stopped"
+
+
+def _collector_state_is_stopped(collector_state: str) -> bool:
+    return collector_state in {
+        "stopped",
+        "stopped_by_operator",
+        "stopped_session_closed",
+        "preflight_blocked",
+        "emergency_stopped",
+        "stopping",
+    }
 
 
 def _next_session_from_command(command: RobotCommand | None) -> datetime | None:

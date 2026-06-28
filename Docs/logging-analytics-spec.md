@@ -1211,6 +1211,11 @@ New structured events/payloads:
   readonly operator actions and are not part of Start.
 - `data_only_shadow_collection_stopped`: trade-core applied Stop/Pause/Emergency Stop
   and stopped market streams/polling without order actions.
+- `data_only_shadow_collection_auto_stopped`: trade-core stopped data-only
+  streams/polling because the fresh preflight collection window closed or data-only
+  collection was no longer allowed. Payload should include `reason_code`,
+  `current_window_end_at`, `readonly_calls_only=true`, `real_orders_disabled=true`,
+  and `strategy_trading_disabled=true`.
 - `data_only_shadow_collection_preflight_blocked`: trade-core received Start without
   an open-market preflight and did not start streams.
 - `intraday_analytics_rebuild`: rebuild of `intraday_session_analytics`.
@@ -1248,6 +1253,15 @@ samples and no other facts for the requested scope, the session summary must use
 `analytics_payload.calibration_eligible=false`, and
 `no_trade_reason=market_closed_or_no_samples`. It must not persist a misleading
 `continuous_trading` row from a stale runtime session.
+
+For data-shadow intraday analytics, calibration metrics must be built from
+calibration-eligible microstructure only. Rows outside the known session window
+are rejected as `late_after_session_close` even if older snapshot payloads
+incorrectly contain `include_in_calibration=true` or `calibration_allowed=true`.
+Analytics payloads expose `microstructure_rows_total`,
+`calibration_microstructure_rows`, `calibration_rejected_rows`, and
+`calibration_rejection_reasons`; rejected rows may remain in PostgreSQL for audit
+but must not affect spread/depth/imbalance/quality calibration metrics.
 ## Market Source And Quality Events
 
 Market-source payloads must include official exchange and venue context:

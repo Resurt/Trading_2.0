@@ -366,6 +366,10 @@ The data-shadow status payload includes observable supervisor fields:
 When the collector is intentionally stopped or preflight-blocked,
 `supervisor_state=stopped`. If the implementation is not configured,
 `supervisor_state=not_configured` is explicit rather than omitted.
+If the collector stops because the current preflight window has ended,
+`collector_state=stopped_session_closed`, `stream_alive=false`, and the payload
+must expose a clear `last_stop_reason` such as `data_only_session_window_closed`.
+Recent snapshots alone must not make a stopped collector look alive.
 
 If stream order books are silent while Start is accepted, trade-core may write
 microstructure through bounded readonly `GetOrderBook` polling. These rows keep

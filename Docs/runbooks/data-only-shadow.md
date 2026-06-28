@@ -335,3 +335,17 @@ For 2026-06-20 and 2026-06-21 the local MOEX override returns
 `reason_code=moex_dsvd_cancelled_platform_update`, `market_open=false`, and
 `data_only_collection_allowed=false`. Start must be rejected and no calibration streams
 should run.
+
+## Session close behavior
+
+The collector must not keep writing calibration rows after the fresh preflight
+window closes. On each runtime cycle, trade-core rechecks the current data-only
+preflight context. If the current time is outside `current_window_start_at` /
+`current_window_end_at` or preflight no longer allows data-only collection, it
+stops streams and polling, emits `data_only_shadow_collection_auto_stopped`, and
+keeps `stream_alive=false` in `/runtime/data-shadow/status`.
+
+Historical rows are not rewritten. If an older run produced snapshots after the
+session close, analytics must classify those rows as
+`late_after_session_close`, exclude them from calibration metrics, and keep them
+available only for incident review.

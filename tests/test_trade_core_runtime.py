@@ -544,6 +544,105 @@ def test_data_only_start_probe_fallback_polls_order_book_and_writes_microstructu
     asyncio.run(run())
 
 
+def test_data_only_collection_auto_stops_after_preflight_window_end(tmp_path: Path) -> None:
+    gateway = PollingOrderBookGateway(now=msk(2026, 6, 28, 14, 30))
+    config = replace(
+        runtime_config(tmp_path),
+        data_only_shadow_enabled=True,
+        data_only_order_book_poll_interval_seconds=1,
+    )
+    runtime = TradeCoreRuntime(
+        config=config,
+        launch_policy=LaunchModePolicy.from_mode(RuntimeMode.SHADOW),
+        database=DatabaseService(config.database_url or ""),
+        broker_gateway=cast(BrokerGateway, gateway),
+    )
+
+    async def run() -> None:
+        await runtime.start()
+        with runtime.database.session_scope() as session:
+            RobotCommandRepository(session).create(
+                command_type="start",
+                requested_by="desk-operator",
+                requested_role="operator",
+                requested_at=datetime.now(tz=UTC),
+                payload={
+                    "mode": "data_shadow",
+                    "trading_disabled": True,
+                    "data_only_shadow": True,
+                    "preflight_result": {
+                        "now_msk": "2026-06-28T14:30:00+03:00",
+                        "session_type": "weekend",
+                        "session_phase": "continuous_trading",
+                        "market_open": True,
+                        "market_window_open": True,
+                        "market_closed_expected": False,
+                        "official_exchange_open": True,
+                        "official_exchange_closed": False,
+                        "venue_type": "official_exchange",
+                        "quote_source_allowed_for_data_collection": True,
+                        "data_only_collection_allowed": True,
+                        "streams_for_calibration_allowed": True,
+                        "current_window_start_at": "2026-06-28T10:00:00+03:00",
+                        "current_window_end_at": "2026-06-28T19:00:00+03:00",
+                        "reason_code": "market_open",
+                    },
+                },
+            )
+
+        assert await runtime.process_robot_commands_async() == 1
+        assert runtime.stats.collector_state == "collecting"
+        await runtime.run_cycle(now=msk(2026, 6, 28, 14, 30))
+
+        with runtime.database.session_factory() as session:
+            first_snapshot_count = session.scalar(
+                select(func.count()).select_from(MarketMicrostructureSnapshot)
+            )
+            first_snapshot = session.execute(
+                select(MarketMicrostructureSnapshot).order_by(
+                    MarketMicrostructureSnapshot.ts_utc.desc()
+                )
+            ).scalars().first()
+            assert first_snapshot_count == 2
+            assert first_snapshot is not None
+            assert first_snapshot.session_phase == "continuous_trading"
+            assert first_snapshot.micro_session_id.endswith("T1400")
+            assert first_snapshot.snapshot_payload["include_in_calibration"] is True
+
+        order_book_requests_before_close = len(gateway.order_book_requests)
+        gateway.now = msk(2026, 6, 28, 19, 1)
+        await runtime.run_cycle(now=msk(2026, 6, 28, 19, 1))
+
+        assert runtime.stats.collector_state == "stopped_session_closed"
+        assert runtime.robot_control_state == "stopped_session_closed"
+        assert runtime.stats.stream_tasks_started == 0
+        assert len(gateway.order_book_requests) == order_book_requests_before_close
+
+        with runtime.database.session_factory() as session:
+            assert (
+                session.scalar(select(func.count()).select_from(MarketMicrostructureSnapshot))
+                == first_snapshot_count
+            )
+            auto_stop_event = session.execute(
+                select(AuditEvent).where(
+                    AuditEvent.action == "data_only_shadow_collection_auto_stopped"
+                )
+            ).scalars().first()
+            assert auto_stop_event is not None
+            assert auto_stop_event.audit_payload["reason_code"] == (
+                "data_only_session_window_closed"
+            )
+            assert session.scalar(select(func.count()).select_from(SignalCandidate)) == 0
+            assert session.scalar(select(func.count()).select_from(OrderIntent)) == 0
+            assert session.scalar(select(func.count()).select_from(BrokerOrder)) == 0
+
+        assert gateway.post_order_calls == []
+        assert gateway.cancel_order_calls == []
+        await runtime.shutdown()
+
+    asyncio.run(run())
+
+
 def test_data_only_shadow_start_command_closed_market_does_not_create_orders(
     tmp_path: Path,
 ) -> None:

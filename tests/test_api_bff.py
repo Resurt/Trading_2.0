@@ -21,6 +21,7 @@ from trading_api.schemas import (
     ReportJobStatusResponse,
     ReportRebuildRequest,
     SessionPreflightResponse,
+    SessionSnapshotResponse,
 )
 from trading_common import RuntimeMode
 from trading_common.db.base import Base
@@ -78,12 +79,46 @@ class ClosedMoexCalendarService:
         )
 
 
+class OpenMoexCalendarService:
+    def decision(
+        self,
+        calendar_date: date,
+        *,
+        market: str = "stock",
+        now_msk: datetime | None = None,
+    ) -> MoexCalendarDecision:
+        del now_msk
+        return MoexCalendarDecision(
+            official_exchange_open=True,
+            official_exchange_closed=False,
+            exchange="MOEX",
+            market=market,
+            calendar_date=calendar_date,
+            session_type="weekday_main",
+            reason_code="market_open",
+            source="test_open_calendar",
+            message="test exchange open",
+            next_possible_session_at=None,
+            affected_markets=(market,),
+            is_exception_day=False,
+        )
+
+
 def force_exchange_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     read_service_module = importlib.import_module("trading_api.read_service")
     monkeypatch.setattr(
         read_service_module,
         "MoexCalendarService",
         ClosedMoexCalendarService,
+    )
+
+
+def force_exchange_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    read_service_module = importlib.import_module("trading_api.read_service")
+    monkeypatch.setattr(
+        read_service_module,
+        "MoexCalendarService",
+        OpenMoexCalendarService,
     )
 
 
@@ -905,6 +940,99 @@ def test_robot_status_and_market_overview(
     assert "Strategy trading disabled" in data_shadow_status["warning"]
 
 
+def test_data_shadow_status_reports_auto_stopped_even_with_recent_snapshots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TRADING_DATA_ONLY_SHADOW", "true")
+    database = DatabaseService(f"sqlite+pysqlite:///{tmp_path / 'data-shadow-status.db'}")
+    Base.metadata.create_all(database.engine)
+    now = datetime.now(tz=UTC)
+    with database.session_scope() as session:
+        command_id = uuid4()
+        session.add(
+            RobotCommand(
+                command_id=command_id,
+                command_type="start",
+                requested_by="frontend_operator",
+                requested_role="operator",
+                requested_at=now - timedelta(minutes=10),
+                status="applied",
+                reason_code="data_only_collection_started",
+                accepted_at=now - timedelta(minutes=10),
+                applied_at=now - timedelta(minutes=10),
+                finished_at=now - timedelta(minutes=10),
+                payload={
+                    "preflight_result": {
+                        "market_open": True,
+                        "market_closed_expected": False,
+                        "session_type": "weekend",
+                        "session_phase": "continuous_trading",
+                        "reason_code": "market_open",
+                        "next_session_at": "2026-06-29T10:00:00+03:00",
+                    }
+                },
+                result_payload={
+                    "collector_state": "collecting",
+                    "started_at": (now - timedelta(minutes=10)).isoformat(),
+                },
+            )
+        )
+        session.add(
+            MarketMicrostructureSnapshot(
+                **session_context(),
+                snapshot_id=uuid4(),
+                ts_utc=now - timedelta(seconds=5),
+                exchange_ts=now - timedelta(seconds=5),
+                received_ts=now - timedelta(seconds=5),
+                instrument_id="uid-sber",
+                best_bid=Decimal("100"),
+                best_ask=Decimal("100.1"),
+                mid_price=Decimal("100.05"),
+                spread_abs=Decimal("0.1"),
+                spread_bps=Decimal("9.995"),
+                bid_depth_lots=Decimal("10"),
+                ask_depth_lots=Decimal("8"),
+                book_imbalance=Decimal("0.1111"),
+                market_quality_score=Decimal("0.9"),
+                feed_freshness_age_ms=0,
+                is_stale=False,
+                source="data_only_shadow",
+                snapshot_payload={"include_in_calibration": True},
+            )
+        )
+        session.add(
+            AuditEvent(
+                **session_context(),
+                audit_event_id=uuid4(),
+                ts_utc=now - timedelta(seconds=3),
+                exchange_ts=None,
+                received_ts=now - timedelta(seconds=3),
+                service="trade-core",
+                actor="runtime",
+                action="data_only_shadow_collection_auto_stopped",
+                entity_type="runtime",
+                entity_id=str(command_id),
+                severity="warning",
+                correlation_id=str(command_id),
+                audit_payload={
+                    "collector_state": "stopped_session_closed",
+                    "reason_code": "data_only_session_window_closed",
+                    "stopped_at": (now - timedelta(seconds=3)).isoformat(),
+                },
+            )
+        )
+
+    with database.session_factory() as session:
+        status = BffReadService(session).data_shadow_status()
+
+    assert status.collector_state == "stopped_session_closed"
+    assert status.stream_alive is False
+    assert status.reason_code == "data_only_session_window_closed"
+    assert status.supervisor_state == "stopped"
+    assert status.stopped_at == now - timedelta(seconds=3)
+
+
 def test_portfolio_summary_degrades_when_balance_missing(tmp_path: Path) -> None:
     database = DatabaseService(f"sqlite+pysqlite:///{tmp_path / 'empty-api-bff.db'}")
     Base.metadata.create_all(database.engine)
@@ -1076,6 +1204,21 @@ def test_dashboard_market_feed_normalizes_live_session_label_from_broker_status(
     from sqlalchemy import text
 
     monkeypatch.setenv("DASHBOARD_MARKET_FEED_ENABLED", "true")
+    force_exchange_open(monkeypatch)
+    monkeypatch.setattr(
+        BffReadService,
+        "current_session",
+        lambda self, preflight=None: SessionSnapshotResponse(
+            calendar_date=date(2026, 6, 28),
+            trading_date=date(2026, 6, 28),
+            session_type="weekday_evening",
+            session_phase="continuous_trading",
+            micro_session_id="2026-06-28:weekday_evening:test",
+            broker_trading_status="normal_trading",
+            observed_at=utc(2026, 6, 28, 16),
+            source="fresh_preflight",
+        ),
+    )
     monkeypatch.setattr(app_module, "_readonly_tbank_gateway", lambda: FakeDashboardFeedGateway())
     monkeypatch.setattr(
         feed_module,
