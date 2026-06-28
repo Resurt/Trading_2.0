@@ -150,22 +150,26 @@ not silently contradict another caller. The response records
 `GetTradingStatus`:
 
 - if all instrument statuses are unavailable, collection is blocked with
-  `reason_code=broker_status_unavailable`;
+  `reason_code=broker_status_and_market_data_unavailable` unless the readonly
+  market data probe succeeds;
 - if at least one instrument has an open broker status during an open fallback
   window, `working_instruments` contains only those allowed instruments and
   `blocked_instruments` explains the rest;
-- if broker schedule has no active window for the current calendar date but
-  broker statuses report exchange trading during a local MOEX fallback window,
+- if broker schedule has no active window for the current local MOEX fallback
+  window but broker statuses report exchange trading or the readonly market data
+  probe succeeds,
   preflight may open data-only collection with
   `source=broker_status_fallback_time_rules`,
   `schedule_source=broker_trading_schedules_status_fallback`,
   `fallback_used=true`, and warnings
-  `broker_schedule_missing_active_window` and
-  `broker_status_open_schedule_closed`;
-- if broker schedule is empty for the day, the fallback window is not used just
-  because statuses look open; collection stays closed until a usable broker
-  schedule, explicit schedule error fallback, or another documented session
-  source is available.
+  `broker_schedule_missing_active_window` plus either
+  `broker_status_open_schedule_closed` or `market_data_probe_used_without_status`;
+- if broker schedule is empty/incomplete while the local fallback window is open,
+  that is not enough by itself to call the market closed. Preflight records
+  `market_window_open=true` and then gates data-only collection on
+  `GetTradingStatus` or readonly `GetLastPrices`/`GetOrderBook` probe evidence.
+  If both status and probe fail, collection stays blocked with
+  `reason_code=broker_status_and_market_data_unavailable`.
 
 The smoke script starts streams only for `working_instruments`. If that list is
 empty, it returns `no_tradeable_instruments` and does not start runtime streams.
@@ -190,7 +194,10 @@ Weekend handling:
 
 - broker `TradingSchedules` is authoritative when available;
 - a broker trading day on Saturday/Sunday is classified as `session_type=weekend`;
-- fallback weekend window is 10:00-19:00 MSK and is marked `source=fallback_weekend_time_rules`;
+- fallback weekend window is 10:00-19:00 MSK. If broker schedule is empty or
+  omits the active weekend window, an open broker status or successful readonly
+  market data probe can promote it to
+  `source=broker_status_fallback_time_rules`;
 - outside the weekend window, closed market is expected and `next_session_at` must be present when
   known.
 
@@ -286,13 +293,31 @@ Operator dashboard polling while open:
 
 These polling paths are readonly. They must not call `PostOrder`, `CancelOrder`, create
 `signal_candidate`, create `order_intent`, or create `broker_order`.
-## Official MOEX Gate
+## Data-Only Collection Gate
 
-Data-only calibration collection is allowed only when preflight reports
-`official_exchange_open=true`, `venue_type=official_exchange`, and
-`data_only_collection_allowed=true`. Broker OTC or indicative quotes can be displayed on
-the dashboard, but they are not official exchange samples and are excluded from
-calibration by default.
+Data-only persistent logging is allowed only when fresh preflight reports
+`market_open=true`, `market_window_open=true`, and
+`data_only_collection_allowed=true`. If T-Bank schedules omit the active local
+MOEX window, broker `GetTradingStatus` or readonly `GetLastPrices`/`GetOrderBook`
+probe success can allow collection with fallback warnings. `trading_allowed=false`
+always remains enforced in data-only mode.
+
+Trade-core starts only the minimal data-only stream set (`order_book`,
+`last_prices`, `trading_status`). If streams are silent but preflight allowed
+collection and readonly `GetOrderBook` works, a bounded polling fallback writes
+`market_microstructure_snapshot` through the same pipeline. This fallback is
+readonly, stops on operator Stop, and must not call `PostOrder`/`CancelOrder` or
+create trading entities.
+
+While data-only collection is running, trade-core also skips runtime position
+snapshots. Operator balance diagnostics remain available through explicit
+readonly `/portfolio/refresh` or `run_broker_balance_refresh.py`, but Start does
+not require account-level `GetPositions`/`GetPortfolio` calls.
+
+Calibration eligibility is still explicit. Broker OTC or indicative quotes can be
+displayed on the dashboard, but they are not calibration samples. Snapshot payloads
+must carry `include_in_calibration`/`calibration_allowed`; closed-session or
+display-only data sets those fields to false.
 
 Closed-session dashboard quotes and selected order books are display-only. They
 must keep `quote_allowed_for_data_collection=false`, must not use live exchange

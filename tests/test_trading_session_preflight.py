@@ -9,6 +9,8 @@ from trade_core.broker_gateway import (
     BrokerGateway,
     BrokerUnaryResponse,
     InstrumentRef,
+    LastPricesRequest,
+    OrderBookRequest,
     TradingSchedulesRequest,
     TradingStatusRequest,
 )
@@ -41,6 +43,9 @@ class FakePreflightGateway:
         api_trade_available_by_ticker: dict[str, bool] | None = None,
         trading_status_by_ticker: dict[str, str] | None = None,
         status_errors: set[str] | None = None,
+        last_price_available: bool = True,
+        order_book_available: bool = True,
+        market_data_error: bool = False,
     ) -> None:
         self.windows = windows
         self.schedule_error = schedule_error
@@ -49,8 +54,13 @@ class FakePreflightGateway:
         self.api_trade_available_by_ticker = api_trade_available_by_ticker or {}
         self.trading_status_by_ticker = trading_status_by_ticker or {}
         self.status_errors = status_errors or set()
+        self.last_price_available = last_price_available
+        self.order_book_available = order_book_available
+        self.market_data_error = market_data_error
         self.schedule_requests: list[TradingSchedulesRequest] = []
         self.trading_status_calls: list[TradingStatusRequest] = []
+        self.last_prices_calls: list[LastPricesRequest] = []
+        self.order_book_calls: list[OrderBookRequest] = []
 
     async def trading_schedules(
         self,
@@ -88,6 +98,51 @@ class FakePreflightGateway:
                     ticker,
                     self.api_trade_available,
                 ),
+            },
+        )
+
+    async def get_last_prices(
+        self,
+        request: LastPricesRequest,
+        metadata: object | None = None,
+    ) -> BrokerUnaryResponse:
+        del metadata
+        self.last_prices_calls.append(request)
+        if self.market_data_error:
+            raise TimeoutError("GetLastPrices unavailable")
+        prices = []
+        if self.last_price_available:
+            prices = [
+                {
+                    "instrument_id": instrument.instrument_id,
+                    "instrument_uid": instrument.instrument_uid,
+                    "figi": instrument.figi,
+                    "price": "300.5",
+                    "exchange_ts": "2026-06-28T11:00:00+00:00",
+                }
+                for instrument in request.instruments
+            ]
+        return BrokerUnaryResponse(method_name="GetLastPrices", data={"prices": prices})
+
+    async def get_order_book(
+        self,
+        request: OrderBookRequest,
+        metadata: object | None = None,
+    ) -> BrokerUnaryResponse:
+        del metadata
+        self.order_book_calls.append(request)
+        if self.market_data_error:
+            raise TimeoutError("GetOrderBook unavailable")
+        return BrokerUnaryResponse(
+            method_name="GetOrderBook",
+            data={
+                "instrument_id": request.instrument.instrument_id,
+                "bids": [{"price": "300", "quantity_lots": "10"}]
+                if self.order_book_available
+                else [],
+                "asks": [{"price": "301", "quantity_lots": "8"}]
+                if self.order_book_available
+                else [],
             },
         )
 
@@ -174,7 +229,11 @@ def test_trading_schedules_request_does_not_start_before_current_date() -> None:
 
 
 def test_schedule_30003_and_all_status_unavailable_blocks_collection() -> None:
-    gateway = FakePreflightGateway(schedule_error=True, status_errors={"SBER"})
+    gateway = FakePreflightGateway(
+        schedule_error=True,
+        status_errors={"SBER"},
+        market_data_error=True,
+    )
 
     result = asyncio.run(
         TradingSessionPreflightService(cast(BrokerGateway, gateway)).run(
@@ -187,7 +246,7 @@ def test_schedule_30003_and_all_status_unavailable_blocks_collection() -> None:
 
     assert result.market_open is False
     assert result.data_only_collection_allowed is False
-    assert result.reason_code == "broker_status_unavailable"
+    assert result.reason_code == "broker_status_and_market_data_unavailable"
     assert result.source == "fallback_time_rules"
     assert result.schedule_source == "tbank_error"
     assert result.schedule_error_code == "30003"
@@ -195,7 +254,10 @@ def test_schedule_30003_and_all_status_unavailable_blocks_collection() -> None:
     assert result.status_success_count == 0
     assert result.status_error_count == 1
     assert result.working_instruments == ()
-    assert result.blocked_instruments[0]["reason_code"] == "broker_status_unavailable"
+    assert (
+        result.blocked_instruments[0]["reason_code"]
+        == "broker_status_and_market_data_unavailable"
+    )
 
 
 def test_schedule_30003_prefers_numeric_error_code_over_invalid_argument() -> None:
@@ -282,7 +344,7 @@ def test_broker_schedule_missing_evening_uses_status_fallback_window() -> None:
     assert "broker_status_open_schedule_closed" in result.warnings
 
 
-def test_broker_schedule_closed_with_open_status_warns_and_stays_closed() -> None:
+def test_broker_schedule_empty_with_open_status_uses_local_window() -> None:
     gateway = FakePreflightGateway(windows=[], api_trade_available=True)
 
     result = asyncio.run(
@@ -294,11 +356,73 @@ def test_broker_schedule_closed_with_open_status_warns_and_stays_closed() -> Non
         )
     )
 
+    assert result.market_window_open is True
+    assert result.market_open is True
+    assert result.data_only_collection_allowed is True
+    assert result.trading_allowed is False
+    assert result.reason_code == "market_open"
+    assert result.source == "broker_status_fallback_time_rules"
+    assert result.schedule_source == "broker_trading_schedules_status_fallback"
+    assert result.broker_schedule_windows_count == 0
+    assert result.fallback_reason == "broker_schedule_missing_active_window"
+    assert result.working_instruments == ("MOEX:SBER",)
+    assert "broker_status_open_schedule_closed" in result.warnings
+
+
+def test_weekend_schedule_empty_with_market_data_probe_allows_collection() -> None:
+    gateway = FakePreflightGateway(
+        windows=[],
+        status_errors={"SBER"},
+        last_price_available=True,
+        order_book_available=True,
+    )
+
+    result = asyncio.run(
+        TradingSessionPreflightService(cast(BrokerGateway, gateway)).run(
+            TradingSessionPreflightConfig(
+                instruments=(instrument(),),
+                now=msk(2026, 6, 28, 14),
+            )
+        )
+    )
+
+    assert result.session_type == "weekend"
+    assert result.session_phase == "continuous_trading"
+    assert result.market_window_open is True
+    assert result.market_open is True
+    assert result.data_only_collection_allowed is True
+    assert result.trading_allowed is False
+    assert result.reason_code == "market_open"
+    assert result.working_instruments == ("MOEX:SBER",)
+    assert result.market_data_probe_success_count == 1
+    assert result.market_data_probe["MOEX:SBER"]["order_book_available"] is True
+    assert "market_data_probe_used_without_status" in result.warnings
+
+
+def test_weekend_schedule_empty_and_probe_failure_is_not_false_closed_window() -> None:
+    gateway = FakePreflightGateway(
+        windows=[],
+        status_errors={"SBER"},
+        market_data_error=True,
+    )
+
+    result = asyncio.run(
+        TradingSessionPreflightService(cast(BrokerGateway, gateway)).run(
+            TradingSessionPreflightConfig(
+                instruments=(instrument(),),
+                now=msk(2026, 6, 28, 14),
+            )
+        )
+    )
+
+    assert result.session_type == "weekend"
+    assert result.session_phase == "continuous_trading"
+    assert result.market_window_open is True
     assert result.market_open is False
     assert result.data_only_collection_allowed is False
-    assert result.reason_code == "no_trading_window"
-    assert result.source == "broker_trading_schedules"
-    assert "broker_status_open_schedule_closed" in result.warnings
+    assert result.reason_code == "broker_status_and_market_data_unavailable"
+    assert result.blocking_layer == "broker"
+    assert result.market_data_probe_success_count == 0
 
 
 def test_broker_weekend_schedule_overrides_weekday_label() -> None:
@@ -329,21 +453,21 @@ def test_broker_weekend_schedule_overrides_weekday_label() -> None:
     assert result.source == "broker_trading_schedules"
 
 
-def test_broker_non_trading_day_does_not_fall_back_to_time_rules() -> None:
+def test_weekend_after_fallback_window_stays_expected_closed() -> None:
     gateway = FakePreflightGateway(windows=[])
 
     result = asyncio.run(
         TradingSessionPreflightService(cast(BrokerGateway, gateway)).run(
             TradingSessionPreflightConfig(
                 instruments=(instrument(),),
-                now=msk(2026, 6, 13, 11),
+                now=msk(2026, 6, 28, 20),
             )
         )
     )
 
     assert result.market_open is False
     assert result.market_closed_expected is True
-    assert result.source == "broker_trading_schedules"
+    assert result.reason_code == "weekend_session_closed"
 
 
 def test_broker_dealer_status_is_not_official_exchange_without_override() -> None:

@@ -170,6 +170,14 @@ class SessionPreflightResponse(BaseModel):
     status_error_count: int = 0
     status_success_count: int = 0
     fallback_used: bool = False
+    market_window_open: bool = False
+    trading_allowed: bool = False
+    blocking_layer: str | None = None
+    broker_schedule_windows_count: int | None = None
+    fallback_reason: str | None = None
+    market_data_probe_success_count: int = 0
+    market_data_probe_error_count: int = 0
+    market_data_probe: JsonPayload = Field(default_factory=dict)
     cache_hit: bool = False
     cache_key: str | None = None
     requested_instruments: list[str] = Field(default_factory=list)

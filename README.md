@@ -308,14 +308,26 @@ The API keeps a short 30-second server-side preflight cache so the Start request
 reuse the fresh dashboard preflight result instead of repeating a slow broker status pass.
 For incident triage, compare the CLI result with
 `GET /session/preflight?...&cache=false`. If T-Bank `TradingSchedules` omits the
-current evening window but broker `GetTradingStatus` reports exchange trading,
-preflight uses `source=broker_status_fallback_time_rules` and only opens data-only
-collection for instruments with available tradeable broker statuses. If every
-status call is unavailable, Start stays blocked with
-`reason_code=broker_status_unavailable`.
+current local MOEX fallback window but broker `GetTradingStatus` reports exchange
+trading or readonly `GetLastPrices`/`GetOrderBook` probe calls work, preflight uses
+`source=broker_status_fallback_time_rules` and only opens data-only collection for
+working instruments. If status and probe are both unavailable, Start stays blocked
+with `reason_code=broker_status_and_market_data_unavailable`. In data-only mode
+`trading_allowed=false` even when collection is allowed.
 `/session/current` and `/robot/status` use the same fresh preflight decision for
 operator-facing session state; stale runtime `session_run` rows are marked with
 `session_stale`/`stale_reason` and must not make a closed market look active.
+
+After Start is accepted, trade-core uses the minimal data-only stream set
+(`order_book`, `last_prices`, `trading_status`). If stream order books are silent
+but readonly `GetOrderBook` remains available, a bounded polling fallback writes
+`market_microstructure_snapshot` through the same calculation pipeline. The fallback
+is disabled by Stop and never calls `PostOrder`, `CancelOrder`, or creates trading
+entities.
+
+Data-only Start is market-data-only. Runtime micro-session position snapshots are
+skipped, so account-level `GetPositions`/`GetPortfolio` calls happen only through
+explicit balance diagnostics such as `/portfolio/refresh`.
 
 The Start button must show an animated preflight/start progress state, not a silent
 disabled button. The command strip shows the phase, message, reason code and next

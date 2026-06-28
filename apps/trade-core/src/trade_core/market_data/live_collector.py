@@ -108,7 +108,9 @@ class LiveMarketDataCollector:
                 source=self._source,
                 payload={
                     **market_state.as_read_model(),
-                    "source": self._source,
+                    **market_state.payload,
+                    "collector_source": self._source,
+                    "source": market_state.payload.get("source", self._source),
                     "event_type": event.event_type.value,
                 },
             )

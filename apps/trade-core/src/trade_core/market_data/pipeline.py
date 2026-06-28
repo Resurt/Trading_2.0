@@ -107,6 +107,10 @@ class MarketDataPipeline:
             order_book,
             now=order_book.received_ts,
         )
+        market_state = replace(
+            market_state,
+            payload=_market_state_payload_from_order_book(order_book.payload),
+        )
         if self._store is not None:
             context = self._session_context_provider(order_book.instrument_id)
             payload = dict(order_book.payload)
@@ -177,3 +181,16 @@ def _log_market_event(
             component=component,
             details=payload,
         )
+
+
+def _market_state_payload_from_order_book(payload: dict[str, object]) -> dict[str, object]:
+    carried_keys = {
+        "source",
+        "quote_source",
+        "data_only_polling_fallback",
+        "include_in_calibration",
+        "calibration_allowed",
+        "venue_type",
+        "reason_code",
+    }
+    return {key: payload[key] for key in carried_keys if key in payload}

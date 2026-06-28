@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 
@@ -32,6 +32,7 @@ class MarketState:
     book_imbalance: Decimal | None
     market_quality_score: Decimal | None
     feed_freshness: FeedFreshness
+    payload: dict[str, object] = field(default_factory=dict)
 
     def as_read_model(self) -> dict[str, object]:
         return {

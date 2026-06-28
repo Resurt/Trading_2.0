@@ -80,6 +80,7 @@ from trade_core.market_data import (
 )
 from trade_core.market_data.persistence import SqlAlchemyMarketDataStore
 from trade_core.market_data.recovery import GapRecoveryRequest
+from trade_core.market_data.subscriptions import order_book_from_mapping
 from trade_core.portfolio import PositionService
 from trade_core.session import (
     BrokerTradingStatus,
@@ -177,6 +178,12 @@ class TradeCoreRuntimeConfig:
         "info",
         "market_trades",
     )
+    data_only_stream_names: tuple[str, ...] = (
+        "order_book",
+        "last_prices",
+        "trading_status",
+    )
+    data_only_order_book_poll_interval_seconds: float = 15.0
     dividend_sync_enabled: bool = False
     dividend_sync_lookback_days: int = 730
     dividend_sync_lookahead_days: int = 365
@@ -219,6 +226,13 @@ class TradeCoreRuntimeConfig:
             ),
             position_snapshot_freshness_seconds=int(
                 env.get("TRADE_CORE_POSITION_SNAPSHOT_FRESHNESS_SECONDS", "900")
+            ),
+            data_only_stream_names=_stream_names_from_env(
+                env.get("TRADING_DATA_ONLY_STREAM_NAMES"),
+                default=("order_book", "last_prices", "trading_status"),
+            ),
+            data_only_order_book_poll_interval_seconds=float(
+                env.get("TRADING_DATA_ONLY_ORDER_BOOK_POLL_INTERVAL_SECONDS", "15")
             ),
             dividend_sync_enabled=_bool_env(
                 env.get("TRADING_DIVIDEND_SYNC_ENABLED"),
@@ -273,6 +287,9 @@ class TradeCoreRuntimeStats:
     last_command_id: str | None = None
     last_command_status: str | None = None
     last_command_reason_code: str | None = None
+    data_only_order_book_polls: int = 0
+    data_only_order_book_poll_errors: int = 0
+    last_data_only_order_book_poll_at: datetime | None = None
 
 
 class SafeNoopBrokerGateway:
@@ -633,6 +650,9 @@ class TradeCoreRuntime:
         self._thread: Thread | None = None
         self._current_schedule: TradingSchedule | None = None
         self._current_snapshot: SessionSnapshot | None = None
+        self._data_only_preflight_payload: JsonPayload | None = None
+        self._data_only_session_context: SessionEventContext | None = None
+        self._last_data_only_order_book_poll_at: datetime | None = None
         self._latest_market_states: dict[str, MarketState] = {}
         self._latest_closed_bars: dict[str, dict[Timeframe, Bar]] = {}
         self._strategy_states: dict[str, StrategyState] = {}
@@ -785,14 +805,20 @@ class TradeCoreRuntime:
             data_only_shadow_enabled=self.config.data_only_shadow_enabled,
         )
 
-    async def _start_market_streams(self, *, account_id: str | None) -> None:
+    async def _start_market_streams(
+        self,
+        *,
+        account_id: str | None,
+        market_stream_names: tuple[str, ...] | None = None,
+    ) -> None:
         """Start broker market streams once; order stream is optional in data-only."""
 
         if self._stream_tasks:
             return
+        stream_names = market_stream_names or self.config.stream_names
         self._stream_tasks = await self.market_data_subscription_service.start(
             MarketDataSubscriptionConfig(
-                market_stream_names=self.config.stream_names,
+                market_stream_names=stream_names,
                 account_id=account_id,
             )
         )
@@ -928,6 +954,7 @@ class TradeCoreRuntime:
                 )
         self._current_snapshot = result.snapshot
         self.stats.cycles += 1
+        await self._poll_data_only_order_books_if_due(now=observed_at)
         self.flush_domain_events()
         self.dispatch_report_jobs()
         return result.snapshot
@@ -1033,6 +1060,112 @@ class TradeCoreRuntime:
             )
         )
         self.flush_domain_events()
+
+    async def _poll_data_only_order_books_if_due(self, *, now: datetime) -> None:
+        if not self.config.data_only_shadow_enabled:
+            return
+        if self.stats.collector_state != "collecting":
+            return
+        interval = max(1.0, self.config.data_only_order_book_poll_interval_seconds)
+        now_utc = now.astimezone(UTC)
+        last_poll = self._last_data_only_order_book_poll_at
+        if last_poll is not None and (now_utc - last_poll).total_seconds() < interval:
+            return
+        self._last_data_only_order_book_poll_at = now_utc
+        self.stats.last_data_only_order_book_poll_at = now_utc
+        calibration_allowed = self._data_only_polling_calibration_allowed()
+        successful = 0
+        failed = 0
+        for instrument in self.config.instruments:
+            try:
+                response = await self.broker_gateway.get_order_book(
+                    OrderBookRequest(instrument=instrument, depth=10)
+                )
+                payload = {
+                    **dict(response.data),
+                    "source": "tbank_get_order_book_polling_fallback",
+                    "data_only_polling_fallback": True,
+                    "include_in_calibration": calibration_allowed,
+                    "calibration_allowed": calibration_allowed,
+                    "venue_type": (
+                        "official_exchange" if calibration_allowed else "display_only"
+                    ),
+                }
+                received_at = datetime.now(tz=UTC)
+                order_book = order_book_from_mapping(payload, received_at=received_at)
+                await self.process_order_book(order_book)
+                successful += 1
+            except Exception as exc:
+                failed += 1
+                log_event(
+                    logger=LOGGER,
+                    level="WARNING",
+                    event_type="data_only_order_book_poll_failed",
+                    component="runtime.data_only_polling",
+                    instrument_id=instrument.instrument_id,
+                    error_code=type(exc).__name__,
+                    error_message=str(exc),
+                )
+        self.stats.data_only_order_book_polls += successful
+        self.stats.data_only_order_book_poll_errors += failed
+        self._write_audit_event(
+            action="data_only_order_book_poll_completed",
+            severity="info" if successful else "warning",
+            payload={
+                "successful_instruments": successful,
+                "failed_instruments": failed,
+                "instrument_count": len(self.config.instruments),
+                "readonly_calls_only": True,
+                "real_orders_disabled": True,
+                "strategy_trading_disabled": True,
+                "include_in_calibration": calibration_allowed,
+            },
+        )
+
+    def _data_only_polling_calibration_allowed(self) -> bool:
+        preflight = self._data_only_preflight_payload or {}
+        return bool(
+            preflight.get("streams_for_calibration_allowed") is True
+            and preflight.get("data_only_collection_allowed") is True
+            and preflight.get("market_open") is True
+        )
+
+    def _session_context_from_data_only_preflight(
+        self,
+        *,
+        preflight: Mapping[str, object],
+        observed_at: datetime,
+    ) -> SessionEventContext:
+        now_msk = _preflight_now_msk(preflight) or _ensure_msk(observed_at)
+        session_type = _enum_payload(
+            preflight.get("session_type"),
+            SessionType,
+            default=SessionType.WEEKEND if now_msk.weekday() >= 5 else SessionType.WEEKDAY_MAIN,
+        )
+        session_phase = _enum_payload(
+            preflight.get("session_phase"),
+            SessionPhase,
+            default=SessionPhase.CONTINUOUS_TRADING
+            if preflight.get("market_open") is True
+            else SessionPhase.CLOSED,
+        )
+        trading_date = now_msk.date()
+        micro_session_id = (
+            f"{trading_date.isoformat()}:{session_type.value}:"
+            f"{now_msk.replace(minute=0, second=0, microsecond=0):%Y%m%dT%H%M}"
+        )
+        return SessionEventContext(
+            calendar_date=now_msk.date(),
+            trading_date=trading_date,
+            session_type=session_type,
+            session_phase=session_phase,
+            micro_session_id=micro_session_id,
+            broker_trading_status=str(
+                preflight.get("broker_trading_status")
+                or preflight.get("reason_code")
+                or "unknown"
+            ),
+        )
 
     def sample_metrics(self, metrics: TradingMetrics | None = None) -> None:
         """Refresh runtime gauges before `/metrics` rendering."""
@@ -1280,8 +1413,6 @@ class TradeCoreRuntime:
         collection_allowed = (
             isinstance(preflight, Mapping)
             and preflight.get("data_only_collection_allowed") is True
-            and preflight.get("official_exchange_open") is True
-            and preflight.get("venue_type") == "official_exchange"
         )
         reason_code = (
             str(preflight.get("reason_code") or "market_closed_expected")
@@ -1335,21 +1466,37 @@ class TradeCoreRuntime:
         self.robot_control_state = "starting"
         self.stats.collector_state = "starting"
         now = datetime.now(tz=UTC)
-        await self._start_market_streams(account_id=None)
+        self._data_only_preflight_payload = (
+            dict(preflight) if isinstance(preflight, Mapping) else {}
+        )
+        self._data_only_session_context = self._session_context_from_data_only_preflight(
+            preflight=self._data_only_preflight_payload,
+            observed_at=now.astimezone(MSK),
+        )
+        self._last_data_only_order_book_poll_at = None
+        await self._start_market_streams(
+            account_id=None,
+            market_stream_names=self.config.data_only_stream_names,
+        )
         self.robot_control_state = "collecting"
         self.stats.collector_state = "collecting"
         self.stats.collector_started_at = now
         self.stats.collector_stopped_at = None
+        self.stats.last_data_only_order_book_poll_at = None
         self._write_audit_event(
             action="data_only_shadow_collection_started",
             payload={
                 "command_id": str(command.command_id),
                 "runtime_id": str(self.runtime_id),
                 "stream_tasks": len(self._stream_tasks),
-                "stream_names": list(self.config.stream_names),
+                "stream_names": list(self.config.data_only_stream_names),
                 "instruments": [instrument.instrument_id for instrument in self.config.instruments],
                 "real_orders_disabled": True,
                 "strategy_trading_disabled": True,
+                "polling_fallback_enabled": True,
+                "order_book_poll_interval_seconds": (
+                    self.config.data_only_order_book_poll_interval_seconds
+                ),
                 "preflight_result": preflight if isinstance(preflight, Mapping) else None,
             },
         )
@@ -1359,10 +1506,14 @@ class TradeCoreRuntime:
                 "collector_state": self.stats.collector_state,
                 "started_at": now.isoformat(),
                 "stream_tasks": len(self._stream_tasks),
-                "stream_names": list(self.config.stream_names),
+                "stream_names": list(self.config.data_only_stream_names),
                 "instruments": [instrument.instrument_id for instrument in self.config.instruments],
                 "real_orders_disabled": True,
                 "strategy_trading_disabled": True,
+                "polling_fallback_enabled": True,
+                "order_book_poll_interval_seconds": (
+                    self.config.data_only_order_book_poll_interval_seconds
+                ),
             },
         )
 
@@ -1381,6 +1532,9 @@ class TradeCoreRuntime:
         self.robot_control_state = requested_state
         self.stats.collector_state = requested_state
         self.stats.collector_stopped_at = now
+        self._data_only_preflight_payload = None
+        self._data_only_session_context = None
+        self._last_data_only_order_book_poll_at = None
         self._write_audit_event(
             action="data_only_shadow_collection_stopped",
             payload={
@@ -1506,6 +1660,18 @@ class TradeCoreRuntime:
         return len(list(session.execute(stmt).scalars()))
 
     async def _snapshot_positions(self, *, reason: str, now: datetime) -> None:
+        if self.config.data_only_shadow_enabled:
+            self._write_audit_event(
+                action="data_only_position_snapshot_skipped",
+                payload={
+                    "reason": reason,
+                    "reason_code": "data_only_market_data_only_mode",
+                    "snapshot_ts": now.astimezone(UTC).isoformat(),
+                    "real_orders_disabled": True,
+                    "strategy_trading_disabled": True,
+                },
+            )
+            return
         position_service = self.position_service
         if position_service is None:
             return
@@ -1611,6 +1777,26 @@ class TradeCoreRuntime:
         stream_name: str,
         account_id: str | None,
     ) -> None:
+        if self.config.data_only_shadow_enabled and account_id is None:
+            self._write_recovery_audit_event(
+                "data_only_stream_gap_recovery_skipped",
+                {
+                    "stream_name": stream_name,
+                    "reason_code": "data_only_polling_fallback_active",
+                    "polling_fallback_enabled": True,
+                    "real_orders_disabled": True,
+                    "strategy_trading_disabled": True,
+                },
+            )
+            log_event(
+                logger=LOGGER,
+                level="WARNING",
+                event_type="data_only_stream_gap_recovery_skipped",
+                component="runtime.data_only_polling",
+                stream_name=stream_name,
+                reason_code="data_only_polling_fallback_active",
+            )
+            return
         recovery_service = self.stream_gap_recovery_service
         if recovery_service is None:
             return
@@ -1850,6 +2036,12 @@ class TradeCoreRuntime:
 
     def _session_context_for(self, instrument_id: str) -> SessionEventContext:
         del instrument_id
+        if (
+            self.config.data_only_shadow_enabled
+            and self.stats.collector_state == "collecting"
+            and self._data_only_session_context is not None
+        ):
+            return self._data_only_session_context
         snapshot = self._current_snapshot or self._fallback_snapshot()
         micro_session_id = snapshot.micro_session_id or "unassigned"
         return snapshot.event_context(micro_session_id)
@@ -2426,6 +2618,13 @@ def _bool_env(value: str | None, *, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _stream_names_from_env(value: str | None, *, default: tuple[str, ...]) -> tuple[str, ...]:
+    if value is None or value.strip() == "":
+        return default
+    names = tuple(item.strip() for item in value.split(",") if item.strip())
+    return names or default
+
+
 def _build_report_job_dispatcher() -> ReportJobDispatcher:
     broker = os.getenv("CELERY_BROKER_URL", "redis://redis:6379/0")
     backend = os.getenv("CELERY_RESULT_BACKEND", broker)
@@ -2604,3 +2803,29 @@ def _ensure_msk(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=MSK)
     return value.astimezone(MSK)
+
+
+def _preflight_now_msk(preflight: Mapping[str, object]) -> datetime | None:
+    raw = preflight.get("now_msk") or preflight.get("observed_at")
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        return _ensure_msk(datetime.fromisoformat(raw))
+    except ValueError:
+        return None
+
+
+def _enum_payload(
+    value: object,
+    enum_type: type[Any],
+    *,
+    default: Any,
+) -> Any:
+    if isinstance(value, enum_type):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            return enum_type(value)
+        except ValueError:
+            return default
+    return default

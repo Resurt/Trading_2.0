@@ -1168,6 +1168,10 @@ New structured events/payloads:
 - `trading_session_preflight`: emitted around session/calendar checks before live data-only smoke.
 - `market_closed_expected`: closed market by broker/fallback schedule, with `next_session_at`.
 - `data_only_shadow_preflight`: preflight-only smoke result before stream startup.
+- `market_data_availability_probe`: bounded readonly `GetLastPrices` and selected
+  `GetOrderBook` probe used only by preflight when broker schedules are empty,
+  missing, incomplete, or statuses are unavailable during a local open window.
+  It must never call order APIs.
 - `balance_refresh`: broker account/portfolio read model update; full account id must not be logged.
 - `market_quotes_refresh`: explicit readonly T-Invest `GetLastPrices`/`GetOrderBook`
   refresh for dashboard quotes; no order methods are allowed. Payload should include
@@ -1187,17 +1191,50 @@ New structured events/payloads:
   status/freshness reason already present in the read model. This event is a
   read-model/live-display access, not a data-only collection start.
 - `robot_command_rejected_preflight`: API rejected a Start command because preflight did
-  not return `market_open=true`; payload includes `reason_code` and `preflight_result`.
+  not return `market_open=true` and `data_only_collection_allowed=true`; payload
+  includes `reason_code` and `preflight_result`.
 - `data_only_shadow_collection_started`: trade-core applied Start in data-only mode and
-  started market streams after `market_open=true` preflight.
+  started the minimal data-only market stream set after `market_open=true` and
+  `data_only_collection_allowed=true` preflight. `trading_allowed` remains false.
+  Payload includes `polling_fallback_enabled` and
+  `order_book_poll_interval_seconds`.
+- `data_only_order_book_poll_completed`: bounded readonly polling fallback wrote or
+  attempted current order-book samples while data-only collector was running. Payload
+  includes `successful_instruments`, `failed_instruments`, `readonly_calls_only`,
+  `real_orders_disabled`, `strategy_trading_disabled`, and
+  `include_in_calibration`.
+- `data_only_stream_gap_recovery_skipped`: data-only stream reconnect skipped candle
+  gap backfill because `data_only_polling_fallback_active` handles live
+  microstructure without aggressive `GetCandles` retries.
+- `data_only_position_snapshot_skipped`: trade-core skipped account-level position
+  snapshotting during data-only collection. Balance diagnostics remain explicit
+  readonly operator actions and are not part of Start.
 - `data_only_shadow_collection_stopped`: trade-core applied Stop/Pause/Emergency Stop
-  and stopped market streams without order actions.
+  and stopped market streams/polling without order actions.
 - `data_only_shadow_collection_preflight_blocked`: trade-core received Start without
   an open-market preflight and did not start streams.
 - `intraday_analytics_rebuild`: rebuild of `intraday_session_analytics`.
 - `calibration_observatory_run`: diagnostic run for rolling cube, regime and candidate proposals.
 
-Required payload fields for preflight: `market_open`, `market_closed_expected`, `now_msk`, `trading_date`, `calendar_date`, `session_type`, `session_phase`, `broker_trading_status`, `api_trade_available`, `next_session_at`, `reason_code`, `instruments_checked`, `per_instrument_status`, `source`.
+Required payload fields for preflight: `market_window_open`, `market_open`,
+`market_closed_expected`, `data_only_collection_allowed`, `trading_allowed`,
+`blocking_layer`, `now_msk`, `trading_date`, `calendar_date`, `session_type`,
+`session_phase`, `broker_trading_status`, `api_trade_available`,
+`next_session_at`, `reason_code`, `instruments_checked`,
+`per_instrument_status`, `source`, `broker_schedule_windows_count`,
+`fallback_reason`, `market_data_probe_success_count`,
+`market_data_probe_error_count`, and `market_data_probe`.
+
+Probe payloads include `instrument_id`, `last_price_available`,
+`order_book_available`, `market_data_available`, `latency_ms`, `source`,
+`error_code`, and `error_message`. If a local fallback window is open but both
+broker status and market data probe are unavailable, the blocking reason is
+`broker_status_and_market_data_unavailable`, not a false schedule-closed code.
+
+`market_microstructure_snapshot.snapshot_payload` must carry
+`include_in_calibration`, `calibration_allowed`, `venue_type`, and
+`data_only_polling_fallback=true` when the snapshot was produced by readonly
+polling rather than a stream order-book event.
 
 Required balance payload fields: `total_portfolio_value_rub`, `available_cash_rub`, `blocked_cash_rub`, `expected_yield_rub`, `free_collateral_rub`, `account_id_masked`, `balance_currency`, `last_balance_refresh_at`, `balance_freshness_seconds`, `balance_degraded`, `balance_degraded_reason_code`.
 

@@ -63,7 +63,11 @@ the data-only smoke CLI. The response includes schedule/status diagnostics:
 
 - `source`, `schedule_source`, `status_source`;
 - `schedule_error_code`, `schedule_error_message`;
+- `market_window_open`, `data_only_collection_allowed`, `trading_allowed`,
+  `blocking_layer`, `broker_schedule_windows_count`, and `fallback_reason`;
 - `status_success_count`, `status_error_count`;
+- `market_data_probe_success_count`, `market_data_probe_error_count`, and
+  `market_data_probe`;
 - `fallback_used`, `cache_hit`, `cache_key`;
 - `requested_instruments`, `working_instruments`, `blocked_instruments`;
 - per-instrument `broker_status`, `api_trade_available`, `status_source`,
@@ -78,17 +82,28 @@ The known 30003 trigger is a `TradingSchedules.from_` value earlier than the
 current broker date/time after timezone conversion; normal preflight requests
 schedules from the current preflight timestamp forward.
 
-T-Bank `TradingSchedules` can also return a valid payload that omits an active
-evening window while `GetTradingStatus` reports exchange `normal_trading` for
-the requested instruments. In that case preflight treats the schedule as
-incomplete for the current calendar date, uses the local MOEX evening fallback
+T-Bank `TradingSchedules` can also return a valid payload that omits the active
+local MOEX window while `GetTradingStatus` reports exchange `normal_trading` or
+readonly market data probe calls succeed for the requested instruments. In that
+case preflight treats the schedule as incomplete, uses the local MOEX fallback
 window, and returns `source=broker_status_fallback_time_rules`,
 `schedule_source=broker_trading_schedules_status_fallback`,
 `fallback_used=true`, and warnings including
 `broker_schedule_missing_active_window` and
-`broker_status_open_schedule_closed`. This fallback is allowed only when broker
-statuses are available and tradeable; if every status call is unavailable, Start
-remains blocked with `reason_code=broker_status_unavailable`.
+`broker_status_open_schedule_closed` or `market_data_probe_used_without_status`.
+If every status call and every readonly market data probe fails, Start remains
+blocked with `reason_code=broker_status_and_market_data_unavailable`, not with a
+false closed-window reason.
+
+In data-only mode `trading_allowed=false` even when
+`data_only_collection_allowed=true`. Start may launch only persistent market-data
+logging streams plus a bounded readonly `GetOrderBook` polling fallback when
+streams are silent. Order APIs remain disabled.
+
+Data-only Start does not perform runtime position snapshots. Account-level
+`GetPositions`/`GetPortfolio` reads are reserved for explicit readonly balance
+diagnostics (`POST /portfolio/refresh` or the broker balance script), not for
+collector startup or micro-session rollover.
 
 `RobotCommandResponse` includes:
 
@@ -331,7 +346,8 @@ set `quote_allowed_for_display=true`, but they must use
 `broker_quote_exchange_closed`, `broker_indicative_quote`, `broker_otc`, or
 `stale_local` style labels, must keep `quote_allowed_for_data_collection=false`,
 and must set `calibration_market_quality_score=0` or not applicable. Only an
-official open exchange session may produce calibration-eligible market quality.
+open session accepted by fresh data-only preflight may produce calibration-eligible
+market quality.
 
 ## `/runtime/data-shadow/status`
 
@@ -350,6 +366,12 @@ The data-shadow status payload includes observable supervisor fields:
 When the collector is intentionally stopped or preflight-blocked,
 `supervisor_state=stopped`. If the implementation is not configured,
 `supervisor_state=not_configured` is explicit rather than omitted.
+
+If stream order books are silent while Start is accepted, trade-core may write
+microstructure through bounded readonly `GetOrderBook` polling. These rows keep
+`source=data_only_shadow` and include `data_only_polling_fallback=true`,
+`include_in_calibration`, `calibration_allowed`, and `venue_type` in
+`snapshot_payload`. Stop disables both streams and polling.
 
 ## `/reports/daily/run`
 

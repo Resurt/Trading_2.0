@@ -20,6 +20,8 @@ from trade_core.broker_gateway import (
     DividendsRequest,
     InstrumentRef,
     InstrumentResolveRequest,
+    OrderBookRequest,
+    PositionsRequest,
     RequestMetadata,
     StreamEvent,
     TradingSchedulesRequest,
@@ -48,6 +50,7 @@ from trading_common.db.models import (
     BrokerOrder,
     CandidateStageResult,
     InstrumentRegistry,
+    MarketMicrostructureSnapshot,
     OrderIntent,
     PositionSnapshot,
     RobotCommand,
@@ -208,6 +211,44 @@ class RecordingStreamGateway(SafeNoopBrokerGateway):
         self.order_stream_accounts.append(account_id)
         if False:
             yield StreamEvent(stream_name="OrderStateStream", event_type="noop", payload={})
+
+
+class PollingOrderBookGateway(RecordingStreamGateway):
+    def __init__(self, *, now: datetime | None = None) -> None:
+        super().__init__(now=now)
+        self.order_book_requests: list[InstrumentRef] = []
+        self.position_requests: list[PositionsRequest] = []
+
+    async def get_positions(
+        self,
+        request: PositionsRequest,
+        metadata: RequestMetadata | None = None,
+    ) -> BrokerUnaryResponse:
+        self.position_requests.append(request)
+        return await super().get_positions(request, metadata)
+
+    async def get_order_book(
+        self,
+        request: OrderBookRequest,
+        metadata: object | None = None,
+    ) -> BrokerUnaryResponse:
+        del metadata
+        instrument = request.instrument
+        self.order_book_requests.append(instrument)
+        now = self.now or msk(2026, 6, 28, 14)
+        return BrokerUnaryResponse(
+            method_name="GetOrderBook",
+            data={
+                "instrument_id": instrument.instrument_uid or instrument.instrument_id,
+                "instrument_uid": instrument.instrument_uid,
+                "figi": instrument.figi,
+                "depth": 10,
+                "exchange_ts": now.astimezone(UTC).isoformat(),
+                "bids": [{"price": "100.00", "quantity_lots": "12"}],
+                "asks": [{"price": "100.10", "quantity_lots": "8"}],
+            },
+            headers={},
+        )
 
 
 class ResolvingGateway(SafeNoopBrokerGateway):
@@ -398,9 +439,9 @@ def test_data_only_shadow_runtime_waits_for_operator_start_and_stops(tmp_path: P
             )
         assert await runtime.process_robot_commands_async() == 1
         await asyncio.sleep(0)
-        assert gateway.market_stream_names == list(runtime.config.stream_names)
+        assert gateway.market_stream_names == list(runtime.config.data_only_stream_names)
         assert gateway.order_stream_accounts == []
-        assert runtime.stats.stream_tasks_started == len(runtime.config.stream_names)
+        assert runtime.stats.stream_tasks_started == len(runtime.config.data_only_stream_names)
         assert runtime.stats.collector_state == "collecting"
 
         with runtime.database.session_scope() as session:
@@ -418,6 +459,86 @@ def test_data_only_shadow_runtime_waits_for_operator_start_and_stops(tmp_path: P
         assert await runtime.process_robot_commands_async() == 1
         assert runtime.stats.stream_tasks_started == 0
         assert runtime.stats.collector_state == "stopped_by_operator"
+        await runtime.shutdown()
+
+    asyncio.run(run())
+
+
+def test_data_only_start_probe_fallback_polls_order_book_and_writes_microstructure(
+    tmp_path: Path,
+) -> None:
+    gateway = PollingOrderBookGateway(now=msk(2026, 6, 28, 14, 30))
+    config = replace(
+        runtime_config(tmp_path),
+        data_only_shadow_enabled=True,
+        data_only_order_book_poll_interval_seconds=1,
+    )
+    runtime = TradeCoreRuntime(
+        config=config,
+        launch_policy=LaunchModePolicy.from_mode(RuntimeMode.SHADOW),
+        database=DatabaseService(config.database_url or ""),
+        broker_gateway=cast(BrokerGateway, gateway),
+    )
+
+    async def run() -> None:
+        await runtime.start()
+        with runtime.database.session_scope() as session:
+            RobotCommandRepository(session).create(
+                command_type="start",
+                requested_by="desk-operator",
+                requested_role="operator",
+                requested_at=datetime.now(tz=UTC),
+                payload={
+                    "mode": "data_shadow",
+                    "trading_disabled": True,
+                    "data_only_shadow": True,
+                    "preflight_result": {
+                        "now_msk": "2026-06-28T14:30:00+03:00",
+                        "session_type": "weekend",
+                        "session_phase": "continuous_trading",
+                        "market_open": True,
+                        "market_window_open": True,
+                        "market_closed_expected": False,
+                        "official_exchange_open": False,
+                        "official_exchange_closed": False,
+                        "venue_type": "broker_status_fallback_time_rules",
+                        "quote_source_allowed_for_data_collection": True,
+                        "data_only_collection_allowed": True,
+                        "streams_for_calibration_allowed": True,
+                        "reason_code": "market_open",
+                    },
+                },
+            )
+
+        assert await runtime.process_robot_commands_async() == 1
+        assert runtime.stats.collector_state == "collecting"
+        await runtime.run_cycle(now=msk(2026, 6, 28, 14, 30))
+
+        with runtime.database.session_factory() as session:
+            snapshot = session.execute(
+                select(MarketMicrostructureSnapshot).order_by(
+                    MarketMicrostructureSnapshot.ts_utc
+                )
+            ).scalars().first()
+            assert snapshot is not None
+            assert snapshot.session_type == "weekend"
+            assert snapshot.session_phase == "continuous_trading"
+            assert snapshot.best_bid == Decimal("100.00000000")
+            assert snapshot.best_ask == Decimal("100.10000000")
+            assert snapshot.spread_abs == Decimal("0.10000000")
+            assert snapshot.mid_price == Decimal("100.05000000")
+            assert snapshot.spread_bps == Decimal("9.9950")
+            assert snapshot.snapshot_payload["data_only_polling_fallback"] is True
+            assert snapshot.snapshot_payload["include_in_calibration"] is True
+            assert snapshot.snapshot_payload["calibration_allowed"] is True
+            assert session.scalar(select(func.count()).select_from(SignalCandidate)) == 0
+            assert session.scalar(select(func.count()).select_from(OrderIntent)) == 0
+            assert session.scalar(select(func.count()).select_from(BrokerOrder)) == 0
+
+        assert gateway.order_book_requests
+        assert gateway.position_requests == []
+        assert gateway.post_order_calls == []
+        assert gateway.cancel_order_calls == []
         await runtime.shutdown()
 
     asyncio.run(run())
