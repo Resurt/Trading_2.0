@@ -169,6 +169,10 @@ not silently contradict another caller. The response records
 
 The smoke script starts streams only for `working_instruments`. If that list is
 empty, it returns `no_tradeable_instruments` and does not start runtime streams.
+CI and unit smoke tests must pass an explicit isolated `database_url` such as a
+temporary SQLite file. They must not rely on ambient local Docker secrets or
+fallback to SQLite implicitly. Runtime/compose jobs still require PostgreSQL
+unless a local experiment explicitly opts in with `TRADING_RUNTIME_LOCAL_SQLITE=1`.
 
 Known 30003 context: T-Bank rejects `TradingSchedules` when request `from` is
 earlier than the current broker date/time after timezone conversion. Preflight

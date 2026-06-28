@@ -865,6 +865,12 @@ Gauges:
 
 SQLite is allowed only when `TRADING_RUNTIME_LOCAL_SQLITE=1` is set explicitly for local experiments. Compose readiness must fail if `trade-core`, `api` and `report-worker` are not pointed at the same PostgreSQL config.
 
+CI data-only smoke tests must isolate their database state with an explicit
+`database_url` fixture or CLI option. They must not pass because a developer
+machine happens to expose `secrets/postgres_password`, and Docker/CI jobs must
+not silently fall back to SQLite unless the test or local experiment requested
+that database explicitly.
+
 Strategy config reloads are domain/audit facts, not only technical logs. Events `strategy_config_loaded`, `strategy_config_reloaded` and `strategy_config_reload_failed` must carry strategy id, version, session template and machine-readable failure code when present.
 
 Prometheus labels не должны содержать raw ids, exception text, arbitrary order id,

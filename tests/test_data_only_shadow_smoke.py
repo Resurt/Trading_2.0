@@ -32,7 +32,8 @@ class FakeRuntime:
     ) -> None:
         del launch_policy
         self.config = config
-        self.database = DatabaseService("sqlite+pysqlite:///:memory:")
+        assert config.database_url is not None
+        self.database = DatabaseService(config.database_url)
         Base.metadata.create_all(self.database.engine)
         self.broker_gateway = object()
         self._session = None
@@ -158,7 +159,6 @@ def test_closed_market_smoke_does_not_start_runtime_streams(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    del tmp_path
     FakeRuntime.instances.clear()
     FakePreflightService.configs.clear()
     FakePreflightService.result = None
@@ -167,7 +167,7 @@ def test_closed_market_smoke_does_not_start_runtime_streams(
     args = argparse.Namespace(
         instruments="SBER,GAZP",
         minutes=0,
-        database_url=None,
+        database_url=f"sqlite+pysqlite:///{tmp_path / 'closed-smoke.db'}",
         require_dividend_sync=False,
         require_market_open=False,
         allow_closed_market_success=True,
@@ -199,6 +199,7 @@ def test_closed_market_smoke_does_not_start_runtime_streams(
 
 def test_open_market_smoke_uses_working_instruments_only(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     FakeRuntime.instances.clear()
     FakePreflightService.configs.clear()
@@ -213,7 +214,7 @@ def test_open_market_smoke_uses_working_instruments_only(
     args = argparse.Namespace(
         instruments="SBER,GAZP",
         minutes=0,
-        database_url=None,
+        database_url=f"sqlite+pysqlite:///{tmp_path / 'open-smoke.db'}",
         require_dividend_sync=False,
         require_market_open=True,
         allow_closed_market_success=True,
