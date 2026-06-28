@@ -190,6 +190,17 @@ exchange session.
 - active positions count;
 - degraded flags;
 - robot control state.
+- session reconciliation fields: `session_source`, `session_stale`,
+  `session_stale_reason`.
+
+`GET /session/current` and `GET /robot/status` reconcile the latest runtime
+`session_run` snapshot with a fresh preflight-derived session state for
+operator-facing reads. Fresh preflight is authoritative when the runtime snapshot
+is missing or stale. Responses expose `source`/`session_source` as
+`runtime_session_snapshot`, `fresh_preflight`, or `stale_runtime_snapshot`, plus
+`stale=true` and `stale_reason=runtime_snapshot_mismatch` when a previous
+runtime session is not current. A closed preflight must not be rendered as
+`continuous_trading` without an explicit stale warning.
 
 Пример:
 
@@ -310,6 +321,35 @@ The API keeps successful readonly quote refresh rows in a short in-process cache
 `GET /market/overview`, `/dashboard/state`, and `/ws/market` overlay the cached
 readonly broker rows on top of the local read model. This prevents the frontend from
 being immediately overwritten by an older candle fallback after a successful refresh.
+The cache overlay is session-gated: if the fresh/base read model says
+`official_exchange_open=false`, cached rows that still claim live exchange source,
+`quote_allowed_for_data_collection=true`, or `include_in_calibration=true` are
+ignored for that response.
+
+Closed-session broker quotes and selected order books are display-only. They may
+set `quote_allowed_for_display=true`, but they must use
+`broker_quote_exchange_closed`, `broker_indicative_quote`, `broker_otc`, or
+`stale_local` style labels, must keep `quote_allowed_for_data_collection=false`,
+and must set `calibration_market_quality_score=0` or not applicable. Only an
+official open exchange session may produce calibration-eligible market quality.
+
+## `/runtime/data-shadow/status`
+
+The data-shadow status payload includes observable supervisor fields:
+
+- `supervisor_enabled`;
+- `supervisor_state`;
+- `stream_restart_count`;
+- `last_restart_at`;
+- `last_restart_reason`;
+- `stream_stale_count`;
+- `last_stream_error`;
+- `per_stream_status` for `order_book`, `last_price`, `candles`,
+  `trading_status`, and `market_trades` when available.
+
+When the collector is intentionally stopped or preflight-blocked,
+`supervisor_state=stopped`. If the implementation is not configured,
+`supervisor_state=not_configured` is explicit rather than omitted.
 
 ## `/reports/daily/run`
 

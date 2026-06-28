@@ -313,6 +313,9 @@ preflight uses `source=broker_status_fallback_time_rules` and only opens data-on
 collection for instruments with available tradeable broker statuses. If every
 status call is unavailable, Start stays blocked with
 `reason_code=broker_status_unavailable`.
+`/session/current` and `/robot/status` use the same fresh preflight decision for
+operator-facing session state; stale runtime `session_run` rows are marked with
+`session_stale`/`stale_reason` and must not make a closed market look active.
 
 The Start button must show an animated preflight/start progress state, not a silent
 disabled button. The command strip shows the phase, message, reason code and next
@@ -379,6 +382,8 @@ return broker/OTC/indicative quotes while MOEX is officially closed. Those quote
 displayed on the Live Dashboard, but they are tagged as `broker_quote_exchange_closed`,
 `broker_otc_order_book`, or `broker_indicative_quote` and are excluded from calibration by
 default.
+`/runtime/data-shadow/status` also exposes supervisor state and restart/stale counters so
+an intentionally stopped collector is visible as stopped rather than silently restarted.
 
 The local MOEX calendar includes the 2026-06-20 and 2026-06-21 DSV(D) cancellation for
 stock and derivatives markets due to the planned trading/clearing platform update. This

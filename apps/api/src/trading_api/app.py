@@ -279,11 +279,15 @@ def create_fastapi_app(
         return _robot_control(request).emergency_stop(auth=allowed_auth)
 
     @app.get("/robot/status", response_model=RobotStatusResponse, tags=["robot"])
-    def robot_status(
+    async def robot_status(
         request: Request,
         service: ReadServiceDep,
     ) -> RobotStatusResponse:
-        return service.robot_status(robot_control_state=_robot_control(request).current_state())
+        preflight = await _fresh_operator_preflight_or_none(request)
+        return service.robot_status(
+            robot_control_state=_robot_control(request).current_state(),
+            preflight=preflight,
+        )
 
     @app.get("/dashboard/state", tags=["dashboard"])
     async def dashboard_state(request: Request, auth: AuthDep) -> dict[str, object]:
@@ -300,8 +304,12 @@ def create_fastapi_app(
         return {"data": jsonable_encoder(payload), "sequence": 0}
 
     @app.get("/session/current", response_model=SessionSnapshotResponse, tags=["session"])
-    def current_session(service: ReadServiceDep) -> SessionSnapshotResponse:
-        return service.current_session()
+    async def current_session(
+        request: Request,
+        service: ReadServiceDep,
+    ) -> SessionSnapshotResponse:
+        preflight = await _fresh_operator_preflight_or_none(request)
+        return service.current_session(preflight=preflight)
 
     @app.get("/session/preflight", response_model=SessionPreflightResponse, tags=["session"])
     async def session_preflight(
@@ -376,6 +384,10 @@ def create_fastapi_app(
         include_trades: Annotated[bool, Query()] = True,
     ) -> dict[str, object]:
         require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
+        preflight = await _fresh_operator_preflight_or_none(
+            request,
+            instruments=instruments,
+        )
         return await _dashboard_market_feed_snapshot(
             request,
             service=service,
@@ -383,6 +395,7 @@ def create_fastapi_app(
             selected_instrument=selected_instrument,
             include_order_book=include_order_book,
             include_trades=include_trades,
+            preflight=preflight,
         )
 
     @app.post("/dashboard/market-feed/refresh", tags=["dashboard"])
@@ -396,6 +409,10 @@ def create_fastapi_app(
         include_trades: Annotated[bool, Query()] = True,
     ) -> dict[str, object]:
         require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
+        preflight = await _fresh_operator_preflight_or_none(
+            request,
+            instruments=instruments,
+        )
         return await _dashboard_market_feed_snapshot(
             request,
             service=service,
@@ -404,6 +421,7 @@ def create_fastapi_app(
             include_order_book=include_order_book,
             include_trades=include_trades,
             force=True,
+            preflight=preflight,
         )
 
     @app.get("/market/overview", response_model=MarketOverviewResponse, tags=["market"])
@@ -415,6 +433,10 @@ def create_fastapi_app(
         include_details: Annotated[bool, Query()] = False,
     ) -> MarketOverviewResponse:
         del refresh
+        preflight = await _fresh_operator_preflight_or_none(
+            request,
+            instruments=instruments,
+        )
         snapshot = await _dashboard_market_feed_snapshot(
             request,
             service=service,
@@ -422,6 +444,7 @@ def create_fastapi_app(
             selected_instrument="MOEX:SBER",
             include_order_book=include_details,
             include_trades=include_details,
+            preflight=preflight,
         )
         overview = MarketOverviewResponse(**cast(dict[str, Any], snapshot["market_overview"]))
         _store_market_quote_cache(request.app, overview)
@@ -437,8 +460,13 @@ def create_fastapi_app(
         request: Request,
         service: ReadServiceDep,
     ) -> MarketInstrumentOverview:
-        selected_base = service.market_instrument_details(instrument_id)
-        quote_overview = service.market_overview(instruments=None, include_details=False)
+        preflight = await _fresh_operator_preflight_or_none(request)
+        selected_base = service.market_instrument_details(instrument_id, preflight=preflight)
+        quote_overview = service.market_overview(
+            instruments=None,
+            include_details=False,
+            preflight=preflight,
+        )
         base = quote_overview.model_copy(
             update={
                 "generated_at": datetime.now(tz=UTC),
@@ -478,9 +506,14 @@ def create_fastapi_app(
     ) -> MarketOverviewResponse:
         require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
         include_details = details or include_order_book or not quotes_only
+        preflight = await _fresh_operator_preflight_or_none(
+            request,
+            instruments=instruments,
+        )
         base_overview = service.market_overview(
             instruments=instruments,
             include_details=include_details,
+            preflight=preflight,
         )
         lock = _market_quote_refresh_lock(cast(FastAPI, request.app))
         if lock.locked():
@@ -1734,6 +1767,21 @@ async def _run_session_preflight(
     return response
 
 
+async def _fresh_operator_preflight_or_none(
+    request: Request,
+    *,
+    instruments: str | None = None,
+) -> SessionPreflightResponse | None:
+    try:
+        return await _run_session_preflight(
+            request,
+            instruments=instruments or _default_preflight_instruments(),
+            use_cache=False,
+        )
+    except Exception:
+        return None
+
+
 async def _run_dashboard_session_preflight(request: Request) -> SessionPreflightResponse:
     from trade_core.broker_gateway import BrokerGateway
     from trade_core.session.preflight import (
@@ -2550,10 +2598,15 @@ async def _dashboard_market_feed_snapshot(
     include_order_book: bool,
     include_trades: bool,
     force: bool = False,
+    preflight: SessionPreflightResponse | None = None,
 ) -> dict[str, object]:
     base_overview = _market_overview_with_cached_quotes(
         request.app,
-        service.market_overview(instruments=instruments, include_details=False),
+        service.market_overview(
+            instruments=instruments,
+            include_details=False,
+            preflight=preflight,
+        ),
     )
     refs = _instrument_refs_for_preflight(
         _database_service(request),
@@ -2795,8 +2848,31 @@ def _market_overview_with_cached_quotes(
             cache.pop(instrument.instrument_id, None)
             instruments.append(instrument)
             continue
+        if not _cached_market_row_safe_for_session(instrument, cached_instrument):
+            instruments.append(instrument)
+            continue
         instruments.append(cached_instrument)
     return MarketOverviewResponse(generated_at=now, instruments=instruments)
+
+
+def _cached_market_row_safe_for_session(
+    base: MarketInstrumentOverview,
+    cached: MarketInstrumentOverview,
+) -> bool:
+    if base.official_exchange_open:
+        return True
+    cached_payload = cached.quote_payload if isinstance(cached.quote_payload, dict) else {}
+    cached_book = (
+        cached.order_book_summary if isinstance(cached.order_book_summary, dict) else {}
+    )
+    return not (
+        cached.official_exchange_open
+        or cached.quote_allowed_for_data_collection
+        or cached_payload.get("include_in_calibration") is True
+        or cached_book.get("include_in_calibration") is True
+        or str(cached.quote_source).startswith("live")
+        or str(cached.last_price_source).startswith("live")
+    )
 
 
 def _dashboard_payload(app: FastAPI) -> dict[str, object]:

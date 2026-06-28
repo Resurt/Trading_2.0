@@ -83,7 +83,11 @@ class IntradayAnalyticsService:
         ]
         if not session_payloads:
             session_payloads = [
-                self.build_for_session(trading_date, "weekday_main", mode=mode)
+                self.build_for_session(
+                    trading_date,
+                    _default_session_type_for_date(trading_date),
+                    mode=mode,
+                )
             ]
         payload = _combine_intraday_payloads(
             trading_date=trading_date,
@@ -161,17 +165,18 @@ class IntradayAnalyticsService:
 
     def _session_has_data(self, trading_date: date, session_type: str, *, mode: str) -> bool:
         facts = self._load_session_facts(trading_date, session_type, mode=mode)
-        return any(
-            (
-                facts.candidates,
-                facts.blockers,
-                facts.intents,
-                facts.broker_orders,
-                facts.microstructure,
-                facts.candles,
-                facts.session_runs,
-            )
+        data_rows = (
+            facts.candidates,
+            facts.blockers,
+            facts.intents,
+            facts.broker_orders,
+            facts.counterfactuals,
+            facts.microstructure,
+            facts.candles,
         )
+        if any(data_rows):
+            return True
+        return mode == "all" and bool(facts.session_runs)
 
     def _load_session_facts(
         self,
@@ -768,17 +773,24 @@ def _intraday_summary_from_facts(
         blocked_count=blocked_count,
         stale_incidents=sum(1 for row in facts.microstructure if row.is_stale),
     )
+    no_samples = _no_samples_summary(facts)
+    if no_samples:
+        no_trade_reason = "market_closed_or_no_samples"
     warnings = _small_sample_warnings(
         candidate_count=len(facts.candidates),
         microstructure_count=len(facts.microstructure),
     )
-    session_status = _session_status(facts.session_runs)
+    if no_samples:
+        warnings = [*warnings, "no_data_shadow_samples"]
+    session_status = "no_samples" if no_samples else _session_status(facts.session_runs)
+    session_phase = "closed" if no_samples else _session_phase(facts)
+    calibration_eligible = _calibration_eligible_microstructure(facts.microstructure)
     payload = {
         "generated_at": generated_at.isoformat(),
         "trading_date": facts.trading_date.isoformat(),
         "calendar_date": facts.trading_date.isoformat(),
         "session_type": facts.session_type,
-        "session_phase": _session_phase(facts),
+        "session_phase": session_phase,
         "session_status": session_status,
         "micro_session_id": micro_session_id,
         "hour_bucket": None,
@@ -821,6 +833,9 @@ def _intraday_summary_from_facts(
             "diagnostic_only": True,
             "does_not_enable_trading": True,
             "requested_mode": mode,
+            "data_status": "no_samples" if no_samples else "has_samples",
+            "calibration_eligible": calibration_eligible,
+            "no_trade_reason_code": no_trade_reason,
             "no_trade_reason": no_trade_reason,
             "closest_to_entry": _closest_to_entry(facts.blockers, facts.counterfactuals),
             "warnings": warnings,
@@ -1667,6 +1682,50 @@ def _closest_to_entry(
         for row in blockers
         if not row.passed
     ][:5]
+
+
+def _no_samples_summary(facts: _SessionFacts) -> bool:
+    return not any(
+        (
+            facts.candidates,
+            facts.blockers,
+            facts.intents,
+            facts.broker_orders,
+            facts.counterfactuals,
+            facts.microstructure,
+            facts.candles,
+        )
+    )
+
+
+def _default_session_type_for_date(trading_date: date) -> str:
+    return "weekend" if trading_date.weekday() >= 5 else "weekday_main"
+
+
+def _calibration_eligible_microstructure(
+    rows: list[MarketMicrostructureSnapshot],
+) -> bool:
+    for row in rows:
+        payload = row.snapshot_payload if isinstance(row.snapshot_payload, dict) else {}
+        if row.is_stale:
+            continue
+        if payload.get("include_in_calibration") is False:
+            continue
+        if payload.get("calibration_allowed") is False:
+            continue
+        source = str(row.source or "")
+        venue_type = str(payload.get("venue_type") or "")
+        if source.startswith("broker") or source in {
+            "stale_local",
+            "local_history",
+            "latest_market_candle_close",
+            "previous_close",
+        }:
+            continue
+        if venue_type in {"broker_otc", "broker_indicative", "stale_local"}:
+            continue
+        return True
+    return False
 
 
 def _session_phase(facts: _SessionFacts) -> str:

@@ -137,6 +137,12 @@ rules. For fresh API comparison during incident triage, call:
 GET /session/preflight?instruments=SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR&mode=data_shadow&cache=false
 ```
 
+Operator-facing session state is reconciled from fresh preflight. `/session/current`
+and `/robot/status` must not present an old `session_run` row as current when
+fresh preflight says the market is closed or a different session is active. Check
+`source`/`session_source`, `stale`, and `stale_reason` when investigating a
+session mismatch.
+
 If T-Bank `TradingSchedules` fails with `INVALID_ARGUMENT 30003`, preflight must
 not silently contradict another caller. The response records
 `schedule_source=tbank_error`, `schedule_error_code=30003`,
@@ -283,6 +289,18 @@ Data-only calibration collection is allowed only when preflight reports
 `data_only_collection_allowed=true`. Broker OTC or indicative quotes can be displayed on
 the dashboard, but they are not official exchange samples and are excluded from
 calibration by default.
+
+Closed-session dashboard quotes and selected order books are display-only. They
+must keep `quote_allowed_for_data_collection=false`, must not use live exchange
+labels, and must set `include_in_calibration=false` /
+`calibration_market_quality_score=0`.
+
+`/runtime/data-shadow/status` exposes supervisor observability fields:
+`supervisor_enabled`, `supervisor_state`, `stream_restart_count`,
+`last_restart_at`, `last_restart_reason`, `stream_stale_count`,
+`last_stream_error`, and `per_stream_status`. After an intentional Stop or a
+preflight-blocked Start, the supervisor state should be `stopped` and must not
+auto-restart the collector.
 
 For 2026-06-20 and 2026-06-21 the local MOEX override returns
 `reason_code=moex_dsvd_cancelled_platform_update`, `market_open=false`, and

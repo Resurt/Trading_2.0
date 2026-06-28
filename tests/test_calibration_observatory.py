@@ -282,6 +282,64 @@ def test_intraday_builds_completed_session_summary() -> None:
         assert summary["candidate_count"] == 1
 
 
+def test_intraday_data_shadow_no_samples_does_not_use_stale_session_run() -> None:
+    for session in make_session():
+        now = utc_now() - timedelta(hours=2)
+        add_session_run(session, now, status="open", session_type="weekend")
+
+        payload = IntradayAnalyticsService(session).build_for_session(
+            now.date(),
+            "weekend",
+            mode="data_shadow",
+        )
+        summary = payload["session_summaries"][0]
+        persisted = session.execute(select(IntradaySessionAnalytics)).scalars().first()
+
+        assert summary["session_phase"] == "closed"
+        assert summary["session_status"] == "no_samples"
+        assert summary["no_trade_reason"] == "market_closed_or_no_samples"
+        assert summary["analytics_payload"]["data_status"] == "no_samples"
+        assert summary["analytics_payload"]["calibration_eligible"] is False
+        assert persisted is not None
+        assert persisted.session_phase == "closed"
+
+
+def test_intraday_data_shadow_no_data_weekend_defaults_to_weekend() -> None:
+    for session in make_session():
+        weekend_date = datetime(2026, 6, 28, tzinfo=UTC).date()
+
+        payload = IntradayAnalyticsService(session).build_for_trading_date(
+            weekend_date,
+            mode="data_shadow",
+        )
+        summary = payload["session_summaries"][0]
+
+        assert summary["session_type"] == "weekend"
+        assert summary["session_phase"] == "closed"
+        assert summary["analytics_payload"]["data_status"] == "no_samples"
+
+
+def test_intraday_data_shadow_broker_sources_not_calibration_eligible() -> None:
+    for session in make_session():
+        now = utc_now() - timedelta(hours=2)
+        add_microstructure(
+            session,
+            now,
+            count=3,
+            source="broker_indicative_quote",
+        )
+
+        payload = IntradayAnalyticsService(session).build_for_session(
+            now.date(),
+            "weekday_main",
+            mode="data_shadow",
+        )
+        summary = payload["session_summaries"][0]
+
+        assert summary["analytics_payload"]["data_status"] == "has_samples"
+        assert summary["analytics_payload"]["calibration_eligible"] is False
+
+
 def test_intraday_running_session_does_not_overwrite_completed_session() -> None:
     for session in make_session():
         now = utc_now() - timedelta(hours=3)

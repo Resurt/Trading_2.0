@@ -14,6 +14,7 @@ from starlette.websockets import WebSocketDisconnect
 from trade_core.broker_gateway import BrokerUnaryResponse
 from trade_core.session.moex_calendar import MoexCalendarDecision
 from trading_api import create_fastapi_app
+from trading_api.read_service import BffReadService
 from trading_api.schemas import (
     DailyReportRunRequest,
     ReportJobResponse,
@@ -766,10 +767,76 @@ def seed_database(database: DatabaseService) -> None:
         )
 
 
+def test_current_session_reconciles_stale_runtime_snapshot_with_preflight(
+    tmp_path: Path,
+) -> None:
+    database = DatabaseService(f"sqlite+pysqlite:///{tmp_path / 'session-reconcile.db'}")
+    Base.metadata.create_all(database.engine)
+    seed_database(database)
+    with database.session_scope() as session:
+        service = BffReadService(session)
+        closed = preflight_response(market_open=False, reason_code="weekend_session_closed")
+        current = service.current_session(preflight=closed)
+
+        assert current.session_type == "weekend"
+        assert current.session_phase == "closed"
+        assert current.source == "fresh_preflight"
+        assert current.stale is True
+        assert current.stale_reason == "runtime_snapshot_mismatch"
+        assert current.micro_session_id is None
+
+        evening = preflight_response(
+            market_open=True,
+            reason_code="market_open",
+        ).model_copy(
+            update={
+                "session_type": "weekday_evening",
+                "session_phase": "continuous_trading",
+            }
+        )
+        current = service.current_session(preflight=evening)
+        assert current.session_type == "weekday_evening"
+        assert current.session_phase == "continuous_trading"
+
+
+def test_robot_status_and_market_read_model_use_preflight_gate(
+    tmp_path: Path,
+) -> None:
+    database = DatabaseService(f"sqlite+pysqlite:///{tmp_path / 'preflight-gate.db'}")
+    Base.metadata.create_all(database.engine)
+    seed_database(database)
+    with database.session_scope() as session:
+        service = BffReadService(session)
+        closed = preflight_response(market_open=False, reason_code="weekend_session_closed")
+        status = service.robot_status(robot_control_state="stopped", preflight=closed)
+        market = service.market_overview(preflight=closed, include_details=True)
+        sber = next(row for row in market.instruments if row.instrument_id == "MOEX:SBER")
+
+        assert status.session_type == closed.session_type
+        assert status.session_phase == closed.session_phase
+        assert status.session_source == "fresh_preflight"
+        assert status.session_stale is True
+        assert sber.official_exchange_open is False
+        assert sber.quote_allowed_for_data_collection is False
+        assert sber.calibration_market_quality_score == Decimal("0.000")
+        assert sber.quote_source not in {"live_order_book_mid", "live_exchange_last_price"}
+        assert sber.venue_type != "official_exchange"
+        assert sber.order_book_summary["include_in_calibration"] is False
+
+
 def test_robot_status_and_market_overview(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    async def closed_preflight(*args: object, **kwargs: object) -> SessionPreflightResponse:
+        del args, kwargs
+        return preflight_response(
+            market_open=False,
+            reason_code="moex_dsvd_cancelled_platform_update",
+        )
+
+    app_module = importlib.import_module("trading_api.app")
+    monkeypatch.setattr(app_module, "_run_session_preflight", closed_preflight)
     monkeypatch.setenv("TRADING_DATA_ONLY_SHADOW", "true")
     force_exchange_closed(monkeypatch)
     client = make_client(tmp_path)
@@ -790,7 +857,11 @@ def test_robot_status_and_market_overview(
     data_shadow_status = client.get("/runtime/data-shadow/status").json()
 
     assert status["strategy_state"] == "candidate"
-    assert status["session_type"] == "weekday_main"
+    assert status["session_type"] == "weekend"
+    assert status["session_phase"] == "closed"
+    assert status["session_source"] == "fresh_preflight"
+    assert status["session_stale"] is True
+    assert status["session_stale_reason"] == "runtime_snapshot_mismatch"
     assert status["open_orders_count"] == 1
     assert status["active_positions_count"] == 1
     assert status["balance"]["total_portfolio_value_rub"] == "150000"
@@ -822,6 +893,14 @@ def test_robot_status_and_market_overview(
     assert microstructure_summary["snapshots_count"] == 1
     assert data_shadow_status["real_orders_disabled"] is True
     assert data_shadow_status["collector_state"] in {"stopped", "collecting", "starting"}
+    assert data_shadow_status["supervisor_enabled"] is True
+    assert data_shadow_status["supervisor_state"] in {
+        "stopped",
+        "running",
+        "watching_stale_stream",
+    }
+    assert data_shadow_status["stream_restart_count"] == 0
+    assert set(data_shadow_status["per_stream_status"]) >= {"order_book", "last_price"}
     assert data_shadow_status["instruments"][:2] == ["MOEX:SBER", "MOEX:GAZP"]
     assert "Strategy trading disabled" in data_shadow_status["warning"]
 

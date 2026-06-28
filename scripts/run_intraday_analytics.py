@@ -26,7 +26,7 @@ from trading_common.db.service import DatabaseService
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--date", dest="trading_date", type=date.fromisoformat)
+    parser.add_argument("--date", dest="trading_date", type=_parse_trading_date)
     parser.add_argument("--session-type")
     parser.add_argument("--micro-session-id")
     parser.add_argument(
@@ -41,6 +41,12 @@ def parse_args() -> argparse.Namespace:
         default=".local/collection_reports/intraday",
     )
     return parser.parse_args()
+
+
+def _parse_trading_date(value: str) -> date:
+    if value.upper() == "TODAY":
+        return date.today()
+    return date.fromisoformat(value)
 
 
 def main() -> None:

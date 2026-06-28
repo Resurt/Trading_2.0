@@ -87,6 +87,9 @@ class SessionSnapshotResponse(BaseModel):
     micro_session_id: str | None = None
     broker_trading_status: str = "unknown"
     observed_at: datetime | None = None
+    source: str = "runtime_session_snapshot"
+    stale: bool = False
+    stale_reason: str | None = None
 
 
 class RobotStatusResponse(BaseModel):
@@ -102,6 +105,9 @@ class RobotStatusResponse(BaseModel):
     degraded_flags: list[str]
     robot_control_state: str
     micro_session_id: str | None = None
+    session_source: str = "runtime_session_snapshot"
+    session_stale: bool = False
+    session_stale_reason: str | None = None
 
 
 class PositionResponse(BaseModel):
@@ -331,6 +337,14 @@ class DataShadowStatusResponse(BaseModel):
     last_command_reason_code: str | None = None
     instruments: list[str] = Field(default_factory=list)
     stream_batches: list[JsonPayload] = Field(default_factory=list)
+    supervisor_enabled: bool = False
+    supervisor_state: str = "not_configured"
+    stream_restart_count: int = 0
+    last_restart_at: datetime | None = None
+    last_restart_reason: str | None = None
+    stream_stale_count: int = 0
+    last_stream_error: str | None = None
+    per_stream_status: JsonPayload = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
     warning: str | None = None
 

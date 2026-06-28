@@ -1196,6 +1196,15 @@ Required payload fields for preflight: `market_open`, `market_closed_expected`, 
 Required balance payload fields: `total_portfolio_value_rub`, `available_cash_rub`, `blocked_cash_rub`, `expected_yield_rub`, `free_collateral_rub`, `account_id_masked`, `balance_currency`, `last_balance_refresh_at`, `balance_freshness_seconds`, `balance_degraded`, `balance_degraded_reason_code`.
 
 Intraday analytics and Calibration Center payloads remain diagnostic-only. Candidate config proposal events must state that configs are draft/proposal only and are not applied automatically.
+
+For data-shadow intraday analytics, a stale `session_run` row alone is not a
+sample. If fresh/runtime evidence has zero `market_microstructure_snapshot`
+samples and no other facts for the requested scope, the session summary must use
+`session_phase=closed`, `session_status=no_samples`,
+`analytics_payload.data_status=no_samples`,
+`analytics_payload.calibration_eligible=false`, and
+`no_trade_reason=market_closed_or_no_samples`. It must not persist a misleading
+`continuous_trading` row from a stale runtime session.
 ## Market Source And Quality Events
 
 Market-source payloads must include official exchange and venue context:
@@ -1213,3 +1222,9 @@ is created only by data-only collection after Start/preflight and should be visi
 Order-book analytics store spread in separate units: `spread_abs_rub` and `spread_bps`.
 Quality payloads store display and calibration scores plus transparent components. Trade
 tape absence is logged as `no_market_trades_samples`; it is not hidden.
+
+Data-shadow runtime status exposes supervisor observability separately from
+analytics facts: `supervisor_enabled`, `supervisor_state`,
+`stream_restart_count`, `last_restart_at`, `last_restart_reason`,
+`stream_stale_count`, `last_stream_error`, and `per_stream_status`. These fields
+are status/read-model diagnostics and do not create trading entities.

@@ -380,6 +380,8 @@ class DashboardMarketFeedService:
             api_trade_available
             and _status_is_open(normalized_status)
             and not instrument.official_exchange_closed
+            and instrument.api_trade_available is not False
+            and instrument.quote_allowed_for_data_collection
         )
         session_type, session_phase = _clock_session_context(market_open=market_open)
         venue_type = (
@@ -809,6 +811,8 @@ def _prefer_live_row(
 ) -> MarketInstrumentOverview:
     if cached is None:
         return base
+    if not _cached_row_safe_for_base_session(base, cached):
+        return base
     cached_priority = _source_priority(cached.last_price_source)
     base_priority = _source_priority(base.last_price_source)
     if cached.last_price is not None and cached_priority >= base_priority:
@@ -827,6 +831,26 @@ def _prefer_live_row(
             )
         )
     return base
+
+
+def _cached_row_safe_for_base_session(
+    base: MarketInstrumentOverview,
+    cached: MarketInstrumentOverview,
+) -> bool:
+    if base.official_exchange_open:
+        return True
+    cached_payload = cached.quote_payload if isinstance(cached.quote_payload, dict) else {}
+    cached_book = (
+        cached.order_book_summary if isinstance(cached.order_book_summary, dict) else {}
+    )
+    return not (
+        cached.official_exchange_open
+        or cached.quote_allowed_for_data_collection
+        or cached_payload.get("include_in_calibration") is True
+        or cached_book.get("include_in_calibration") is True
+        or str(cached.quote_source).startswith("live")
+        or str(cached.last_price_source).startswith("live")
+    )
 
 
 def _prefer_selected_details(

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -48,6 +48,7 @@ from trading_api.schemas import (
     StrategyConfigUpdateRequest,
 )
 from trading_common.db.models import (
+    AuditEvent,
     BlockerEvent,
     BrokerOrder,
     CalibrationDiagnosticRun,
@@ -116,8 +117,13 @@ class BffReadService:
     def __init__(self, session: Session) -> None:
         self._session = session
 
-    def robot_status(self, *, robot_control_state: str) -> RobotStatusResponse:
-        current_session = self.current_session()
+    def robot_status(
+        self,
+        *,
+        robot_control_state: str,
+        preflight: Mapping[str, Any] | Any | None = None,
+    ) -> RobotStatusResponse:
+        current_session = self.current_session(preflight=preflight)
         latest_state = self._latest_strategy_state()
         active_instruments = self._active_instruments()
         active_timeframes = self._active_timeframes()
@@ -145,6 +151,9 @@ class BffReadService:
             active_positions_count=self._active_positions_count(),
             degraded_flags=degraded_flags,
             robot_control_state=robot_control_state,
+            session_source=current_session.source,
+            session_stale=current_session.stale,
+            session_stale_reason=current_session.stale_reason,
         )
 
     def portfolio_summary(self) -> PortfolioSummaryResponse:
@@ -183,10 +192,17 @@ class BffReadService:
             source="position_snapshot_derived",
         )
 
-    def current_session(self) -> SessionSnapshotResponse:
+    def current_session(
+        self,
+        *,
+        preflight: Mapping[str, Any] | Any | None = None,
+    ) -> SessionSnapshotResponse:
         run = self._session.execute(
             select(SessionRun).order_by(SessionRun.started_at.desc())
         ).scalars().first()
+        preflight_payload = _preflight_payload(preflight)
+        if preflight_payload:
+            return _session_snapshot_from_preflight(preflight_payload, runtime_run=run)
         if run is None:
             return SessionSnapshotResponse()
         return SessionSnapshotResponse(
@@ -281,9 +297,10 @@ class BffReadService:
         *,
         instruments: str | Iterable[str] | None = None,
         include_details: bool = False,
+        preflight: Mapping[str, Any] | Any | None = None,
     ) -> MarketOverviewResponse:
         instrument_ids = _dashboard_universe(instruments)
-        current_session = self.current_session()
+        current_session = self.current_session(preflight=preflight)
         now_msk = datetime.now(tz=MSK)
         official_decision = MoexCalendarService().decision(
             now_msk.date(),
@@ -303,8 +320,13 @@ class BffReadService:
         ]
         return MarketOverviewResponse(generated_at=datetime.now(tz=UTC), instruments=overviews)
 
-    def market_instrument_details(self, instrument_id: str) -> MarketInstrumentOverview:
-        current_session = self.current_session()
+    def market_instrument_details(
+        self,
+        instrument_id: str,
+        *,
+        preflight: Mapping[str, Any] | Any | None = None,
+    ) -> MarketInstrumentOverview:
+        current_session = self.current_session(preflight=preflight)
         now_msk = datetime.now(tz=MSK)
         official_decision = MoexCalendarService().decision(
             now_msk.date(),
@@ -753,6 +775,12 @@ class BffReadService:
             warnings.append("collector_no_recent_samples")
         if enabled and command is None:
             warnings.append("collector_waiting_for_operator_start")
+        supervisor_status = self._data_shadow_supervisor_status(
+            enabled=enabled,
+            collector_state=collector_state,
+            stream_alive=stream_alive,
+            last_message_age_seconds=last_message_age_seconds,
+        )
         return DataShadowStatusResponse(
             enabled=enabled,
             collector_state=collector_state,
@@ -782,6 +810,14 @@ class BffReadService:
             last_command_reason_code=command.reason_code if command is not None else None,
             instruments=_dashboard_universe_from_env(),
             stream_batches=_stream_batches_from_instruments(_dashboard_universe_from_env()),
+            supervisor_enabled=bool(supervisor_status["supervisor_enabled"]),
+            supervisor_state=str(supervisor_status["supervisor_state"]),
+            stream_restart_count=int(supervisor_status["stream_restart_count"]),
+            last_restart_at=supervisor_status["last_restart_at"],
+            last_restart_reason=supervisor_status["last_restart_reason"],
+            stream_stale_count=int(supervisor_status["stream_stale_count"]),
+            last_stream_error=supervisor_status["last_stream_error"],
+            per_stream_status=supervisor_status["per_stream_status"],
             warnings=warnings,
             warning=(
                 "Strategy trading disabled: data-only shadow mode"
@@ -789,6 +825,84 @@ class BffReadService:
                 else "Data-only shadow mode is disabled"
             ),
         )
+
+    def _data_shadow_supervisor_status(
+        self,
+        *,
+        enabled: bool,
+        collector_state: str,
+        stream_alive: bool,
+        last_message_age_seconds: Decimal | None,
+    ) -> JsonPayload:
+        events = list(
+            self._session.execute(
+                select(AuditEvent)
+                .where(AuditEvent.entity_type == "stream_gap_recovery")
+                .order_by(AuditEvent.ts_utc.desc())
+                .limit(100)
+            ).scalars()
+        )
+        restart_events = [
+            event
+            for event in events
+            if event.action
+            in {
+                "stream_gap_recovery_requested",
+                "stream_gap_recovery_completed",
+                "stream_restart_requested",
+                "stream_restart_completed",
+            }
+        ]
+        stale_events = [
+            event
+            for event in events
+            if event.action
+            in {
+                "stream_gap_detected",
+                "stream_stale_detected",
+                "stream_gap_recovery_requested",
+            }
+        ]
+        error_event = next(
+            (
+                event
+                for event in events
+                if event.severity in {"error", "critical"}
+                or str(event.action).endswith("_failed")
+            ),
+            None,
+        )
+        latest_restart = restart_events[0] if restart_events else None
+        if not enabled:
+            supervisor_state = "not_configured"
+        elif collector_state in {
+            "stopped",
+            "stopped_by_operator",
+            "preflight_blocked",
+            "emergency_stopped",
+            "stopping",
+        }:
+            supervisor_state = "stopped"
+        elif stream_alive:
+            supervisor_state = "running"
+        elif collector_state in {"collecting", "starting"}:
+            supervisor_state = "watching_stale_stream"
+        else:
+            supervisor_state = "degraded" if collector_state == "degraded" else "unknown"
+        return {
+            "supervisor_enabled": enabled,
+            "supervisor_state": supervisor_state,
+            "stream_restart_count": len(restart_events),
+            "last_restart_at": latest_restart.ts_utc if latest_restart is not None else None,
+            "last_restart_reason": _restart_reason(latest_restart),
+            "stream_stale_count": len(stale_events),
+            "last_stream_error": _restart_reason(error_event),
+            "per_stream_status": _per_stream_status(
+                supervisor_state=supervisor_state,
+                stream_alive=stream_alive,
+                last_message_age_seconds=last_message_age_seconds,
+            ),
+        }
 
     def _latest_robot_command(self) -> RobotCommand | None:
         return self._session.execute(
@@ -1992,7 +2106,7 @@ def _ticker_from_instrument_id(instrument_id: str) -> str:
 def _no_order_book_quality_components() -> JsonPayload:
     return {
         "display_market_quality_score": None,
-        "calibration_market_quality_score": None,
+        "calibration_market_quality_score": Decimal("0.000"),
         "market_quality_label": "no_order_book_samples",
         "reason_codes": ["no_order_book_samples", "not_for_calibration"],
     }
@@ -2119,6 +2233,115 @@ def _trading_mode_for_context(
     if official_exchange_closed:
         return "exchange_closed"
     return "unknown"
+
+
+def _preflight_payload(preflight: Mapping[str, Any] | Any | None) -> JsonPayload:
+    if preflight is None:
+        return {}
+    if isinstance(preflight, Mapping):
+        return dict(preflight)
+    model_dump = getattr(preflight, "model_dump", None)
+    if callable(model_dump):
+        payload = model_dump(mode="python")
+        return dict(payload) if isinstance(payload, Mapping) else {}
+    return {}
+
+
+def _session_snapshot_from_preflight(
+    preflight: JsonPayload,
+    *,
+    runtime_run: SessionRun | None,
+) -> SessionSnapshotResponse:
+    session_type = str(preflight.get("session_type") or "unknown")
+    session_phase = str(preflight.get("session_phase") or "closed")
+    broker_trading_status = str(preflight.get("broker_trading_status") or "unknown")
+    calendar_date = _date_payload_value(preflight.get("calendar_date"))
+    trading_date = _date_payload_value(preflight.get("trading_date")) or calendar_date
+    observed_at = _optional_datetime(preflight.get("now_msk")) or datetime.now(tz=UTC)
+    runtime_mismatch = runtime_run is not None and (
+        runtime_run.session_type != session_type
+        or runtime_run.session_phase != session_phase
+        or runtime_run.trading_date != trading_date
+    )
+    return SessionSnapshotResponse(
+        calendar_date=calendar_date,
+        trading_date=trading_date,
+        session_type=session_type,
+        session_phase=session_phase,
+        micro_session_id=None if runtime_mismatch else _runtime_micro_session_id(runtime_run),
+        broker_trading_status=broker_trading_status,
+        observed_at=observed_at,
+        source="fresh_preflight",
+        stale=runtime_mismatch,
+        stale_reason="runtime_snapshot_mismatch" if runtime_mismatch else None,
+    )
+
+
+def _runtime_micro_session_id(runtime_run: SessionRun | None) -> str | None:
+    return runtime_run.micro_session_id if runtime_run is not None else None
+
+
+def _date_payload_value(value: object) -> date | None:
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, str) and value:
+        try:
+            return date.fromisoformat(value[:10])
+        except ValueError:
+            return None
+    return None
+
+
+def _optional_datetime(value: object) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        return _coerce_datetime(value)
+    except ValueError:
+        return None
+
+
+def _restart_reason(event: AuditEvent | None) -> str | None:
+    if event is None:
+        return None
+    payload = event.audit_payload if isinstance(event.audit_payload, dict) else {}
+    reason = (
+        payload.get("reason")
+        or payload.get("reason_code")
+        or payload.get("error")
+        or event.action
+    )
+    return str(reason) if reason is not None else None
+
+
+def _per_stream_status(
+    *,
+    supervisor_state: str,
+    stream_alive: bool,
+    last_message_age_seconds: Decimal | None,
+) -> JsonPayload:
+    state = "stopped" if supervisor_state in {"stopped", "not_configured"} else (
+        "alive" if stream_alive else "stale"
+    )
+    return {
+        name: {
+            "state": state,
+            "last_message_age_seconds": (
+                str(last_message_age_seconds)
+                if last_message_age_seconds is not None
+                else None
+            ),
+        }
+        for name in (
+            "order_book",
+            "last_price",
+            "candles",
+            "trading_status",
+            "market_trades",
+        )
+    }
 
 
 def _collector_state_from_command(command: RobotCommand | None, *, stream_alive: bool) -> str:
