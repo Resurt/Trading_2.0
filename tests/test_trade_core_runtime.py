@@ -6,7 +6,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -251,6 +251,61 @@ class PollingOrderBookGateway(RecordingStreamGateway):
         )
 
 
+class NoopReportJobDispatcher:
+    def dispatch_pending(self, session: object) -> list[object]:
+        del session
+        return []
+
+
+def noop_report_job_dispatcher() -> Any:
+    return NoopReportJobDispatcher()
+
+
+def data_only_preflight_payload(
+    *,
+    now: datetime,
+    session_type: str,
+    start_at: datetime,
+    end_at: datetime,
+) -> dict[str, object]:
+    return {
+        "now_msk": now.isoformat(),
+        "trading_date": now.date().isoformat(),
+        "calendar_date": now.date().isoformat(),
+        "session_type": session_type,
+        "session_phase": "continuous_trading",
+        "market_open": True,
+        "market_window_open": True,
+        "market_closed_expected": False,
+        "official_exchange_open": True,
+        "official_exchange_closed": False,
+        "venue_type": "official_exchange",
+        "quote_source_allowed_for_data_collection": True,
+        "data_only_collection_allowed": True,
+        "streams_for_calibration_allowed": True,
+        "current_window_start_at": start_at.isoformat(),
+        "current_window_end_at": end_at.isoformat(),
+        "reason_code": "market_open",
+    }
+
+
+def create_data_only_start_command(runtime: TradeCoreRuntime, preflight: dict[str, object]) -> None:
+    with runtime.database.session_scope() as session:
+        RobotCommandRepository(session).create(
+            command_type="start",
+            requested_by="desk-operator",
+            requested_role="operator",
+            requested_at=datetime.now(tz=UTC),
+            payload={
+                "mode": "data_shadow",
+                "trading_disabled": True,
+                "data_only_shadow": True,
+                "instruments": "SBER,GAZP",
+                "preflight_result": preflight,
+            },
+        )
+
+
 class ResolvingGateway(SafeNoopBrokerGateway):
     def __init__(self, *, now: datetime | None = None) -> None:
         super().__init__(now=now)
@@ -478,6 +533,7 @@ def test_data_only_start_probe_fallback_polls_order_book_and_writes_microstructu
         launch_policy=LaunchModePolicy.from_mode(RuntimeMode.SHADOW),
         database=DatabaseService(config.database_url or ""),
         broker_gateway=cast(BrokerGateway, gateway),
+        report_job_dispatcher=noop_report_job_dispatcher(),
     )
 
     async def run() -> None:
@@ -613,8 +669,10 @@ def test_data_only_collection_auto_stops_after_preflight_window_end(tmp_path: Pa
         gateway.now = msk(2026, 6, 28, 19, 1)
         await runtime.run_cycle(now=msk(2026, 6, 28, 19, 1))
 
-        assert runtime.stats.collector_state == "stopped_session_closed"
-        assert runtime.robot_control_state == "stopped_session_closed"
+        assert runtime.stats.collector_state == "stopped_day_complete"
+        assert runtime.robot_control_state == "stopped_day_complete"
+        assert runtime.stats.daily_collection_active is False
+        assert runtime.stats.completed_for_day is True
         assert runtime.stats.stream_tasks_started == 0
         assert len(gateway.order_book_requests) == order_book_requests_before_close
 
@@ -632,6 +690,13 @@ def test_data_only_collection_auto_stops_after_preflight_window_end(tmp_path: Pa
             assert auto_stop_event.audit_payload["reason_code"] == (
                 "data_only_session_window_closed"
             )
+            assert auto_stop_event.audit_payload["collector_state"] == "stopped_day_complete"
+            day_complete_event = session.execute(
+                select(AuditEvent).where(
+                    AuditEvent.action == "data_only_shadow_collection_day_complete"
+                )
+            ).scalars().first()
+            assert day_complete_event is not None
             assert session.scalar(select(func.count()).select_from(SignalCandidate)) == 0
             assert session.scalar(select(func.count()).select_from(OrderIntent)) == 0
             assert session.scalar(select(func.count()).select_from(BrokerOrder)) == 0
@@ -641,6 +706,252 @@ def test_data_only_collection_auto_stops_after_preflight_window_end(tmp_path: Pa
         await runtime.shutdown()
 
     asyncio.run(run())
+
+
+def test_data_only_weekday_start_rolls_morning_main_evening_and_completes_day(
+    tmp_path: Path,
+) -> None:
+    gateway = PollingOrderBookGateway(now=msk(2026, 6, 29, 7, 5))
+    config = replace(
+        runtime_config(tmp_path),
+        data_only_shadow_enabled=True,
+        data_only_order_book_poll_interval_seconds=1,
+    )
+    runtime = TradeCoreRuntime(
+        config=config,
+        launch_policy=LaunchModePolicy.from_mode(RuntimeMode.SHADOW),
+        database=DatabaseService(config.database_url or ""),
+        broker_gateway=cast(BrokerGateway, gateway),
+        report_job_dispatcher=noop_report_job_dispatcher(),
+    )
+
+    async def run() -> None:
+        await runtime.start()
+        create_data_only_start_command(
+            runtime,
+            data_only_preflight_payload(
+                now=msk(2026, 6, 29, 7, 5),
+                session_type="weekday_morning",
+                start_at=msk(2026, 6, 29, 7),
+                end_at=msk(2026, 6, 29, 10),
+            ),
+        )
+        assert await runtime.process_robot_commands_async() == 1
+        assert runtime.stats.collector_state == "collecting"
+        assert runtime.stats.daily_collection_active is True
+
+        await runtime.run_cycle(now=msk(2026, 6, 29, 7, 5))
+        gateway.now = msk(2026, 6, 29, 9, 59)
+        await runtime.run_cycle(now=msk(2026, 6, 29, 9, 59))
+        assert runtime.stats.collector_state == "collecting"
+
+        gateway.now = msk(2026, 6, 29, 10)
+        await runtime.run_cycle(now=msk(2026, 6, 29, 10))
+        assert runtime.stats.collector_state == "collecting"
+        assert runtime.stats.current_window_state == "collecting"
+
+        with runtime.database.session_factory() as session:
+            latest = session.execute(
+                select(MarketMicrostructureSnapshot).order_by(
+                    MarketMicrostructureSnapshot.ts_utc.desc()
+                )
+            ).scalars().first()
+            assert latest is not None
+            assert latest.session_type == "weekday_main"
+            assert latest.snapshot_payload["include_in_calibration"] is True
+
+        gateway.now = msk(2026, 6, 29, 18, 59)
+        await runtime.run_cycle(now=msk(2026, 6, 29, 18, 59))
+        assert runtime.stats.collector_state == "paused_until_next_window"
+        assert runtime.stats.daily_collection_active is True
+        assert runtime.stats.next_collection_window_at == msk(2026, 6, 29, 19)
+
+        with runtime.database.session_factory() as session:
+            gap_rows = session.scalar(
+                select(func.count())
+                .select_from(MarketMicrostructureSnapshot)
+                .where(
+                    MarketMicrostructureSnapshot.ts_utc
+                    >= msk(2026, 6, 29, 18, 59).astimezone(UTC),
+                    MarketMicrostructureSnapshot.ts_utc
+                    < msk(2026, 6, 29, 19).astimezone(UTC),
+                )
+            )
+            assert gap_rows == 0
+
+        gateway.now = msk(2026, 6, 29, 19)
+        await runtime.run_cycle(now=msk(2026, 6, 29, 19))
+        assert runtime.stats.collector_state == "collecting"
+
+        with runtime.database.session_factory() as session:
+            latest = session.execute(
+                select(MarketMicrostructureSnapshot).order_by(
+                    MarketMicrostructureSnapshot.ts_utc.desc()
+                )
+            ).scalars().first()
+            assert latest is not None
+            assert latest.session_type == "weekday_evening"
+
+        gateway.now = msk(2026, 6, 29, 23, 50)
+        await runtime.run_cycle(now=msk(2026, 6, 29, 23, 50))
+        assert runtime.stats.collector_state == "stopped_day_complete"
+        assert runtime.stats.daily_collection_active is False
+        assert runtime.stats.completed_for_day is True
+
+        with runtime.database.session_factory() as session:
+            actions = set(session.execute(select(AuditEvent.action)).scalars())
+            assert "data_only_shadow_collection_paused_until_next_window" in actions
+            assert "data_only_shadow_collection_resumed" in actions
+            assert "data_only_shadow_collection_day_complete" in actions
+            lifecycle_events = session.execute(
+                select(AuditEvent).where(
+                    AuditEvent.action.in_(
+                        {
+                            "data_only_shadow_collection_started",
+                            "data_only_shadow_collection_window_closed",
+                            "data_only_shadow_collection_paused_until_next_window",
+                            "data_only_shadow_collection_resumed",
+                            "data_only_shadow_collection_day_complete",
+                        }
+                    )
+                )
+            ).scalars()
+            for event in lifecycle_events:
+                assert "uses_pseudo_orders" not in event.audit_payload
+                assert "shadow_pseudo_order" not in event.audit_payload
+            assert session.scalar(select(func.count()).select_from(SignalCandidate)) == 0
+            assert session.scalar(select(func.count()).select_from(OrderIntent)) == 0
+            assert session.scalar(select(func.count()).select_from(BrokerOrder)) == 0
+
+        assert gateway.post_order_calls == []
+        assert gateway.cancel_order_calls == []
+        await runtime.shutdown()
+
+    asyncio.run(run())
+
+
+def test_data_only_manual_stop_cancels_daily_auto_resume(tmp_path: Path) -> None:
+    gateway = PollingOrderBookGateway(now=msk(2026, 6, 29, 7, 5))
+    config = replace(
+        runtime_config(tmp_path),
+        data_only_shadow_enabled=True,
+        data_only_order_book_poll_interval_seconds=1,
+    )
+    runtime = TradeCoreRuntime(
+        config=config,
+        launch_policy=LaunchModePolicy.from_mode(RuntimeMode.SHADOW),
+        database=DatabaseService(config.database_url or ""),
+        broker_gateway=cast(BrokerGateway, gateway),
+        report_job_dispatcher=noop_report_job_dispatcher(),
+    )
+
+    async def run() -> None:
+        await runtime.start()
+        create_data_only_start_command(
+            runtime,
+            data_only_preflight_payload(
+                now=msk(2026, 6, 29, 7, 5),
+                session_type="weekday_morning",
+                start_at=msk(2026, 6, 29, 7),
+                end_at=msk(2026, 6, 29, 10),
+            ),
+        )
+        assert await runtime.process_robot_commands_async() == 1
+        await runtime.run_cycle(now=msk(2026, 6, 29, 7, 5))
+
+        with runtime.database.session_scope() as session:
+            RobotCommandRepository(session).create(
+                command_type="stop",
+                requested_by="desk-operator",
+                requested_role="operator",
+                requested_at=datetime.now(tz=UTC),
+                payload={"mode": "data_shadow", "data_only_shadow": True},
+            )
+        assert await runtime.process_robot_commands_async() == 1
+        assert runtime.stats.collector_state == "stopped_by_operator"
+        assert runtime.stats.daily_collection_active is False
+        requests_after_stop = len(gateway.order_book_requests)
+
+        gateway.now = msk(2026, 6, 29, 10)
+        await runtime.run_cycle(now=msk(2026, 6, 29, 10))
+        assert runtime.stats.collector_state == "stopped_by_operator"
+        assert len(gateway.order_book_requests) == requests_after_stop
+        assert gateway.post_order_calls == []
+        assert gateway.cancel_order_calls == []
+        await runtime.shutdown()
+
+    asyncio.run(run())
+
+
+def test_data_only_daily_intent_restores_and_resumes_after_runtime_restart(
+    tmp_path: Path,
+) -> None:
+    database_url = runtime_config(tmp_path).database_url or ""
+    config = replace(
+        runtime_config(tmp_path),
+        database_url=database_url,
+        data_only_shadow_enabled=True,
+        data_only_order_book_poll_interval_seconds=1,
+    )
+    first_gateway = PollingOrderBookGateway(now=msk(2026, 6, 29, 7, 5))
+    first_runtime = TradeCoreRuntime(
+        config=config,
+        launch_policy=LaunchModePolicy.from_mode(RuntimeMode.SHADOW),
+        database=DatabaseService(database_url),
+        broker_gateway=cast(BrokerGateway, first_gateway),
+        report_job_dispatcher=noop_report_job_dispatcher(),
+    )
+
+    async def first_run() -> None:
+        await first_runtime.start()
+        create_data_only_start_command(
+            first_runtime,
+            data_only_preflight_payload(
+                now=msk(2026, 6, 29, 7, 5),
+                session_type="weekday_morning",
+                start_at=msk(2026, 6, 29, 7),
+                end_at=msk(2026, 6, 29, 10),
+            ),
+        )
+        assert await first_runtime.process_robot_commands_async() == 1
+        await first_runtime.run_cycle(now=msk(2026, 6, 29, 7, 5))
+        first_gateway.now = msk(2026, 6, 29, 10)
+        await first_runtime.run_cycle(now=msk(2026, 6, 29, 10))
+        first_gateway.now = msk(2026, 6, 29, 18, 59)
+        await first_runtime.run_cycle(now=msk(2026, 6, 29, 18, 59))
+        assert first_runtime.stats.collector_state == "paused_until_next_window"
+        await first_runtime.shutdown()
+
+    asyncio.run(first_run())
+
+    second_gateway = PollingOrderBookGateway(now=msk(2026, 6, 29, 19))
+    second_runtime = TradeCoreRuntime(
+        config=config,
+        launch_policy=LaunchModePolicy.from_mode(RuntimeMode.SHADOW),
+        database=DatabaseService(database_url),
+        broker_gateway=cast(BrokerGateway, second_gateway),
+        report_job_dispatcher=noop_report_job_dispatcher(),
+    )
+
+    async def second_run() -> None:
+        await second_runtime.start()
+        assert second_runtime.stats.daily_collection_active is True
+        assert second_runtime.stats.collector_state == "paused_until_next_window"
+        await second_runtime.run_cycle(now=msk(2026, 6, 29, 19))
+        assert second_runtime.stats.collector_state == "collecting"
+        with second_runtime.database.session_factory() as session:
+            latest = session.execute(
+                select(MarketMicrostructureSnapshot).order_by(
+                    MarketMicrostructureSnapshot.ts_utc.desc()
+                )
+            ).scalars().first()
+            assert latest is not None
+            assert latest.session_type == "weekday_evening"
+        assert second_gateway.post_order_calls == []
+        assert second_gateway.cancel_order_calls == []
+        await second_runtime.shutdown()
+
+    asyncio.run(second_run())
 
 
 def test_data_only_shadow_start_command_closed_market_does_not_create_orders(

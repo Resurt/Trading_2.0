@@ -104,6 +104,9 @@ class RobotStatusResponse(BaseModel):
     active_positions_count: int
     degraded_flags: list[str]
     robot_control_state: str
+    data_shadow_collector_state: str | None = None
+    daily_collection_active: bool = False
+    effective_logging_state: str = "stopped"
     micro_session_id: str | None = None
     session_source: str = "runtime_session_snapshot"
     session_stale: bool = False
@@ -323,6 +326,18 @@ class MarketMicrostructureSummaryResponse(BaseModel):
 class DataShadowStatusResponse(BaseModel):
     enabled: bool
     collector_state: str = "stopped"
+    day_collection_state: str = "inactive"
+    daily_collection_active: bool = False
+    current_window_state: str = "stopped"
+    next_collection_window_at: datetime | None = None
+    remaining_windows_today: int = 0
+    collector_left_running: bool = False
+    paused_at: datetime | None = None
+    completed_for_day_at: datetime | None = None
+    last_stop_reason: str | None = None
+    last_pause_reason: str | None = None
+    last_resume_at: datetime | None = None
+    last_window_completed_at: datetime | None = None
     strategy_trading_disabled: bool
     real_orders_disabled: bool
     market_open: bool | None = None

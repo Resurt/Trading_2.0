@@ -100,6 +100,14 @@ In data-only mode `trading_allowed=false` even when
 logging streams plus a bounded readonly `GetOrderBook` polling fallback when
 streams are silent. Order APIs remain disabled.
 
+One accepted data-only Start creates a daily collection intent. Runtime status
+must represent the day lifecycle separately from the current stream state:
+`daily_collection_active=true` while the intent is alive,
+`collector_state=collecting` during a window, `collector_state=paused_until_next_window`
+between same-day windows, and `collector_state=stopped_day_complete` after the
+last window. Manual Stop sets `collector_state=stopped_by_operator`, clears
+`daily_collection_active`, and cancels auto-resume.
+
 Data-only Start does not perform runtime position snapshots. Account-level
 `GetPositions`/`GetPortfolio` reads are reserved for explicit readonly balance
 diagnostics (`POST /portfolio/refresh` or the broker balance script), not for
@@ -371,14 +379,40 @@ The data-shadow status payload includes observable supervisor fields:
 - `last_stream_error`;
 - `per_stream_status` for `order_book`, `last_price`, `candles`,
   `trading_status`, and `market_trades` when available.
+- `day_collection_state`, `daily_collection_active`, `current_window_state`;
+- `next_collection_window_at`, `remaining_windows_today`, `next_resume_at`;
+- `paused_at`, `completed_for_day_at`, `last_window_completed_at`;
+- `last_stop_reason`, `last_pause_reason`, `last_resume_at`;
+- `collector_left_running`.
 
 When the collector is intentionally stopped or preflight-blocked,
 `supervisor_state=stopped`. If the implementation is not configured,
 `supervisor_state=not_configured` is explicit rather than omitted.
-If the collector stops because the current preflight window has ended,
-`collector_state=stopped_session_closed`, `stream_alive=false`, and the payload
-must expose a clear `last_stop_reason` such as `data_only_session_window_closed`.
-Recent snapshots alone must not make a stopped collector look alive.
+If a same-day session window ends and another window remains,
+`collector_state=paused_until_next_window`, `stream_alive=false`,
+`daily_collection_active=true`, and the payload exposes
+`next_collection_window_at`/`next_resume_at`. If the last window ends,
+`collector_state=stopped_day_complete`, `daily_collection_active=false`, and
+`completed_for_day_at` is set. Recent snapshots alone must not make a paused or
+stopped collector look alive.
+
+`GET /robot/status` distinguishes the API control state from logging state with
+`robot_control_state`, `data_shadow_collector_state`, `daily_collection_active`,
+and `effective_logging_state`. It must not report a stopped or paused data-shadow
+collector as simply running.
+
+Trade-core emits these data-only lifecycle audit events:
+`data_only_shadow_collection_started`,
+`data_only_shadow_collection_window_closed`,
+`data_only_shadow_collection_paused_until_next_window`,
+`data_only_shadow_collection_resumed`,
+`data_only_shadow_collection_day_complete`,
+`data_only_shadow_collection_stopped`,
+`data_only_shadow_collection_auto_stopped`, and
+`data_only_shadow_collection_resume_failed`. Payloads include trading date,
+window boundaries, next resume time, requested/working instruments,
+`readonly_calls_only=true`, `real_orders_disabled=true`, and
+`strategy_trading_disabled=true`.
 
 If stream order books are silent while Start is accepted, trade-core may write
 microstructure through bounded readonly `GetOrderBook` polling. These rows keep

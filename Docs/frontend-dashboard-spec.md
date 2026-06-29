@@ -1,5 +1,27 @@
 # Спецификация frontend dashboard
 
+> Current status contract, 2026-06-29: этот верхний блок является актуальным.
+> Ниже в документе остаются legacy/исторические фрагменты, включая старые
+> формулировки и mojibake; их нельзя удалять без отдельного archival pass.
+
+## Current Data-Only Lifecycle Status
+
+Start/Stop command UI must display data-only lifecycle states from
+`/runtime/data-shadow/status` and `/robot/status` without collapsing them into a
+generic running/stopped label:
+
+- `collecting`: persistent data-only logging is active in the current session window;
+- `paused_until_next_window`: one daily Start intent is still active, streams are
+  stopped between same-day windows, and UI should show `next_collection_window_at`;
+- `stopped_day_complete`: the last collection window of the trading date finished;
+- `stopped_by_operator`: operator Stop cancelled the daily intent and auto-resume is
+  forbidden;
+- `preflight_blocked`: Start was blocked before streams were started.
+
+The dashboard quote/feed display remains independent from Start. Start controls only
+persistent data-only logging and must not be required for quote board, selected
+instrument details, order book status, or trade tape status.
+
 ## Live Market Refresh Model
 
 Live Dashboard keeps the last good market snapshot on screen. A failed or slow

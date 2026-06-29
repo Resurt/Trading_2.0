@@ -43,6 +43,22 @@ Small samples are stored with warnings such as `small_sample_is_early_evidence_n
 10-20 trading days of data-only evidence can support investigation but must not permanently disable
 timeframe/session/side/instrument contours.
 
+Data-only lifecycle events are part of the calibration audit trail. One Start is a
+daily intent and must emit structured `audit_event` rows for start, window close,
+pause until next window, resume, day complete, stop, auto-stop and resume failure.
+Payloads include `trading_date`, current window boundaries, `next_collection_window_at`,
+requested/working instruments, `day_collection_state`, `collector_state`,
+`readonly_calls_only=true`, `real_orders_disabled=true`, and
+`strategy_trading_disabled=true`. Future data-only events must not include
+misleading `uses_pseudo_orders=true` or `shadow_pseudo_order` metadata.
+
+Primary calibration/logging tables must contain only valid active-window samples.
+No `market_microstructure_snapshot` or `order_book_summary` rows may be written
+between morning/main/evening windows, after final close, during official exchange
+closure, or for OTC/dealer/indicative/stale/local-history display data. Known-invalid
+primary rows are purged with a manifest and audit evidence, not merely hidden with
+`not_for_calibration`.
+
 ## JSON structured logging
 
 Технические логи пишутся в JSON через стандартный Python logging.

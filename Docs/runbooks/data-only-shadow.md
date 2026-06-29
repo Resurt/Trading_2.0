@@ -238,6 +238,21 @@ Stop remains a controlled operator command. In data-only mode it stops/cancels m
 stream tasks, moves collector state to `stopped_by_operator`, and shows the result in
 the command status strip.
 
+One accepted Start creates a daily collection intent. For a weekday trading date,
+the runtime collects the morning window, pauses as `paused_until_next_window` at
+the morning cutoff, automatically resumes for `weekday_main`, pauses before
+`weekday_evening`, and completes the day as `stopped_day_complete` after the final
+window. The pause is not an operator stop: `daily_collection_active=true`,
+`next_collection_window_at`/`next_resume_at` are populated, streams are stopped, and
+no primary calibration rows are written in the gap. Manual Stop sets
+`stopped_by_operator`, clears the daily intent, records `cancelled_by_operator=true`,
+and must not auto-resume at the next window.
+
+Process restart recovery uses the latest data-only lifecycle audit event. If the
+last durable state is `paused_until_next_window` and the operator did not stop the
+run, fresh preflight decides whether to resume immediately, stay paused, or mark
+the day complete.
+
 ## Broker balance visibility
 
 Refresh broker account state before live data-only checks:
@@ -341,9 +356,14 @@ should run.
 The collector must not keep writing calibration rows after the fresh preflight
 window closes. On each runtime cycle, trade-core rechecks the current data-only
 preflight context. If the current time is outside `current_window_start_at` /
-`current_window_end_at` or preflight no longer allows data-only collection, it
-stops streams and polling, emits `data_only_shadow_collection_auto_stopped`, and
-keeps `stream_alive=false` in `/runtime/data-shadow/status`.
+`current_window_end_at`, it emits `data_only_shadow_collection_window_closed`. If
+another same-day window exists it stops streams/polling, emits
+`data_only_shadow_collection_paused_until_next_window`, and keeps
+`stream_alive=false` while `daily_collection_active=true`. If no same-day window
+remains, it emits `data_only_shadow_collection_auto_stopped` and
+`data_only_shadow_collection_day_complete`. No `market_microstructure_snapshot` or
+`order_book_summary` primary rows may be written while paused, between windows, or
+after final close.
 
 Known-invalid primary market-data rows are purged, not merely hidden by
 `not_for_calibration` flags. If a run produced `market_microstructure_snapshot`

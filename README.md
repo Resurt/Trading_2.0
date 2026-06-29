@@ -324,6 +324,15 @@ but readonly `GetOrderBook` remains available, a bounded polling fallback writes
 is disabled by Stop and never calls `PostOrder`, `CancelOrder`, or creates trading
 entities.
 
+One operator Start is a daily data-only collection intent, not a single-session
+toggle. On weekdays the runtime must collect `weekday_morning`, pause at the
+morning cutoff as `paused_until_next_window`, auto-resume for `weekday_main`, pause
+again before `weekday_evening`, and finish as `stopped_day_complete` after the last
+window. Manual Stop cancels the daily intent and prevents auto-resume. Runtime and
+API status distinguish `robot_control_state`, `data_shadow_collector_state`,
+`daily_collection_active`, and `effective_logging_state` so a stopped or paused
+collector is not reported as simply running.
+
 Data-only Start is market-data-only. Runtime micro-session position snapshots are
 skipped, so account-level `GetPositions`/`GetPortfolio` calls happen only through
 explicit balance diagnostics such as `/portfolio/refresh`.

@@ -1033,6 +1033,91 @@ def test_data_shadow_status_reports_auto_stopped_even_with_recent_snapshots(
     assert status.stopped_at == now - timedelta(seconds=3)
 
 
+def test_data_shadow_lifecycle_status_distinguishes_paused_collector(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TRADING_DATA_ONLY_SHADOW", "true")
+    database = DatabaseService(f"sqlite+pysqlite:///{tmp_path / 'paused-data-shadow.db'}")
+    Base.metadata.create_all(database.engine)
+    now = datetime.now(tz=UTC)
+    command_id = uuid4()
+    next_window_at = now + timedelta(minutes=5)
+    paused_at = now - timedelta(seconds=30)
+    with database.session_scope() as session:
+        session.add(
+            RobotCommand(
+                command_id=command_id,
+                command_type="start",
+                requested_by="frontend_operator",
+                requested_role="operator",
+                requested_at=now - timedelta(minutes=20),
+                status="applied",
+                reason_code="data_only_collection_started",
+                accepted_at=now - timedelta(minutes=20),
+                applied_at=now - timedelta(minutes=20),
+                finished_at=now - timedelta(minutes=20),
+                payload={
+                    "preflight_result": {
+                        "market_open": True,
+                        "session_type": "weekday_morning",
+                        "session_phase": "morning_trading",
+                    }
+                },
+                result_payload={
+                    "collector_state": "collecting",
+                    "started_at": (now - timedelta(minutes=20)).isoformat(),
+                },
+            )
+        )
+        session.add(
+            AuditEvent(
+                **session_context(),
+                audit_event_id=uuid4(),
+                ts_utc=paused_at,
+                exchange_ts=None,
+                received_ts=paused_at,
+                service="trade-core",
+                actor="runtime",
+                action="data_only_shadow_collection_paused_until_next_window",
+                entity_type="runtime",
+                entity_id=str(command_id),
+                severity="info",
+                correlation_id=str(command_id),
+                audit_payload={
+                    "collector_state": "paused_until_next_window",
+                    "day_collection_state": "active",
+                    "daily_collection_active": True,
+                    "current_window_state": "paused_until_next_window",
+                    "next_collection_window_at": next_window_at.isoformat(),
+                    "remaining_windows_today": 2,
+                    "paused_at": paused_at.isoformat(),
+                    "last_pause_reason": "data_only_session_window_closed",
+                    "reason_code": "data_only_session_window_closed",
+                },
+            )
+        )
+
+    with database.session_factory() as session:
+        service = BffReadService(session)
+        data_shadow_status = service.data_shadow_status()
+        robot_status = service.robot_status(robot_control_state="running")
+
+    assert data_shadow_status.collector_state == "paused_until_next_window"
+    assert data_shadow_status.day_collection_state == "active"
+    assert data_shadow_status.daily_collection_active is True
+    assert data_shadow_status.stream_alive is False
+    assert data_shadow_status.supervisor_state == "paused"
+    assert data_shadow_status.next_collection_window_at == next_window_at
+    assert data_shadow_status.paused_at == paused_at
+    assert data_shadow_status.stopped_at is None
+    assert "collector_paused_until_next_window" in data_shadow_status.warnings
+    assert robot_status.robot_control_state == "running"
+    assert robot_status.data_shadow_collector_state == "paused_until_next_window"
+    assert robot_status.daily_collection_active is True
+    assert robot_status.effective_logging_state == "paused_until_next_window"
+
+
 def test_portfolio_summary_degrades_when_balance_missing(tmp_path: Path) -> None:
     database = DatabaseService(f"sqlite+pysqlite:///{tmp_path / 'empty-api-bff.db'}")
     Base.metadata.create_all(database.engine)

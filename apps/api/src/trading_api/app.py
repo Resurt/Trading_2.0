@@ -2648,7 +2648,9 @@ def _dashboard_market_feed_timeout_snapshot(
     market_open = bool(selected_details and selected_details.official_exchange_open)
     session_phase = "continuous_trading" if market_open else "closed"
     status = feed.status()
-    errors = list(status.get("errors") if isinstance(status.get("errors"), list) else [])
+    raw_errors = status.get("errors")
+    errors = list(raw_errors) if isinstance(raw_errors, list) else []
+    raw_warnings = status.get("warnings")
     if "dashboard_market_feed_timeout" not in errors:
         errors.insert(0, "dashboard_market_feed_timeout")
     generated_at = datetime.now(tz=UTC).isoformat()
@@ -2680,9 +2682,7 @@ def _dashboard_market_feed_timeout_snapshot(
             selected_details.model_dump(mode="json") if selected_details is not None else None
         ),
         "errors": errors[:5],
-        "warnings": list(
-            status.get("warnings") if isinstance(status.get("warnings"), list) else []
-        ),
+        "warnings": list(raw_warnings) if isinstance(raw_warnings, list) else [],
         "status": {
             **status,
             "running": bool(status.get("running")),

@@ -12,6 +12,7 @@ from uuid import UUID
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+from sqlalchemy.sql.elements import ColumnElement
 
 from trade_core.session.moex_calendar import MSK, MoexCalendarDecision, MoexCalendarService
 from trading_api.market_quality import calculate_market_quality, calculate_spread_metrics
@@ -137,6 +138,16 @@ class BffReadService:
         portfolio_summary = self.portfolio_summary()
         if portfolio_summary.balance.balance_degraded:
             degraded_flags.append("balance_unavailable")
+        data_shadow_lifecycle = self._data_shadow_lifecycle_summary()
+        data_shadow_collector_state = str(
+            data_shadow_lifecycle.get("collector_state") or "stopped"
+        )
+        if (
+            robot_control_state == "running"
+            and data_shadow_collector_state
+            not in {"collecting", "starting", "paused_until_next_window"}
+        ):
+            degraded_flags.append("data_shadow_collector_not_collecting")
 
         return RobotStatusResponse(
             balance=portfolio_summary.balance,
@@ -151,6 +162,14 @@ class BffReadService:
             active_positions_count=self._active_positions_count(),
             degraded_flags=degraded_flags,
             robot_control_state=robot_control_state,
+            data_shadow_collector_state=data_shadow_collector_state,
+            daily_collection_active=bool(
+                data_shadow_lifecycle.get("daily_collection_active")
+            ),
+            effective_logging_state=str(
+                data_shadow_lifecycle.get("effective_logging_state")
+                or data_shadow_collector_state
+            ),
             session_source=current_session.source,
             session_stale=current_session.stale,
             session_stale_reason=current_session.stale_reason,
@@ -773,21 +792,28 @@ class BffReadService:
             and last_message_age_seconds <= Decimal("30")
         )
         collector_state = _collector_state_from_command(command, stream_alive=stream_alive)
-        auto_stop_event = self._latest_data_shadow_auto_stop_after(command)
-        auto_stop_payload = (
-            auto_stop_event.audit_payload
-            if auto_stop_event is not None and isinstance(auto_stop_event.audit_payload, dict)
+        lifecycle_event = self._latest_data_shadow_lifecycle_event_after(command)
+        lifecycle_payload = (
+            lifecycle_event.audit_payload
+            if lifecycle_event is not None and isinstance(lifecycle_event.audit_payload, dict)
             else {}
         )
-        if auto_stop_event is not None:
+        if lifecycle_event is not None:
             collector_state = str(
-                auto_stop_payload.get("collector_state") or "stopped_session_closed"
+                lifecycle_payload.get("collector_state")
+                or lifecycle_payload.get("window_collector_state")
+                or collector_state
             )
-        if _collector_state_is_stopped(collector_state):
+        if (
+            _collector_state_is_stopped(collector_state)
+            or collector_state == "paused_until_next_window"
+        ):
             stream_alive = False
         warnings = []
         if enabled and collector_state in {"collecting", "starting"} and not stream_alive:
             warnings.append("collector_no_recent_samples")
+        if enabled and collector_state == "paused_until_next_window":
+            warnings.append("collector_paused_until_next_window")
         if enabled and command is None:
             warnings.append("collector_waiting_for_operator_start")
         supervisor_status = self._data_shadow_supervisor_status(
@@ -799,6 +825,38 @@ class BffReadService:
         return DataShadowStatusResponse(
             enabled=enabled,
             collector_state=collector_state,
+            day_collection_state=str(
+                lifecycle_payload.get("day_collection_state") or "inactive"
+            ),
+            daily_collection_active=bool(
+                lifecycle_payload.get("daily_collection_active")
+            ),
+            current_window_state=str(
+                lifecycle_payload.get("current_window_state")
+                or lifecycle_payload.get("window_collector_state")
+                or collector_state
+            ),
+            next_collection_window_at=_datetime_payload_value(
+                lifecycle_payload,
+                "next_collection_window_at",
+            ),
+            remaining_windows_today=_int_payload_value(
+                lifecycle_payload,
+                "remaining_windows_today",
+            ),
+            collector_left_running=collector_state == "collecting" and stream_alive,
+            paused_at=_datetime_payload_value(lifecycle_payload, "paused_at"),
+            completed_for_day_at=_datetime_payload_value(
+                lifecycle_payload,
+                "completed_for_day_at",
+            ),
+            last_stop_reason=_str_payload_value(lifecycle_payload, "last_stop_reason"),
+            last_pause_reason=_str_payload_value(lifecycle_payload, "last_pause_reason"),
+            last_resume_at=_datetime_payload_value(lifecycle_payload, "last_resume_at"),
+            last_window_completed_at=_datetime_payload_value(
+                lifecycle_payload,
+                "last_window_completed_at",
+            ),
             strategy_trading_disabled=enabled,
             real_orders_disabled=True,
             market_open=_bool_payload_value(preflight_payload, "market_open"),
@@ -806,11 +864,15 @@ class BffReadService:
                 preflight_payload,
                 "market_closed_expected",
             ),
-            reason_code=str(auto_stop_payload.get("reason_code"))
-            if auto_stop_payload.get("reason_code")
+            reason_code=str(lifecycle_payload.get("reason_code"))
+            if lifecycle_payload.get("reason_code")
             else _str_payload_value(preflight_payload, "reason_code")
             or (command.reason_code if command is not None else None),
-            next_session_at=_next_session_from_preflight(preflight_payload),
+            next_session_at=_datetime_payload_value(
+                lifecycle_payload,
+                "next_collection_window_at",
+            )
+            or _next_session_from_preflight(preflight_payload),
             stream_alive=stream_alive,
             last_message_age_seconds=last_message_age_seconds,
             candles_received=None,
@@ -821,7 +883,9 @@ class BffReadService:
             avg_market_quality_score=_decimal_or_none(avg_quality),
             current_session=latest_session or _str_payload_value(preflight_payload, "session_type"),
             started_at=_datetime_payload_value(result_payload, "started_at"),
-            stopped_at=_datetime_payload_value(auto_stop_payload, "stopped_at")
+            stopped_at=None
+            if collector_state == "paused_until_next_window"
+            else _datetime_payload_value(lifecycle_payload, "stopped_at")
             or _datetime_payload_value(result_payload, "stopped_at"),
             last_command_id=command.command_id if command is not None else None,
             last_command_status=command.status if command is not None else None,
@@ -893,10 +957,13 @@ class BffReadService:
         latest_restart = restart_events[0] if restart_events else None
         if not enabled:
             supervisor_state = "not_configured"
+        elif collector_state == "paused_until_next_window":
+            supervisor_state = "paused"
         elif collector_state in {
             "stopped",
             "stopped_by_operator",
             "stopped_session_closed",
+            "stopped_day_complete",
             "preflight_blocked",
             "emergency_stopped",
             "stopping",
@@ -923,23 +990,59 @@ class BffReadService:
             ),
         }
 
+    def _data_shadow_lifecycle_summary(self) -> JsonPayload:
+        command = self._latest_robot_command()
+        event = self._latest_data_shadow_lifecycle_event_after(command)
+        payload = (
+            event.audit_payload
+            if event is not None and isinstance(event.audit_payload, dict)
+            else {}
+        )
+        collector_state = str(
+            payload.get("collector_state")
+            or payload.get("window_collector_state")
+            or _collector_state_from_command(command, stream_alive=False)
+        )
+        daily_collection_active = bool(payload.get("daily_collection_active"))
+        effective_logging_state = collector_state
+        if daily_collection_active and collector_state == "paused_until_next_window":
+            effective_logging_state = "paused_until_next_window"
+        elif daily_collection_active and collector_state in {"collecting", "starting"}:
+            effective_logging_state = "collecting"
+        elif not daily_collection_active:
+            effective_logging_state = "stopped"
+        return {
+            "collector_state": collector_state,
+            "daily_collection_active": daily_collection_active,
+            "effective_logging_state": effective_logging_state,
+            "day_collection_state": str(payload.get("day_collection_state") or "inactive"),
+        }
+
     def _latest_robot_command(self) -> RobotCommand | None:
         return self._session.execute(
             select(RobotCommand).order_by(RobotCommand.requested_at.desc()).limit(1)
         ).scalars().first()
 
-    def _latest_data_shadow_auto_stop_after(
+    def _latest_data_shadow_lifecycle_event_after(
         self,
         command: RobotCommand | None,
     ) -> AuditEvent | None:
-        if command is None or command.command_type not in {"start", "resume"}:
-            return None
+        lifecycle_actions = {
+            "data_only_shadow_collection_started",
+            "data_only_shadow_collection_window_closed",
+            "data_only_shadow_collection_paused_until_next_window",
+            "data_only_shadow_collection_resumed",
+            "data_only_shadow_collection_day_complete",
+            "data_only_shadow_collection_stopped",
+            "data_only_shadow_collection_auto_stopped",
+            "data_only_shadow_collection_resume_failed",
+        }
+        filters: list[ColumnElement[bool]] = [AuditEvent.action.in_(lifecycle_actions)]
+        if command is not None:
+            filters.append(AuditEvent.ts_utc >= command.requested_at)
         return self._session.execute(
             select(AuditEvent)
-            .where(
-                AuditEvent.action == "data_only_shadow_collection_auto_stopped",
-                AuditEvent.ts_utc >= command.requested_at,
-            )
+            .where(*filters)
             .order_by(AuditEvent.ts_utc.desc())
             .limit(1)
         ).scalars().first()
@@ -2357,9 +2460,12 @@ def _per_stream_status(
     stream_alive: bool,
     last_message_age_seconds: Decimal | None,
 ) -> JsonPayload:
-    state = "stopped" if supervisor_state in {"stopped", "not_configured"} else (
-        "alive" if stream_alive else "stale"
-    )
+    if supervisor_state == "paused":
+        state = "paused"
+    else:
+        state = "stopped" if supervisor_state in {"stopped", "not_configured"} else (
+            "alive" if stream_alive else "stale"
+        )
     return {
         name: {
             "state": state,
@@ -2409,6 +2515,7 @@ def _collector_state_is_stopped(collector_state: str) -> bool:
         "stopped",
         "stopped_by_operator",
         "stopped_session_closed",
+        "stopped_day_complete",
         "preflight_blocked",
         "emergency_stopped",
         "stopping",
@@ -2443,6 +2550,18 @@ def _str_payload_value(payload: JsonPayload, key: str) -> str | None:
 
 def _datetime_payload_value(payload: JsonPayload, key: str) -> datetime | None:
     return _coerce_datetime(payload.get(key))
+
+
+def _int_payload_value(payload: JsonPayload, key: str) -> int:
+    value = payload.get(key)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            return int(value)
+        except ValueError:
+            return 0
+    return 0
 
 
 def _stream_batches_from_instruments(
