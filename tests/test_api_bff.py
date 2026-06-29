@@ -1280,6 +1280,60 @@ def test_dashboard_market_feed_snapshot_does_not_require_collector_or_write_db(
     assert before == after
 
 
+def test_market_websocket_uses_dashboard_feed_and_preserves_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app_module = importlib.import_module("trading_api.app")
+    from sqlalchemy import text
+
+    monkeypatch.setenv("DASHBOARD_MARKET_FEED_ENABLED", "true")
+    force_exchange_closed(monkeypatch)
+    monkeypatch.setattr(app_module, "_readonly_tbank_gateway", lambda: FakeDashboardFeedGateway())
+    database = DatabaseService(f"sqlite+pysqlite:///{tmp_path / 'dashboard-feed-ws.db'}")
+    Base.metadata.create_all(database.engine)
+    seed_database(database)
+    app = create_fastapi_app(database=database, report_task_client=FakeReportTaskClient())
+    app.state.ws_push_interval_seconds = 0.05
+    client = TestClient(app)
+
+    tables = (
+        "market_microstructure_snapshot",
+        "signal_candidate",
+        "order_intent",
+        "broker_order",
+    )
+    with database.session_scope() as session:
+        before = {
+            table: session.execute(text(f"select count(*) from {table}")).scalar()
+            for table in tables
+        }
+
+    with client.websocket_connect(
+        "/ws/market-feed?selected_instrument=MOEX:SBER&include_order_book=true&include_trades=true"
+    ) as websocket:
+        first = websocket.receive_json()
+        websocket.send_json({"type": "market.select", "selected_instrument": "MOEX:GAZP"})
+        second = websocket.receive_json()
+
+    assert first["type"] == "market.snapshot"
+    first_snapshot = first["payload"]["data"]
+    second_snapshot = second["payload"]["data"]
+    assert first_snapshot["source"] == "dashboard_market_feed"
+    assert len(first_snapshot["quote_rows"]) == 8
+    assert first_snapshot["selected_details"]["instrument_id"] == "MOEX:SBER"
+    assert first_snapshot["selected_details"]["market_trades_source"] is not None
+    assert second_snapshot["selected_instrument"] == "MOEX:GAZP"
+    assert second_snapshot["selected_details"]["instrument_id"] == "MOEX:GAZP"
+
+    with database.session_scope() as session:
+        after = {
+            table: session.execute(text(f"select count(*) from {table}")).scalar()
+            for table in tables
+        }
+    assert before == after
+
+
 def test_dashboard_market_feed_normalizes_live_session_label_from_broker_status(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

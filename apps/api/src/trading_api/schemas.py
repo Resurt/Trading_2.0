@@ -239,6 +239,14 @@ class MarketInstrumentOverview(BaseModel):
     last_price_source: str | None = None
     is_price_stale: bool = True
     price_staleness_seconds: int | None = None
+    received_ts: datetime | None = None
+    exchange_ts: datetime | None = None
+    received_age_ms: int | None = None
+    exchange_age_ms: int | None = None
+    stale_by_received_time: bool = True
+    stale_by_exchange_time: bool = True
+    freshness_status: str = "unknown"
+    freshness_reason: str | None = None
     previous_close: Decimal | None = None
     change_abs: Decimal | None = None
     change_bps: Decimal | None = None
@@ -271,6 +279,8 @@ class MarketInstrumentOverview(BaseModel):
     recent_market_trades: list[JsonPayload] = Field(default_factory=list)
     market_trades_source: str | None = None
     market_trades_age_ms: int | None = None
+    trade_tape_status: str | None = None
+    trade_tape_reason: str | None = None
     reason_code: str | None = None
     warning: str | None = None
     order_book_summary: JsonPayload = Field(default_factory=dict)

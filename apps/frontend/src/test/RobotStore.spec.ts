@@ -93,7 +93,7 @@ describe("robot store", () => {
 
     expect(apiClientMock.startRobot).not.toHaveBeenCalled();
     expect(robot.lastCommandStatus).toBe("blocked_by_preflight");
-    expect(robot.lastCommandMessage).toContain("Сбор не запущен");
+    expect(robot.lastCommandMessage).toContain("Сбор логов не запущен");
     expect(robot.lastCommandReasonCode).toBe("market_closed_expected");
   });
 
@@ -129,7 +129,7 @@ describe("robot store", () => {
       strategy_trading_disabled: true,
     });
     expect(robot.lastCommandStatus).toBe("requested");
-    expect(robot.lastCommandMessage).toContain("Data-only");
+    expect(robot.lastCommandMessage).toBe("Сбор логов запущен.");
   });
 
   it("shows concise already-running feedback and auto-dismisses it", async () => {
@@ -151,9 +151,7 @@ describe("robot store", () => {
 
       expect(apiClientMock.startRobot).toHaveBeenCalledTimes(1);
       expect(robot.lastCommandStatus).toBe("already_running");
-      expect(robot.lastCommandMessage).toBe(
-        "\u0421\u0431\u043e\u0440 \u043b\u043e\u0433\u043e\u0432 \u0443\u0436\u0435 \u0437\u0430\u043f\u0443\u0449\u0435\u043d.",
-      );
+      expect(robot.lastCommandMessage).toBe("Сбор логов уже запущен.");
 
       vi.advanceTimersByTime(12_000);
       await Promise.resolve();
@@ -176,7 +174,7 @@ describe("robot store", () => {
 
     expect(apiClientMock.stopRobot).toHaveBeenCalledTimes(1);
     expect(robot.lastCommandStatus).toBe("requested");
-    expect(robot.lastCommandMessage).toContain("Команда Stop отправлена");
+    expect(robot.lastCommandMessage).toBe("Сбор логов остановлен.");
   });
 });
 

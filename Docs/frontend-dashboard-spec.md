@@ -1,8 +1,8 @@
-# Спецификация frontend dashboard
+﻿# Спецификация frontend dashboard
 
-> Current status contract, 2026-06-29: этот верхний блок является актуальным.
-> Ниже в документе остаются legacy/исторические фрагменты, включая старые
-> формулировки и mojibake; их нельзя удалять без отдельного archival pass.
+> Current status contract, 2026-06-30: this top block is current.
+> Later sections may still contain legacy/historical fragments; keep them for archival history unless a dedicated archival pass moves them.
+> Current behavior in this block overrides older legacy wording below.
 
 ## Current Data-Only Lifecycle Status
 
@@ -22,6 +22,30 @@ The dashboard quote/feed display remains independent from Start. Start controls 
 persistent data-only logging and must not be required for quote board, selected
 instrument details, order book status, or trade tape status.
 
+Market display primary path, 2026-06-30:
+
+- frontend opens `/ws/market-feed` on dashboard mount; `/ws/market` is a
+  compatibility alias for the same DashboardMarketFeed payload;
+- REST `/dashboard/market-feed/snapshot` is fallback/diagnostic and must not be
+  the only live source;
+- the first WS snapshot must arrive without pressing Start and include 8 quote
+  rows, selected instrument details, session/preflight display metadata,
+  selected order-book summary when available, and either recent trades or an
+  explicit trade tape status/reason;
+- empty or partial snapshots merge by `instrument_id` and never clear the quote
+  board;
+- selected-instrument responses are latest-wins. A late SBER selected-details
+  response after the user selected GAZP can update the SBER row only; it must not
+  change `selectedInstrumentId` or show the SBER book/tape under GAZP;
+- freshness is dual: `received_ts` is BFF receipt time, `exchange_ts` is exchange
+  data time. Old exchange data must be shown as stale/display-only even if it was
+  received now.
+
+Start/Stop command feedback must be short and dismissible. Already-running Start
+shows "Сбор логов уже запущен.", a blocked Start shows "Сбор логов не запущен:
+<reason>. Следующая сессия: <time>.", and Stop shows "Сбор логов остановлен."
+The banner auto-dismisses after 10-15 seconds and can be manually dismissed.
+
 ## Live Market Refresh Model
 
 Live Dashboard keeps the last good market snapshot on screen. A failed or slow
@@ -39,9 +63,9 @@ The dashboard uses two refresh levels:
 Broker OTC/indicative trades are shown only as operator display data. They must
 not be treated as official MOEX tape or calibration samples.
 
-Frontend - это Vue 3 dark-theme интерфейс оператора и аналитика. Это не landing page и не декоративная витрина.
+Frontend - СЌС‚Рѕ Vue 3 dark-theme РёРЅС‚РµСЂС„РµР№СЃ РѕРїРµСЂР°С‚РѕСЂР° Рё Р°РЅР°Р»РёС‚РёРєР°. Р­С‚Рѕ РЅРµ landing page Рё РЅРµ РґРµРєРѕСЂР°С‚РёРІРЅР°СЏ РІРёС‚СЂРёРЅР°.
 
-## Технологии
+## РўРµС…РЅРѕР»РѕРіРёРё
 
 - Vue 3
 - Vite
@@ -51,9 +75,9 @@ Frontend - это Vue 3 dark-theme интерфейс оператора и ан
 - WebSocket client
 - dark theme design tokens
 
-## BFF источники данных
+## BFF РёСЃС‚РѕС‡РЅРёРєРё РґР°РЅРЅС‹С…
 
-Frontend должен использовать FastAPI BFF из `Docs/api-contract.md`.
+Frontend РґРѕР»Р¶РµРЅ РёСЃРїРѕР»СЊР·РѕРІР°С‚СЊ FastAPI BFF РёР· `Docs/api-contract.md`.
 
 REST endpoints:
 
@@ -78,21 +102,21 @@ WebSocket channels:
 - `/ws/market`
 - `/ws/reports`
 
-Команды управления и ручной запуск отчетов проходят через auth abstraction BFF.
-В local-dev frontend может отправлять dev header `X-API-Role: operator`, но
-в `production` этот provider запрещен: используется bearer-token provider,
-а сами команды сохраняются в `robot_command` и `audit_event`.
+РљРѕРјР°РЅРґС‹ СѓРїСЂР°РІР»РµРЅРёСЏ Рё СЂСѓС‡РЅРѕР№ Р·Р°РїСѓСЃРє РѕС‚С‡РµС‚РѕРІ РїСЂРѕС…РѕРґСЏС‚ С‡РµСЂРµР· auth abstraction BFF.
+Р’ local-dev frontend РјРѕР¶РµС‚ РѕС‚РїСЂР°РІР»СЏС‚СЊ dev header `X-API-Role: operator`, РЅРѕ
+РІ `production` СЌС‚РѕС‚ provider Р·Р°РїСЂРµС‰РµРЅ: РёСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ bearer-token provider,
+Р° СЃР°РјРё РєРѕРјР°РЅРґС‹ СЃРѕС…СЂР°РЅСЏСЋС‚СЃСЏ РІ `robot_command` Рё `audit_event`.
 
-## Общий layout
+## РћР±С‰РёР№ layout
 
-Обязательные зоны:
+РћР±СЏР·Р°С‚РµР»СЊРЅС‹Рµ Р·РѕРЅС‹:
 
-- верхняя status bar;
-- левая навигация;
-- основная рабочая область;
-- компактная темная UI-система для длительного мониторинга.
+- РІРµСЂС…РЅСЏСЏ status bar;
+- Р»РµРІР°СЏ РЅР°РІРёРіР°С†РёСЏ;
+- РѕСЃРЅРѕРІРЅР°СЏ СЂР°Р±РѕС‡Р°СЏ РѕР±Р»Р°СЃС‚СЊ;
+- РєРѕРјРїР°РєС‚РЅР°СЏ С‚РµРјРЅР°СЏ UI-СЃРёСЃС‚РµРјР° РґР»СЏ РґР»РёС‚РµР»СЊРЅРѕРіРѕ РјРѕРЅРёС‚РѕСЂРёРЅРіР°.
 
-Основные страницы:
+РћСЃРЅРѕРІРЅС‹Рµ СЃС‚СЂР°РЅРёС†С‹:
 
 - `Live Dashboard`
 - `Reports`
@@ -101,24 +125,24 @@ WebSocket channels:
 
 ## Live Dashboard
 
-Live dashboard должен отвечать на два вопроса:
+Live dashboard РґРѕР»Р¶РµРЅ РѕС‚РІРµС‡Р°С‚СЊ РЅР° РґРІР° РІРѕРїСЂРѕСЃР°:
 
-1. Что сейчас делает рынок?
-2. Что сейчас делает робот?
+1. Р§С‚Рѕ СЃРµР№С‡Р°СЃ РґРµР»Р°РµС‚ СЂС‹РЅРѕРє?
+2. Р§С‚Рѕ СЃРµР№С‡Р°СЃ РґРµР»Р°РµС‚ СЂРѕР±РѕС‚?
 
-Обязательные панели:
+РћР±СЏР·Р°С‚РµР»СЊРЅС‹Рµ РїР°РЅРµР»Рё:
 
-- баланс;
-- активные инструменты;
-- активные таймфреймы;
+- Р±Р°Р»Р°РЅСЃ;
+- Р°РєС‚РёРІРЅС‹Рµ РёРЅСЃС‚СЂСѓРјРµРЅС‚С‹;
+- Р°РєС‚РёРІРЅС‹Рµ С‚Р°Р№РјС„СЂРµР№РјС‹;
 - `session_type`;
 - `session_phase`;
 - `broker_trading_status`;
-- текущий `micro_session_id`;
-- countdown до rollover;
+- С‚РµРєСѓС‰РёР№ `micro_session_id`;
+- countdown РґРѕ rollover;
 - `strategy_state`;
-- текущий `signal_candidate`;
-- текущий `blocker_event`;
+- С‚РµРєСѓС‰РёР№ `signal_candidate`;
+- С‚РµРєСѓС‰РёР№ `blocker_event`;
 - spread;
 - mid price;
 - market quality score;
@@ -134,9 +158,9 @@ Live dashboard должен отвечать на два вопроса:
 
 ## Reports
 
-Страница отчетов нужна для анализа дня, часа, сессии, инструмента и blockers.
+РЎС‚СЂР°РЅРёС†Р° РѕС‚С‡РµС‚РѕРІ РЅСѓР¶РЅР° РґР»СЏ Р°РЅР°Р»РёР·Р° РґРЅСЏ, С‡Р°СЃР°, СЃРµСЃСЃРёРё, РёРЅСЃС‚СЂСѓРјРµРЅС‚Р° Рё blockers.
 
-Фильтры:
+Р¤РёР»СЊС‚СЂС‹:
 
 - `calendar_date`;
 - `trading_date`;
@@ -150,7 +174,7 @@ Live dashboard должен отвечать на два вопроса:
 - cancel reason;
 - reject reason.
 
-Панели:
+РџР°РЅРµР»Рё:
 
 - day trend / market regime;
 - session-wise PnL;
@@ -158,12 +182,12 @@ Live dashboard должен отвечать на два вопроса:
 - candidate funnel;
 - blocker ranking;
 - execution quality;
-- counterfactual outcomes 5/10/15 минут;
+- counterfactual outcomes 5/10/15 РјРёРЅСѓС‚;
 - infra health;
 - risk events list;
 - cancelled/rejected orders drill-down.
 
-Каждый blocker должен открываться в drill-down с:
+РљР°Р¶РґС‹Р№ blocker РґРѕР»Р¶РµРЅ РѕС‚РєСЂС‹РІР°С‚СЊСЃСЏ РІ drill-down СЃ:
 
 - `blocker_code`;
 - `gate_name`;
@@ -171,25 +195,25 @@ Live dashboard должен отвечать на два вопроса:
 - `reason_payload`;
 - market context;
 - session context;
-- counterfactual result, если он уже посчитан.
+- counterfactual result, РµСЃР»Рё РѕРЅ СѓР¶Рµ РїРѕСЃС‡РёС‚Р°РЅ.
 
 ## Settings
 
-Начальные блоки:
+РќР°С‡Р°Р»СЊРЅС‹Рµ Р±Р»РѕРєРё:
 
-- включенные instruments;
-- включенные timeframes;
-- strategy config по session template;
+- РІРєР»СЋС‡РµРЅРЅС‹Рµ instruments;
+- РІРєР»СЋС‡РµРЅРЅС‹Рµ timeframes;
+- strategy config РїРѕ session template;
 - risk limits;
-- freeze window перед границей micro-session;
-- режим запуска: `historical_replay`, `sandbox`, `shadow`, `production`;
-- secret status без отображения значений секретов.
+- freeze window РїРµСЂРµРґ РіСЂР°РЅРёС†РµР№ micro-session;
+- СЂРµР¶РёРј Р·Р°РїСѓСЃРєР°: `historical_replay`, `sandbox`, `shadow`, `production`;
+- secret status Р±РµР· РѕС‚РѕР±СЂР°Р¶РµРЅРёСЏ Р·РЅР°С‡РµРЅРёР№ СЃРµРєСЂРµС‚РѕРІ.
 
 ## Logs/Diagnostics
 
-Эта страница показывает операционную диагностику. Она не заменяет аналитические отчеты из PostgreSQL.
+Р­С‚Р° СЃС‚СЂР°РЅРёС†Р° РїРѕРєР°Р·С‹РІР°РµС‚ РѕРїРµСЂР°С†РёРѕРЅРЅСѓСЋ РґРёР°РіРЅРѕСЃС‚РёРєСѓ. РћРЅР° РЅРµ Р·Р°РјРµРЅСЏРµС‚ Р°РЅР°Р»РёС‚РёС‡РµСЃРєРёРµ РѕС‚С‡РµС‚С‹ РёР· PostgreSQL.
 
-Панели:
+РџР°РЅРµР»Рё:
 
 - service health;
 - reconnects;
@@ -197,11 +221,11 @@ Live dashboard должен отвечать на два вопроса:
 - broker/API errors;
 - rate limit pressure;
 - recent technical errors;
-- correlation search по `run_id`, `micro_session_id`, `candidate_id`, `order_intent_id`, `request_order_id`, `exchange_order_id`.
+- correlation search РїРѕ `run_id`, `micro_session_id`, `candidate_id`, `order_intent_id`, `request_order_id`, `exchange_order_id`.
 
 ## Dark theme tokens
 
-UI должен определить tokens:
+UI РґРѕР»Р¶РµРЅ РѕРїСЂРµРґРµР»РёС‚СЊ tokens:
 
 - background;
 - surface;
@@ -221,29 +245,29 @@ UI должен определить tokens:
 - inactive;
 - disabled.
 
-Интерфейс должен быть плотным, читаемым и удобным для повторяющейся операторской работы.
+РРЅС‚РµСЂС„РµР№СЃ РґРѕР»Р¶РµРЅ Р±С‹С‚СЊ РїР»РѕС‚РЅС‹Рј, С‡РёС‚Р°РµРјС‹Рј Рё СѓРґРѕР±РЅС‹Рј РґР»СЏ РїРѕРІС‚РѕСЂСЏСЋС‰РµР№СЃСЏ РѕРїРµСЂР°С‚РѕСЂСЃРєРѕР№ СЂР°Р±РѕС‚С‹.
 
-## Реализация шага 11
+## Р РµР°Р»РёР·Р°С†РёСЏ С€Р°РіР° 11
 
-Фактическая реализация находится в `apps/frontend/src`.
+Р¤Р°РєС‚РёС‡РµСЃРєР°СЏ СЂРµР°Р»РёР·Р°С†РёСЏ РЅР°С…РѕРґРёС‚СЃСЏ РІ `apps/frontend/src`.
 
-Карта страниц:
+РљР°СЂС‚Р° СЃС‚СЂР°РЅРёС†:
 
-- `LiveDashboardView` - live состояние робота, сессии, рынка, стакана, позиций, заявок и risk events.
-- `ReportsView` - фильтры, rebuild daily report, daily/hourly reports, blocker ranking, counterfactual missed opportunities и summary charts.
-- `SettingsView` - strategy config по session template, risk limits, active instruments/timeframes и secret status без значений секретов.
-- `DiagnosticsView` - WebSocket/API degraded states, correlation search и cancelled/rejected order reason codes.
+- `LiveDashboardView` - live СЃРѕСЃС‚РѕСЏРЅРёРµ СЂРѕР±РѕС‚Р°, СЃРµСЃСЃРёРё, СЂС‹РЅРєР°, СЃС‚Р°РєР°РЅР°, РїРѕР·РёС†РёР№, Р·Р°СЏРІРѕРє Рё risk events.
+- `ReportsView` - С„РёР»СЊС‚СЂС‹, rebuild daily report, daily/hourly reports, blocker ranking, counterfactual missed opportunities Рё summary charts.
+- `SettingsView` - strategy config РїРѕ session template, risk limits, active instruments/timeframes Рё secret status Р±РµР· Р·РЅР°С‡РµРЅРёР№ СЃРµРєСЂРµС‚РѕРІ.
+- `DiagnosticsView` - WebSocket/API degraded states, correlation search Рё cancelled/rejected order reason codes.
 
-Ключевые компоненты:
+РљР»СЋС‡РµРІС‹Рµ РєРѕРјРїРѕРЅРµРЅС‚С‹:
 
-- `DataPanel` - базовая рабочая панель.
-- `MetricTile` - компактная метрика.
+- `DataPanel` - Р±Р°Р·РѕРІР°СЏ СЂР°Р±РѕС‡Р°СЏ РїР°РЅРµР»СЊ.
+- `MetricTile` - РєРѕРјРїР°РєС‚РЅР°СЏ РјРµС‚СЂРёРєР°.
 - `StatusPill` - readable label + machine-readable code.
-- `EmptyState` - пустое или degraded состояние.
-- `MiniBars` - простые summary charts без тяжелой chart-библиотеки.
-- `OrderBookWidget` - top-of-book и lightweight depth summary.
-- `SignalReasonCard` - текущий candidate/blocker с reason code.
-- `RiskEventsList` - последние candidate/blocker события.
+- `EmptyState` - РїСѓСЃС‚РѕРµ РёР»Рё degraded СЃРѕСЃС‚РѕСЏРЅРёРµ.
+- `MiniBars` - РїСЂРѕСЃС‚С‹Рµ summary charts Р±РµР· С‚СЏР¶РµР»РѕР№ chart-Р±РёР±Р»РёРѕС‚РµРєРё.
+- `OrderBookWidget` - top-of-book Рё lightweight depth summary.
+- `SignalReasonCard` - С‚РµРєСѓС‰РёР№ candidate/blocker СЃ reason code.
+- `RiskEventsList` - РїРѕСЃР»РµРґРЅРёРµ candidate/blocker СЃРѕР±С‹С‚РёСЏ.
 
 Pinia stores:
 
@@ -261,11 +285,11 @@ Live widgets:
 
 - balance;
 - session type / phase / broker trading status;
-- current micro-session и countdown до rollover;
+- current micro-session Рё countdown РґРѕ rollover;
 - strategy state;
 - current signal/candidate/blocker;
 - spread / mid price / market quality;
-- top-of-book и order book summary;
+- top-of-book Рё order book summary;
 - recent market trades tape;
 - positions;
 - active orders;
@@ -274,9 +298,9 @@ Live widgets:
 - latest hourly report;
 - freshness timestamps.
 
-REST используется для initial snapshot/history. WebSocket используется для snapshot/live
-обновлений. BFF WebSocket держит соединение открытым, отправляет snapshot при
-подключении, затем push-обновления по interval и heartbeat.
+REST РёСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ РґР»СЏ initial snapshot/history. WebSocket РёСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ РґР»СЏ snapshot/live
+РѕР±РЅРѕРІР»РµРЅРёР№. BFF WebSocket РґРµСЂР¶РёС‚ СЃРѕРµРґРёРЅРµРЅРёРµ РѕС‚РєСЂС‹С‚С‹Рј, РѕС‚РїСЂР°РІР»СЏРµС‚ snapshot РїСЂРё
+РїРѕРґРєР»СЋС‡РµРЅРёРё, Р·Р°С‚РµРј push-РѕР±РЅРѕРІР»РµРЅРёСЏ РїРѕ interval Рё heartbeat.
 
 ## Current pages and blocks
 
@@ -337,10 +361,11 @@ Start/Stop command feedback:
 Quotes:
 
 - Dashboard Live Feed is independent from the data-only Start button. It starts on
-  page mount through `/dashboard/market-feed/snapshot` and may run while
-  `collector_state=stopped`.
+  page mount through `/ws/market-feed` (`/ws/market` remains an alias) and may run
+  while `collector_state=stopped`. REST
+  `/dashboard/market-feed/snapshot` is fallback/diagnostic.
 - Start controls only persistent data-only logging. If dashboard feed is online and
-  data-only is stopped, the UI says: “Рынок отображается. Запись логов остановлена.”
+  data-only is stopped, the UI says: "Рынок отображается. Запись логов остановлена."
 - `GET /market/overview?include_details=false` is cheap and must return all eight
   core universe rows without heavy all-instrument order-book level payloads.
 - `GET /market/instruments/{instrument_id}/details` and
@@ -348,28 +373,30 @@ Quotes:
   market trades and detailed source/freshness only for the selected instrument.
   SBER is the default selection.
 - Quote rows show `last_price`, `last_price_at`, `last_price_source`,
-  `quote_status`, `is_price_stale`, `price_staleness_seconds`, spread bps, bid/ask,
+  `quote_status`, `received_ts`, `exchange_ts`, `received_age_ms`,
+  `exchange_age_ms`, `freshness_status`, `freshness_reason`, spread bps, bid/ask,
   depth, imbalance and book quality where available.
 - Source priority is fresh Dashboard Live Feed order-book mid, readonly T-Bank quote,
   latest known candle close, previous close, then unavailable.
 - `POST /market/quotes/refresh` is an explicit operator/diagnostic readonly broker
   refresh path for `GetLastPrices`/`GetOrderBook`; dashboard mount and polling do not
   call it for all instruments.
-- A successful readonly `GetOrderBook` response is treated as fresh by broker
-  response receipt time; the exchange timestamp remains visible only as a
-  diagnostic field.
+- A successful readonly `GetOrderBook` response is not fresh solely because the
+  broker responded now. The UI must compare both BFF receipt time and exchange
+  timestamp; old or missing `exchange_ts` is stale/display-only.
 - Successful readonly quote refresh rows are cached briefly by the API, so a later
   `/market/overview` or dashboard snapshot cannot immediately replace live broker
   quotes with older candle fallback rows.
-- Polling model while the dashboard is open: quote board dashboard feed every
-  2 seconds; selected-instrument details every 1 second while the display feed sees
-  `market_open=true` and every 5 seconds when closed/stale; `/runtime/data-shadow/status`
-  every 2-5 seconds; broker `/portfolio/refresh` every 60 seconds.
+- Update model while the dashboard is open: `/ws/market-feed` sends the first
+  snapshot immediately and then bounded refresh snapshots. REST polling is used
+  only as fallback/diagnostic; `/runtime/data-shadow/status` refreshes every
+  2-5 seconds; broker `/portfolio/refresh` every 60 seconds.
 - If a refresh request times out, the dashboard keeps the last good quote instead of
   clearing the quote grid.
-- `/ws/market` updates merge by `instrument_id`. Empty `instruments=[]` snapshots add
-  `empty_market_ws_snapshot` warning and must never clear the quote board; partial
-  snapshots update present rows without deleting missing core instruments.
+- `/ws/market-feed` and `/ws/market` updates merge by `instrument_id`. Empty
+  snapshots add `empty_market_ws_snapshot` warning and must never clear the quote
+  board; partial snapshots update present rows without deleting missing core
+  instruments.
 - The quote grid is card-based and must not require horizontal scrolling for the
   eight core instruments.
 - Stale candles/order books remain visible with timestamp and stale badge, never as
@@ -414,5 +441,6 @@ visible with timestamp and stale badge, but is never labelled live.
 
 The selected instrument panel shows venue type, quote source, bid/ask/mid, spread,
 depth, imbalance, display quality, calibration quality, order-book age, and trade tape
-status. `/ws/market` is the primary live path; REST polling is fallback and must not
-clear last good data on timeout.
+status. `/ws/market-feed` is the primary live path, `/ws/market` is a compatibility
+alias, and REST polling is fallback/diagnostic that must not clear last good data on
+timeout.

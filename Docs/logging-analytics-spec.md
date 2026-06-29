@@ -1198,8 +1198,11 @@ New structured events/payloads:
   Dashboard. It may include `GetLastPrices` for the quote board and `GetOrderBook` /
   last trades only for the selected instrument. Payload should include
   `selected_instrument`, `quote_rows_count`, `order_book_available`,
-  `trade_tape_status`, `last_refresh_at`, `warnings`, and `errors`. This event is
-  display-only and must not write `market_microstructure_snapshot` calibration logs.
+  `trade_tape_status`, `trade_tape_reason`, `last_refresh_at`, `warnings`, and
+  `errors`. It must distinguish `received_ts` from `exchange_ts` and expose
+  `received_age_ms`, `exchange_age_ms`, `stale_by_exchange_time`,
+  `freshness_status`, and `freshness_reason`. This event is display-only and must
+  not write `market_microstructure_snapshot` calibration logs.
 - `market_instrument_details_read`: local/BFF selected-instrument read for
   `/market/instruments/{instrument_id}/details`. Payload should include
   `instrument_id`, `quote_source`, `quote_status`, `order_book_source`,
@@ -1297,10 +1300,13 @@ Broker OTC/indicative quotes are display-only by default and must not silently e
 calibration reports.
 
 Dashboard Live Feed and data-only collection remain separate. Dashboard feed freshness
-fields (`last_refresh_at`, `order_book_age_ms`, `market_trades_source`,
-`selected_order_book_stale`) are display diagnostics. Persistent calibration evidence
-is created only by data-only collection after Start/preflight and should be visible as
-`market_microstructure_snapshot` deltas.
+fields (`last_refresh_at`, `received_ts`, `exchange_ts`, `received_age_ms`,
+`exchange_age_ms`, `order_book_age_ms`, `market_trades_source`,
+`trade_tape_status`, `trade_tape_reason`, `selected_order_book_stale`) are display
+diagnostics. Persistent calibration evidence is created only by data-only
+collection after Start/preflight and should be visible as
+`market_microstructure_snapshot` deltas. A broker response received now does not
+make an old exchange timestamp calibration-eligible.
 
 Order-book analytics store spread in separate units: `spread_abs_rub` and `spread_bps`.
 Quality payloads store display and calibration scores plus transparent components. Trade

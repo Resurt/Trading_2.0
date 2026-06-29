@@ -649,6 +649,15 @@ function degradedFlagLabel(flag: string): string {
       <code v-if="robot.lastCommandReasonCode">{{ reasonLabel(robot.lastCommandReasonCode) }}</code>
       <small v-if="robot.lastCommandNextSessionAt">next {{ compactDateTime(robot.lastCommandNextSessionAt) }}</small>
       <small v-if="robot.lastCommandAt">{{ compactDateTime(robot.lastCommandAt) }}</small>
+      <button
+        v-if="!robot.commandLoading"
+        class="command-status-dismiss"
+        type="button"
+        aria-label="Скрыть уведомление"
+        @click="robot.dismissCommand"
+      >
+        x
+      </button>
     </div>
 
     <section class="session-ribbon" data-testid="session-ribbon">

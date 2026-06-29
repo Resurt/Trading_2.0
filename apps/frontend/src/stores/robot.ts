@@ -240,7 +240,7 @@ export const useRobotStore = defineStore("robot", () => {
     commandPhase.value = "preflight";
     setCommandState({
       status: "checking_preflight",
-      message: "Проверяю торговую сессию. Data-only сбор пока не запускается, заявки не выставляются.",
+      message: "Проверяю торговую сессию.",
       reasonCode: "session_preflight_running",
     });
     try {
@@ -257,7 +257,7 @@ export const useRobotStore = defineStore("robot", () => {
       commandPhase.value = "start_command";
       setCommandState({
         status: "start_requesting",
-        message: "Запускаем запись data-only логов. Торговля отключена, заявки не выставляются.",
+        message: "Запускаю сбор логов.",
         reasonCode: "data_only_start_requested",
       });
       const response = await apiClient.startRobot({
@@ -274,8 +274,9 @@ export const useRobotStore = defineStore("robot", () => {
     } catch (unknownError) {
       setCommandState({
         status: "preflight_failed",
-        message: `Не удалось проверить торговую сессию. Сбор не запущен. Причина: preflight_unavailable. ${errorMessage(unknownError)}`,
+        message: `Не удалось проверить торговую сессию. Сбор не запущен. ${errorMessage(unknownError)}`,
         reasonCode: "preflight_unavailable",
+        autoDismissMs: COMMAND_AUTO_DISMISS_MS,
       });
     } finally {
       startLoading.value = false;
@@ -289,21 +290,22 @@ export const useRobotStore = defineStore("robot", () => {
     commandPhase.value = "stop_command";
     setCommandState({
       status: "stop_requesting",
-      message: "Остановка запрошена. Реальные заявки не трогаю.",
+      message: "Останавливаю сбор логов.",
       reasonCode: "controlled_stop_requested",
     });
     try {
       const response = await apiClient.stopRobot();
       setCommandFromResponse({
         ...response,
-        message: response.message || "Остановка запрошена. Жду подтверждение runtime.",
+        message: response.message || "Сбор логов остановлен.",
       });
       void pollDataShadowStatusUntilSettled();
     } catch (unknownError) {
       setCommandState({
         status: "stop_failed",
-        message: `Остановка не подтверждена: ${errorMessage(unknownError)}`,
+        message: `Сбор логов не остановлен: ${errorMessage(unknownError)}`,
         reasonCode: "stop_command_failed",
+        autoDismissMs: COMMAND_AUTO_DISMISS_MS,
       });
     } finally {
       stopLoading.value = false;
@@ -380,13 +382,9 @@ export const useRobotStore = defineStore("robot", () => {
     const nextSession = preflight.next_session_at
       ? ` Следующая сессия: ${preflight.next_session_at}.`
       : "";
-    const prefix =
-      preflight.market_closed_expected || !preflight.market_open
-        ? "Сбор не запущен: рынок закрыт или нет торгового окна."
-        : "Сбор не запущен: data-only collection запрещён preflight.";
     setCommandState({
       status: "blocked_by_preflight",
-      message: `${prefix} Причина: ${preflight.reason_code}.${nextSession}`,
+      message: `Сбор логов не запущен: ${preflight.reason_code}.${nextSession}`,
       reasonCode: preflight.reason_code,
       nextSessionAt: preflight.next_session_at,
       autoDismissMs: COMMAND_AUTO_DISMISS_MS,
@@ -451,18 +449,18 @@ export const useRobotStore = defineStore("robot", () => {
       response.status === "already_running" ||
       response.status === "already_collecting"
     ) {
-      return "\u0421\u0431\u043e\u0440 \u043b\u043e\u0433\u043e\u0432 \u0443\u0436\u0435 \u0437\u0430\u043f\u0443\u0449\u0435\u043d.";
+      return "Сбор логов уже запущен.";
     }
     if (!response.accepted) {
-      return response.message || "Команда отклонена preflight.";
+      return `Сбор логов не запущен: ${response.reason_code ?? "команда отклонена"}.`;
     }
-    if (response.command === "start" && response.status === "requested") {
-      return "Запись Data-only логов запрошена. Dashboard live feed уже работает отдельно, торговля отключена.";
+    if (response.command === "start") {
+      return "Сбор логов запущен.";
     }
-    if (response.command === "stop" && response.status === "requested") {
-      return "Команда Stop отправлена в trade-core. Collector должен перейти в controlled stop.";
+    if (response.command === "stop") {
+      return "Сбор логов остановлен.";
     }
-    return response.message || "Команда принята.";
+    return "Команда принята.";
   }
 
   async function pollDataShadowStatusUntilSettled(): Promise<void> {

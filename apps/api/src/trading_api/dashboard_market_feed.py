@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
 from trade_core.session.moex_calendar import MSK
 from trading_api.market_quality import calculate_market_quality, calculate_spread_metrics
@@ -27,6 +28,9 @@ class DashboardMarketFeedConfig:
     trades_refresh_seconds: float = 1.0
     session_refresh_seconds: float = 5.0
     max_instruments: int = 8
+    last_price_max_exchange_age_seconds: float = 10.0
+    order_book_max_exchange_age_seconds: float = 5.0
+    trades_max_exchange_age_seconds: float = 15.0
 
     @classmethod
     def from_env(cls) -> DashboardMarketFeedConfig:
@@ -39,6 +43,15 @@ class DashboardMarketFeedConfig:
             trades_refresh_seconds=_env_float("DASHBOARD_TRADES_REFRESH_SECONDS", 1.0),
             session_refresh_seconds=_env_float("DASHBOARD_SESSION_REFRESH_SECONDS", 5.0),
             max_instruments=max(1, _env_int("DASHBOARD_FEED_MAX_INSTRUMENTS", 8)),
+            last_price_max_exchange_age_seconds=_env_float(
+                "DASHBOARD_LAST_PRICE_MAX_EXCHANGE_AGE_SECONDS", 10.0
+            ),
+            order_book_max_exchange_age_seconds=_env_float(
+                "DASHBOARD_ORDER_BOOK_MAX_EXCHANGE_AGE_SECONDS", 5.0
+            ),
+            trades_max_exchange_age_seconds=_env_float(
+                "DASHBOARD_TRADES_MAX_EXCHANGE_AGE_SECONDS", 15.0
+            ),
         )
 
 
@@ -233,9 +246,11 @@ class DashboardMarketFeedService:
 
             gateway = gateway_factory()
             timeout_seconds = _env_float("DASHBOARD_LAST_PRICES_TIMEOUT_SECONDS", 3.0)
-            response = await asyncio.wait_for(
-                gateway.get_last_prices(LastPricesRequest(instruments=tuple(resolved_refs))),
-                timeout=timeout_seconds,
+            response = await _run_readonly_broker_call(
+                lambda: gateway.get_last_prices(
+                    LastPricesRequest(instruments=tuple(resolved_refs))
+                ),
+                timeout_seconds=timeout_seconds,
             )
         except Exception as exc:
             self._record_error(_reason_from_exception(exc, "dashboard_last_prices_unavailable"))
@@ -246,7 +261,13 @@ class DashboardMarketFeedService:
         refreshed: list[MarketInstrumentOverview] = []
         for instrument in overview.instruments:
             price_payload = prices.get(instrument.instrument_id)
-            refreshed.append(_instrument_with_last_price(instrument, price_payload))
+            refreshed.append(
+                _instrument_with_last_price(
+                    instrument,
+                    price_payload,
+                    max_exchange_age_seconds=self.config.last_price_max_exchange_age_seconds,
+                )
+            )
         self._last_quote_refresh_at = now
         return MarketOverviewResponse(generated_at=now, instruments=refreshed)
 
@@ -341,19 +362,35 @@ class DashboardMarketFeedService:
             if payload is not None:
                 current = current.model_copy(update=payload)
             elif recent_trades:
+                trade_age_ms = _market_trades_age_ms(recent_trades)
                 current = current.model_copy(
                     update={
                         "recent_market_trades": recent_trades,
                         "market_trades_source": "tbank_get_last_trades",
-                        "market_trades_age_ms": _market_trades_age_ms(recent_trades),
+                        "market_trades_age_ms": trade_age_ms,
+                        "trade_tape_status": _trade_tape_status(recent_trades, trade_age_ms),
+                        "trade_tape_reason": _trade_tape_reason(recent_trades, trade_age_ms),
+                    }
+                )
+            elif should_refresh_trades:
+                current = current.model_copy(
+                    update={
+                        "recent_market_trades": [],
+                        "market_trades_source": "no_market_trades_samples",
+                        "market_trades_age_ms": None,
+                        "trade_tape_status": "no_market_trades_samples",
+                        "trade_tape_reason": "no_market_trades_samples",
                     }
                 )
         elif recent_trades:
+            trade_age_ms = _market_trades_age_ms(recent_trades)
             current = current.model_copy(
                 update={
                     "recent_market_trades": recent_trades,
                     "market_trades_source": "tbank_get_last_trades",
-                    "market_trades_age_ms": _market_trades_age_ms(recent_trades),
+                    "market_trades_age_ms": trade_age_ms,
+                    "trade_tape_status": _trade_tape_status(recent_trades, trade_age_ms),
+                    "trade_tape_reason": _trade_tape_reason(recent_trades, trade_age_ms),
                 }
             )
 
@@ -385,9 +422,9 @@ class DashboardMarketFeedService:
             from trade_core.broker_gateway import TradingStatusRequest
 
             timeout_seconds = _env_float("DASHBOARD_TRADING_STATUS_TIMEOUT_SECONDS", 1.0)
-            response = await asyncio.wait_for(
-                gateway.get_trading_status(TradingStatusRequest(instrument=ref)),
-                timeout=timeout_seconds,
+            response = await _run_readonly_broker_call(
+                lambda: gateway.get_trading_status(TradingStatusRequest(instrument=ref)),
+                timeout_seconds=timeout_seconds,
             )
         except AttributeError:
             self._record_warning("dashboard_trading_status_not_implemented")
@@ -416,7 +453,6 @@ class DashboardMarketFeedService:
             and _status_is_open(normalized_status)
             and not instrument.official_exchange_closed
             and instrument.api_trade_available is not False
-            and instrument.quote_allowed_for_data_collection
         )
         session_type, session_phase = _clock_session_context(market_open=market_open)
         venue_type = (
@@ -476,8 +512,8 @@ class DashboardMarketFeedService:
             )
             trade_source = "exchange" if instrument.official_exchange_open else "all"
             timeout_seconds = _env_float("DASHBOARD_TRADES_TIMEOUT_SECONDS", 1.0)
-            response = await asyncio.wait_for(
-                gateway.get_last_trades(
+            response = await _run_readonly_broker_call(
+                lambda: gateway.get_last_trades(
                     LastTradesRequest(
                         instrument=ref,
                         from_=from_ts,
@@ -485,7 +521,7 @@ class DashboardMarketFeedService:
                         trade_source=trade_source,
                     )
                 ),
-                timeout=timeout_seconds,
+                timeout_seconds=timeout_seconds,
             )
         except AttributeError:
             self._record_warning("no_market_trades_feed_implemented")
@@ -534,9 +570,9 @@ class DashboardMarketFeedService:
         last_error: Exception | None = None
         for attempt in range(2):
             try:
-                response = await asyncio.wait_for(
-                    gateway.get_order_book(OrderBookRequest(instrument=ref, depth=10)),
-                    timeout=timeout_seconds,
+                response = await _run_readonly_broker_call(
+                    lambda: gateway.get_order_book(OrderBookRequest(instrument=ref, depth=10)),
+                    timeout_seconds=timeout_seconds,
                 )
                 break
             except Exception as exc:
@@ -556,6 +592,7 @@ class DashboardMarketFeedService:
             official_exchange_open=instrument.official_exchange_open,
             official_exchange_closed=instrument.official_exchange_closed,
             recent_market_trades=recent_trades,
+            max_exchange_age_seconds=self.config.order_book_max_exchange_age_seconds,
         )
         if payload is None:
             self._record_warning("no_order_book_samples")
@@ -581,6 +618,8 @@ class DashboardMarketFeedService:
 def _instrument_with_last_price(
     instrument: MarketInstrumentOverview,
     payload: dict[str, object] | None,
+    *,
+    max_exchange_age_seconds: float,
 ) -> MarketInstrumentOverview:
     if payload is None:
         return instrument
@@ -588,7 +627,14 @@ def _instrument_with_last_price(
     if price is None:
         return instrument
     now = datetime.now(tz=UTC)
-    exchange_ts = _datetime_or_none(payload.get("exchange_ts")) or now
+    exchange_ts = _datetime_or_none(payload.get("exchange_ts"))
+    freshness = _freshness_payload(
+        exchange_ts=exchange_ts,
+        received_ts=now,
+        max_exchange_age_seconds=max_exchange_age_seconds,
+    )
+    stale_by_exchange = bool(freshness["stale_by_exchange_time"])
+    freshness_status = str(freshness["freshness_status"])
     quote_source = (
         "live_exchange_last_price"
         if instrument.official_exchange_open
@@ -613,35 +659,58 @@ def _instrument_with_last_price(
         if instrument.official_exchange_open
         else instrument.trading_mode
     )
+    display_status = (
+        "live"
+        if instrument.official_exchange_open and not stale_by_exchange
+        else "display_only"
+        if not stale_by_exchange
+        else "stale"
+    )
+    warning = instrument.warning
+    if stale_by_exchange:
+        warning = str(freshness["freshness_reason"])
+    elif instrument.official_exchange_closed:
+        warning = "broker_quote_not_for_calibration"
     return instrument.model_copy(
         update={
             "session_type": session_type,
             "trading_mode": trading_mode,
             "last_price": price,
-            "last_price_at": exchange_ts,
-            "last_price_ts": exchange_ts,
+            "last_price_at": exchange_ts or now,
+            "last_price_ts": exchange_ts or now,
             "last_price_source": quote_source,
             "quote_source": quote_source,
             "venue_type": venue_type,
             "quote_allowed_for_display": True,
-            "quote_allowed_for_data_collection": instrument.official_exchange_open,
-            "quote_status": "live" if instrument.official_exchange_open else "broker_quote",
-            "is_price_stale": False,
-            "price_staleness_seconds": 0,
-            "warning": (
-                "broker_quote_not_for_calibration"
-                if instrument.official_exchange_closed
-                else instrument.warning
+            "quote_allowed_for_data_collection": (
+                instrument.official_exchange_open and not stale_by_exchange
             ),
+            "quote_status": display_status,
+            "is_price_stale": stale_by_exchange,
+            "price_staleness_seconds": _age_seconds(freshness.get("exchange_age_ms")),
+            "received_ts": now,
+            "exchange_ts": exchange_ts,
+            "received_age_ms": freshness["received_age_ms"],
+            "exchange_age_ms": freshness["exchange_age_ms"],
+            "stale_by_received_time": freshness["stale_by_received_time"],
+            "stale_by_exchange_time": freshness["stale_by_exchange_time"],
+            "freshness_status": freshness_status,
+            "freshness_reason": freshness["freshness_reason"],
+            "warning": warning,
             "quote_payload": {
                 **instrument.quote_payload,
                 "source": quote_source,
                 "quote_source": quote_source,
                 "venue_type": venue_type,
                 "dashboard_live_feed": True,
-                "include_in_calibration": instrument.official_exchange_open,
+                "include_in_calibration": (
+                    instrument.official_exchange_open and not stale_by_exchange
+                ),
                 "quote_allowed_for_display": True,
-                "quote_allowed_for_data_collection": instrument.official_exchange_open,
+                "quote_allowed_for_data_collection": (
+                    instrument.official_exchange_open and not stale_by_exchange
+                ),
+                **freshness,
             },
         }
     )
@@ -653,6 +722,7 @@ def _order_book_overview_payload(
     official_exchange_open: bool,
     official_exchange_closed: bool,
     recent_market_trades: list[dict[str, object]] | None,
+    max_exchange_age_seconds: float,
 ) -> dict[str, object] | None:
     bids = _price_levels(payload.get("bids"), reverse=True)
     asks = _price_levels(payload.get("asks"), reverse=False)
@@ -660,6 +730,13 @@ def _order_book_overview_payload(
         return None
     now = datetime.now(tz=UTC)
     exchange_ts = _datetime_or_none(payload.get("exchange_ts"))
+    freshness = _freshness_payload(
+        exchange_ts=exchange_ts,
+        received_ts=now,
+        max_exchange_age_seconds=max_exchange_age_seconds,
+    )
+    stale_by_exchange = bool(freshness["stale_by_exchange_time"])
+    order_book_age_ms = cast(int | None, freshness["exchange_age_ms"])
     best_bid_price, best_bid_qty = bids[0]
     best_ask_price, best_ask_qty = asks[0]
     bid_depth = sum((qty for _, qty in bids[:5]), Decimal("0"))
@@ -684,6 +761,7 @@ def _order_book_overview_payload(
         else "broker_indicative_quote"
     )
     trades = recent_market_trades or []
+    include_in_calibration = official_exchange_open and not stale_by_exchange
     quality_components = calculate_market_quality(
         spread_bps=spread_metrics.spread_bps,
         bid_depth_lots=bid_depth,
@@ -691,12 +769,25 @@ def _order_book_overview_payload(
         best_bid_qty_lots=best_bid_qty,
         best_ask_qty_lots=best_ask_qty,
         book_imbalance=imbalance,
-        order_book_age_ms=0,
-        order_book_stale=False,
+        order_book_age_ms=order_book_age_ms,
+        order_book_stale=stale_by_exchange,
         venue_type=venue_type,
-        official_exchange_open=official_exchange_open,
+        official_exchange_open=include_in_calibration,
         trades_count=len(trades),
     )
+    trade_age_ms = _market_trades_age_ms(trades)
+    trade_status = _trade_tape_status(trades, trade_age_ms)
+    trade_reason = _trade_tape_reason(trades, trade_age_ms)
+    display_status = (
+        "live"
+        if official_exchange_open and not stale_by_exchange
+        else "display_only"
+        if not stale_by_exchange
+        else "stale"
+    )
+    warning = str(freshness["freshness_reason"]) if stale_by_exchange else None
+    if official_exchange_closed and not stale_by_exchange:
+        warning = "broker_quote_not_for_calibration"
     return {
         "venue_type": venue_type,
         "trading_mode": (
@@ -707,15 +798,23 @@ def _order_book_overview_payload(
             else "indicative_only"
         ),
         "quote_source": quote_source,
-        "quote_allowed_for_data_collection": official_exchange_open,
+        "quote_allowed_for_data_collection": include_in_calibration,
         "quote_allowed_for_display": True,
         "last_price": spread_metrics.mid_price,
-        "last_price_at": now,
-        "last_price_ts": now,
+        "last_price_at": exchange_ts or now,
+        "last_price_ts": exchange_ts or now,
         "last_price_source": quote_source,
-        "is_price_stale": False,
-        "price_staleness_seconds": 0,
-        "quote_status": "live" if official_exchange_open else "broker_quote",
+        "is_price_stale": stale_by_exchange,
+        "price_staleness_seconds": _age_seconds(order_book_age_ms),
+        "received_ts": now,
+        "exchange_ts": exchange_ts,
+        "received_age_ms": freshness["received_age_ms"],
+        "exchange_age_ms": freshness["exchange_age_ms"],
+        "stale_by_received_time": freshness["stale_by_received_time"],
+        "stale_by_exchange_time": freshness["stale_by_exchange_time"],
+        "freshness_status": freshness["freshness_status"],
+        "freshness_reason": freshness["freshness_reason"],
+        "quote_status": display_status,
         "spread": spread_metrics.spread_abs,
         "spread_abs": spread_metrics.spread_abs,
         "spread_bps": spread_metrics.spread_bps,
@@ -735,18 +834,20 @@ def _order_book_overview_payload(
         "ask_depth_lots": ask_depth,
         "book_imbalance": imbalance,
         "order_book_source": quote_source,
-        "order_book_ts": now,
-        "order_book_age_ms": 0,
-        "order_book_stale": False,
+        "order_book_ts": exchange_ts or now,
+        "order_book_age_ms": order_book_age_ms,
+        "order_book_stale": stale_by_exchange,
         "recent_market_trades": trades,
         "market_trades_source": "tbank_get_last_trades" if trades else "no_market_trades_samples",
-        "market_trades_age_ms": _market_trades_age_ms(trades),
-        "warning": "broker_quote_not_for_calibration" if official_exchange_closed else None,
+        "market_trades_age_ms": trade_age_ms,
+        "trade_tape_status": trade_status,
+        "trade_tape_reason": trade_reason,
+        "warning": warning,
         "order_book_summary": {
             "source": quote_source,
             "venue_type": venue_type,
-            "quote_allowed_for_data_collection": official_exchange_open,
-            "include_in_calibration": official_exchange_open,
+            "quote_allowed_for_data_collection": include_in_calibration,
+            "include_in_calibration": include_in_calibration,
             "depth_levels": len(bids) + len(asks),
             "bids": [
                 {"price": str(price), "quantity_lots": str(quantity)}
@@ -766,17 +867,19 @@ def _order_book_overview_payload(
             "market_quality_components": quality_components,
             "exchange_ts": exchange_ts.isoformat() if exchange_ts is not None else None,
             "received_ts": now.isoformat(),
-            "age_seconds": 0,
-            "is_stale": False,
+            "age_seconds": _age_seconds(order_book_age_ms),
+            "is_stale": stale_by_exchange,
+            **freshness,
         },
         "quote_payload": {
             "source": quote_source,
             "quote_source": quote_source,
             "venue_type": venue_type,
             "dashboard_live_feed": True,
-            "include_in_calibration": official_exchange_open,
-            "order_book_stale": False,
+            "include_in_calibration": include_in_calibration,
+            "order_book_stale": stale_by_exchange,
             "market_quality_components": quality_components,
+            **freshness,
         },
     }
 
@@ -1019,6 +1122,82 @@ def _market_trades_age_ms(trades: Sequence[dict[str, object]]) -> int | None:
     return max(0, int((datetime.now(tz=UTC) - newest).total_seconds() * 1000))
 
 
+def _freshness_payload(
+    *,
+    exchange_ts: datetime | None,
+    received_ts: datetime,
+    max_exchange_age_seconds: float,
+) -> dict[str, object]:
+    received_ts = received_ts.astimezone(UTC)
+    now = datetime.now(tz=UTC)
+    received_age_ms = max(0, int((now - received_ts).total_seconds() * 1000))
+    exchange_age_ms: int | None = None
+    if exchange_ts is not None:
+        exchange_ts = exchange_ts.astimezone(UTC)
+        exchange_age_ms = max(0, int((now - exchange_ts).total_seconds() * 1000))
+    stale_by_received_time = received_age_ms > max_exchange_age_seconds * 1000
+    stale_by_exchange_time = (
+        exchange_ts is None
+        or exchange_age_ms is None
+        or exchange_age_ms > max_exchange_age_seconds * 1000
+    )
+    if exchange_ts is None:
+        status = "unknown"
+        reason = "missing_exchange_ts"
+    elif stale_by_exchange_time:
+        status = "stale"
+        reason = "exchange_ts_too_old"
+    elif stale_by_received_time:
+        status = "stale"
+        reason = "received_ts_too_old"
+    else:
+        status = "fresh"
+        reason = "fresh"
+    return {
+        "received_ts": received_ts.isoformat(),
+        "exchange_ts": exchange_ts.isoformat() if exchange_ts is not None else None,
+        "received_age_ms": received_age_ms,
+        "exchange_age_ms": exchange_age_ms,
+        "stale_by_received_time": stale_by_received_time,
+        "stale_by_exchange_time": stale_by_exchange_time,
+        "freshness_status": status,
+        "freshness_reason": reason,
+    }
+
+
+def _age_seconds(age_ms: object) -> int | None:
+    if age_ms is None:
+        return None
+    try:
+        return max(0, int(int(cast(Any, age_ms)) / 1000))
+    except (TypeError, ValueError):
+        return None
+
+
+def _trade_tape_status(
+    trades: Sequence[dict[str, object]],
+    age_ms: int | None,
+) -> str:
+    if not trades:
+        return "no_market_trades_samples"
+    if age_ms is None:
+        return "stale"
+    max_age_ms = int(_env_float("DASHBOARD_TRADES_MAX_EXCHANGE_AGE_SECONDS", 15.0) * 1000)
+    return "live" if age_ms <= max_age_ms else "stale"
+
+
+def _trade_tape_reason(
+    trades: Sequence[dict[str, object]],
+    age_ms: int | None,
+) -> str:
+    if not trades:
+        return "no_market_trades_samples"
+    if age_ms is None:
+        return "missing_trade_exchange_ts"
+    max_age_ms = int(_env_float("DASHBOARD_TRADES_MAX_EXCHANGE_AGE_SECONDS", 15.0) * 1000)
+    return "fresh" if age_ms <= max_age_ms else "trade_exchange_ts_too_old"
+
+
 def _decimal_or_none(value: object) -> Decimal | None:
     if value is None:
         return None
@@ -1068,6 +1247,26 @@ def _reason_from_exception(exc: Exception, default: str) -> str:
     if text and " " not in text and len(text) <= 96:
         return text
     return default
+
+
+async def _run_readonly_broker_call(
+    factory: Callable[[], Any],
+    *,
+    timeout_seconds: float,
+) -> Any:
+    """Run readonly broker calls away from the FastAPI event loop."""
+
+    def _invoke() -> Any:
+        result = factory()
+        if inspect.isawaitable(result):
+            return asyncio.run(_await_any(result))
+        return result
+
+    return await asyncio.wait_for(asyncio.to_thread(_invoke), timeout=timeout_seconds)
+
+
+async def _await_any(awaitable: Awaitable[Any]) -> Any:
+    return await awaitable
 
 
 def _env_bool(name: str, default: bool) -> bool:

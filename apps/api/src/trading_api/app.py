@@ -1681,11 +1681,11 @@ def create_fastapi_app(
 
     @app.websocket("/ws/market")
     async def ws_market(websocket: WebSocket) -> None:
-        await _stream_ws_snapshots(
-            websocket,
-            "market.snapshot",
-            lambda: _market_payload(cast(FastAPI, websocket.app)),
-        )
+        await _stream_market_feed_ws(websocket)
+
+    @app.websocket("/ws/market-feed")
+    async def ws_market_feed(websocket: WebSocket) -> None:
+        await _stream_market_feed_ws(websocket)
 
     @app.websocket("/ws/reports")
     async def ws_reports(websocket: WebSocket) -> None:
@@ -1774,7 +1774,10 @@ async def _dashboard_preflight_or_none(request: Request) -> SessionPreflightResp
     timeout_seconds = float(os.environ.get("DASHBOARD_SESSION_PREFLIGHT_TIMEOUT_SECONDS", "1.5"))
     try:
         return await asyncio.wait_for(
-            _run_dashboard_session_preflight(request),
+            _run_dashboard_session_preflight_from_app(
+                cast(FastAPI, request.app),
+                _database_service(request),
+            ),
             timeout=timeout_seconds,
         )
     except Exception:
@@ -1782,14 +1785,37 @@ async def _dashboard_preflight_or_none(request: Request) -> SessionPreflightResp
 
 
 async def _run_dashboard_session_preflight(request: Request) -> SessionPreflightResponse:
+    return await _run_dashboard_session_preflight_from_app(
+        cast(FastAPI, request.app),
+        _database_service(request),
+    )
+
+
+async def _dashboard_preflight_or_none_from_app(
+    app: FastAPI,
+    database: DatabaseService,
+) -> SessionPreflightResponse | None:
+    timeout_seconds = float(os.environ.get("DASHBOARD_SESSION_PREFLIGHT_TIMEOUT_SECONDS", "1.5"))
+    try:
+        return await asyncio.wait_for(
+            _run_dashboard_session_preflight_from_app(app, database),
+            timeout=timeout_seconds,
+        )
+    except Exception:
+        return None
+
+
+async def _run_dashboard_session_preflight_from_app(
+    app: FastAPI,
+    database: DatabaseService,
+) -> SessionPreflightResponse:
     from trade_core.broker_gateway import BrokerGateway
     from trade_core.session.preflight import (
         TradingSessionPreflightConfig,
         TradingSessionPreflightService,
     )
 
-    app = cast(FastAPI, request.app)
-    refs = _instrument_refs_for_preflight(_database_service(request), None)
+    refs = _instrument_refs_for_preflight(database, None)
     cached = _cached_session_preflight(
         app,
         _session_preflight_cache_key(refs),
@@ -2634,6 +2660,54 @@ async def _dashboard_market_feed_snapshot(
         )
 
 
+async def _dashboard_market_feed_snapshot_from_app(
+    app: FastAPI,
+    *,
+    instruments: str | None,
+    selected_instrument: str,
+    include_order_book: bool,
+    include_trades: bool,
+    force: bool = False,
+) -> dict[str, object]:
+    database = _database_service_from_app(app)
+    preflight = await _dashboard_preflight_or_none_from_app(app, database)
+    with database.session_scope() as session:
+        service = BffReadService(session)
+        base_overview = _market_overview_with_cached_quotes(
+            app,
+            service.market_overview(
+                instruments=instruments,
+                include_details=False,
+                preflight=preflight,
+            ),
+        )
+    refs = _instrument_refs_for_preflight(
+        database,
+        instruments or _default_preflight_instruments(),
+    )
+    feed = _dashboard_market_feed(app)
+    timeout_seconds = float(os.environ.get("DASHBOARD_MARKET_FEED_SNAPSHOT_TIMEOUT_SECONDS", "6"))
+    try:
+        return await asyncio.wait_for(
+            feed.snapshot(
+                base_overview=base_overview,
+                refs=refs,
+                selected_instrument=selected_instrument,
+                gateway_factory=_readonly_tbank_gateway,
+                include_order_book=include_order_book,
+                include_trades=include_trades,
+                force=force,
+            ),
+            timeout=timeout_seconds,
+        )
+    except TimeoutError:
+        return _dashboard_market_feed_timeout_snapshot(
+            feed,
+            base_overview=base_overview,
+            selected_instrument=selected_instrument,
+        )
+
+
 def _dashboard_market_feed_timeout_snapshot(
     feed: DashboardMarketFeedService,
     *,
@@ -2988,6 +3062,87 @@ def _reports_payload(app: FastAPI) -> dict[str, object]:
             "counterfactual": service.counterfactual_reports(limit=10),
             "canceled_orders": service.canceled_order_diagnostics(limit=5),
         }
+
+
+async def _stream_market_feed_ws(websocket: WebSocket) -> None:
+    try:
+        require_role(
+            authenticate_websocket(websocket),
+            (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN),
+        )
+    except HTTPException:
+        await websocket.close(code=1008)
+        return
+
+    selected_instrument = _canonical_ws_instrument(
+        websocket.query_params.get("selected_instrument") or "MOEX:SBER"
+    )
+    include_order_book = _ws_bool_param(websocket.query_params.get("include_order_book"), True)
+    include_trades = _ws_bool_param(websocket.query_params.get("include_trades"), True)
+    instruments = websocket.query_params.get("instruments") or _default_preflight_instruments()
+
+    await websocket.accept()
+    interval = float(getattr(websocket.app.state, "ws_push_interval_seconds", 1.0))
+    sequence = 0
+    try:
+        while True:
+            payload = await _dashboard_market_feed_snapshot_from_app(
+                cast(FastAPI, websocket.app),
+                instruments=instruments,
+                selected_instrument=selected_instrument,
+                include_order_book=include_order_book,
+                include_trades=include_trades,
+            )
+            await _send_ws_envelope(websocket, "market.snapshot", payload, sequence=sequence)
+            sequence += 1
+            selected_instrument = await _next_market_ws_selection(
+                websocket,
+                selected_instrument,
+                timeout_seconds=interval,
+            )
+    except WebSocketDisconnect:
+        return
+    except TimeoutError:
+        await _close_ws_quietly(websocket, code=1011)
+
+
+async def _next_market_ws_selection(
+    websocket: WebSocket,
+    current: str,
+    *,
+    timeout_seconds: float,
+) -> str:
+    try:
+        message = await asyncio.wait_for(websocket.receive_json(), timeout=timeout_seconds)
+    except TimeoutError:
+        return current
+    except WebSocketDisconnect:
+        raise
+    except Exception:
+        return current
+    if not isinstance(message, dict):
+        return current
+    if message.get("type") not in {"market.select", "dashboard.select"}:
+        return current
+    raw_value = message.get("selected_instrument") or message.get("instrument_id")
+    if not isinstance(raw_value, str) or not raw_value.strip():
+        return current
+    return _canonical_ws_instrument(raw_value)
+
+
+def _canonical_ws_instrument(value: str) -> str:
+    stripped = value.strip().upper()
+    if not stripped:
+        return "MOEX:SBER"
+    if ":" in stripped:
+        return stripped
+    return f"MOEX:{stripped}"
+
+
+def _ws_bool_param(value: str | None, default: bool) -> bool:
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
 
 
 async def _stream_ws_snapshots(

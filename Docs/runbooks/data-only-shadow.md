@@ -276,8 +276,10 @@ the masked account id. The manual CLI remains useful for morning preflight and t
 
 The Live Dashboard must show the core universe prices even when live collection is not
 running. This is not data-only collection. Dashboard display uses
-`DashboardMarketFeedService` through `/dashboard/market-feed/snapshot` and
-`/dashboard/market-feed/status`; Start is only for persistent logging.
+`DashboardMarketFeedService` through primary WebSocket `/ws/market-feed`
+(`/ws/market` remains a compatibility alias), REST fallback
+`/dashboard/market-feed/snapshot`, and `/dashboard/market-feed/status`; Start is
+only for persistent logging.
 
 Dashboard Live Feed may call readonly T-Invest methods (`GetLastPrices`,
 `GetOrderBook`, `GetTradingStatus`, last trades/status display) with bounded timeouts.
@@ -287,6 +289,24 @@ It must not write
 by that feed cache first, then stored `order_book_summary`, `market_candle` and
 previous-close fallbacks. It must return one row per core universe instrument and
 expose `last_price_source`, `quote_status`, `is_price_stale` and timestamp.
+
+The dashboard feed distinguishes broker response receipt time from exchange data
+time. `received_ts`/`received_age_ms` only say when the BFF received a readonly
+response. `exchange_ts`/`exchange_age_ms`,
+`stale_by_exchange_time`, `freshness_status`, and `freshness_reason` decide
+whether the displayed price/book/tape is fresh. Old candle or old exchange data
+must remain visible as stale/display-only and must not be labeled live.
+
+Selected-instrument switching is latest-wins. The frontend sends
+`{"type":"market.select","selected_instrument":"MOEX:GAZP"}` over the market
+WebSocket and ignores late selected-details responses for another instrument.
+Late SBER responses may update only the SBER row; they must not change the user's
+current selected instrument or show the SBER book under a GAZP heading.
+
+Trade tape is explicit: selected details include either `recent_market_trades` or
+`trade_tape_status`/`trade_tape_reason` such as `no_market_trades_samples`,
+`get_last_trades_timeout`, `market_closed`, `stale`, or `unavailable`. Missing
+trade tape must not block quotes or order-book display.
 
 Readonly broker quote refresh remains explicit for diagnostics:
 `POST /market/quotes/refresh` may call T-Invest `GetLastPrices`/`GetOrderBook` with

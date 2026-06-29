@@ -163,6 +163,14 @@ export interface MarketInstrumentOverview {
   last_price_source: string | null;
   is_price_stale: boolean;
   price_staleness_seconds: number | null;
+  received_ts?: string | null;
+  exchange_ts?: string | null;
+  received_age_ms?: number | null;
+  exchange_age_ms?: number | null;
+  stale_by_received_time?: boolean;
+  stale_by_exchange_time?: boolean;
+  freshness_status?: string;
+  freshness_reason?: string | null;
   previous_close: string | null;
   change_abs: string | null;
   change_bps: string | null;
@@ -195,6 +203,8 @@ export interface MarketInstrumentOverview {
   recent_market_trades: JsonPayload[];
   market_trades_source: string | null;
   market_trades_age_ms: number | null;
+  trade_tape_status?: string | null;
+  trade_tape_reason?: string | null;
   reason_code: string | null;
   warning: string | null;
   order_book_summary: JsonPayload;
@@ -290,6 +300,18 @@ export interface MarketMicrostructureSummaryResponse {
 export interface DataShadowStatusResponse {
   enabled: boolean;
   collector_state: string;
+  day_collection_state?: string;
+  daily_collection_active?: boolean;
+  current_window_state?: string;
+  next_collection_window_at?: string | null;
+  remaining_windows_today?: number;
+  collector_left_running?: boolean;
+  paused_at?: string | null;
+  completed_for_day_at?: string | null;
+  last_stop_reason?: string | null;
+  last_pause_reason?: string | null;
+  last_resume_at?: string | null;
+  last_window_completed_at?: string | null;
   strategy_trading_disabled: boolean;
   real_orders_disabled: boolean;
   market_open: boolean | null;
@@ -312,6 +334,14 @@ export interface DataShadowStatusResponse {
   last_command_reason_code: string | null;
   instruments: string[];
   stream_batches: JsonPayload[];
+  supervisor_enabled?: boolean;
+  supervisor_state?: string;
+  stream_restart_count?: number;
+  last_restart_at?: string | null;
+  last_restart_reason?: string | null;
+  stream_stale_count?: number;
+  last_stream_error?: string | null;
+  per_stream_status?: JsonPayload;
   warnings: string[];
   warning: string | null;
 }

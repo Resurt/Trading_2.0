@@ -653,7 +653,7 @@ code {
 
 .command-status-panel {
   display: grid;
-  grid-template-columns: auto minmax(150px, 0.3fr) minmax(0, 1fr) auto auto;
+  grid-template-columns: auto minmax(150px, 0.3fr) minmax(0, 1fr) auto auto auto;
   align-items: center;
   gap: var(--space-3);
   min-width: 0;
@@ -680,6 +680,22 @@ code {
 
 .command-status-panel strong {
   color: var(--color-text-primary);
+}
+
+.command-status-dismiss {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  color: var(--color-text-muted);
+  background: transparent;
+}
+
+.command-status-dismiss:hover {
+  color: var(--color-text-primary);
+  border-color: rgba(98, 168, 216, 0.5);
 }
 
 .balance-card {

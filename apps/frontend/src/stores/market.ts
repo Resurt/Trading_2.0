@@ -37,6 +37,18 @@ const EMPTY_OVERVIEW: MarketOverviewResponse = {
 const EMPTY_DATA_SHADOW_STATUS: DataShadowStatusResponse = {
   enabled: false,
   collector_state: "stopped",
+  day_collection_state: "inactive",
+  daily_collection_active: false,
+  current_window_state: "stopped",
+  next_collection_window_at: null,
+  remaining_windows_today: 0,
+  collector_left_running: false,
+  paused_at: null,
+  completed_for_day_at: null,
+  last_stop_reason: null,
+  last_pause_reason: null,
+  last_resume_at: null,
+  last_window_completed_at: null,
   strategy_trading_disabled: true,
   real_orders_disabled: true,
   market_open: null,
@@ -59,6 +71,14 @@ const EMPTY_DATA_SHADOW_STATUS: DataShadowStatusResponse = {
   last_command_reason_code: null,
   instruments: [],
   stream_batches: [],
+  supervisor_enabled: false,
+  supervisor_state: "not_configured",
+  stream_restart_count: 0,
+  last_restart_at: null,
+  last_restart_reason: null,
+  stream_stale_count: 0,
+  last_stream_error: null,
+  per_stream_status: {},
   warnings: [],
   warning: null,
 };
@@ -353,7 +373,13 @@ export const useMarketStore = defineStore("market", () => {
     }
     liveConnection.value = "loading";
     try {
-      marketSocket = await openAuthenticatedWebSocket("/ws/market");
+      const requestedInstrumentId = selectedInstrumentId.value ?? DEFAULT_SELECTED_INSTRUMENT_ID;
+      const query = new URLSearchParams({
+        selected_instrument: requestedInstrumentId,
+        include_order_book: "true",
+        include_trades: "true",
+      });
+      marketSocket = await openAuthenticatedWebSocket(`/ws/market-feed?${query.toString()}`);
     } catch (unknownError) {
       error.value = unknownError instanceof Error ? unknownError.message : "Market WS auth failed";
       liveConnection.value = "degraded";
@@ -364,9 +390,18 @@ export const useMarketStore = defineStore("market", () => {
     };
     marketSocket.onmessage = (event: MessageEvent<string>) => {
       try {
-        const envelope = JSON.parse(event.data) as WebSocketEnvelope<{ data?: MarketOverviewResponse }>;
-        if (envelope.payload.data) {
-          applyOverview(envelope.payload.data);
+        const envelope = JSON.parse(event.data) as WebSocketEnvelope<{
+          data?: DashboardMarketFeedSnapshot | MarketOverviewResponse;
+        }>;
+        const payload = envelope.payload.data;
+        if (!payload) {
+          return;
+        }
+        if ("quote_rows" in payload || "selected_details" in payload) {
+          const expected = selectedInstrumentId.value ?? DEFAULT_SELECTED_INSTRUMENT_ID;
+          applyDashboardFeedSnapshot(payload as DashboardMarketFeedSnapshot, expected);
+        } else {
+          applyOverview(payload as MarketOverviewResponse);
         }
       } catch {
         recordWarning("invalid_market_ws_snapshot");
@@ -389,6 +424,7 @@ export const useMarketStore = defineStore("market", () => {
     if (marketPollTimer !== null) {
       return;
     }
+    void connectMarketSocket();
     void fetchDashboardFeedSnapshot({ silent: true, includeOrderBook: false, includeTrades: false });
     void refreshSelectedInstrumentDetails();
     void fetchDataShadowStatus();
@@ -439,8 +475,22 @@ export const useMarketStore = defineStore("market", () => {
   }
 
   watch(selectedInstrumentId, () => {
+    sendMarketSelection();
     void refreshSelectedInstrumentDetails();
   });
+
+  function sendMarketSelection(): void {
+    if (!marketSocket || marketSocket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    const instrumentId = selectedInstrumentId.value ?? DEFAULT_SELECTED_INSTRUMENT_ID;
+    marketSocket.send(
+      JSON.stringify({
+        type: "market.select",
+        selected_instrument: instrumentId,
+      }),
+    );
+  }
 
   function ensureSelectedInstrument(): void {
     const rows = overview.value.instruments;
@@ -514,6 +564,14 @@ function emptyInstrument(instrumentId: string): MarketInstrumentOverview {
     last_price_source: null,
     is_price_stale: true,
     price_staleness_seconds: null,
+    received_ts: null,
+    exchange_ts: null,
+    received_age_ms: null,
+    exchange_age_ms: null,
+    stale_by_received_time: true,
+    stale_by_exchange_time: true,
+    freshness_status: "unknown",
+    freshness_reason: "instrument_unavailable",
     previous_close: null,
     change_abs: null,
     change_bps: null,
@@ -548,6 +606,8 @@ function emptyInstrument(instrumentId: string): MarketInstrumentOverview {
     recent_market_trades: [],
     market_trades_source: "no_market_trades_samples",
     market_trades_age_ms: null,
+    trade_tape_status: "no_market_trades_samples",
+    trade_tape_reason: "no_market_trades_samples",
     reason_code: "instrument_unavailable",
     warning: null,
     order_book_summary: {},
@@ -616,12 +676,14 @@ function withPreservedRecentTrades(
     recent_market_trades: previous.recent_market_trades,
     market_trades_source: previous.market_trades_source,
     market_trades_age_ms: previous.market_trades_age_ms,
+    trade_tape_status: previous.trade_tape_status,
+    trade_tape_reason: previous.trade_tape_reason,
   };
 }
 
 function isTradeTapeStillFresh(instrument: MarketInstrumentOverview): boolean {
   if (instrument.market_trades_age_ms === null || instrument.market_trades_age_ms === undefined) {
-    return true;
+    return false;
   }
   return Number(instrument.market_trades_age_ms) <= 30 * 60 * 1000;
 }
@@ -634,6 +696,14 @@ function quoteSnapshotFields(instrument: MarketInstrumentOverview): Partial<Mark
     last_price_source: instrument.last_price_source,
     is_price_stale: instrument.is_price_stale,
     price_staleness_seconds: instrument.price_staleness_seconds,
+    received_ts: instrument.received_ts,
+    exchange_ts: instrument.exchange_ts,
+    received_age_ms: instrument.received_age_ms,
+    exchange_age_ms: instrument.exchange_age_ms,
+    stale_by_received_time: instrument.stale_by_received_time,
+    stale_by_exchange_time: instrument.stale_by_exchange_time,
+    freshness_status: instrument.freshness_status,
+    freshness_reason: instrument.freshness_reason,
     previous_close: instrument.previous_close,
     change_abs: instrument.change_abs,
     change_bps: instrument.change_bps,
@@ -670,6 +740,8 @@ function quoteSnapshotFields(instrument: MarketInstrumentOverview): Partial<Mark
     recent_market_trades: instrument.recent_market_trades,
     market_trades_source: instrument.market_trades_source,
     market_trades_age_ms: instrument.market_trades_age_ms,
+    trade_tape_status: instrument.trade_tape_status,
+    trade_tape_reason: instrument.trade_tape_reason,
     reason_code: instrument.reason_code,
     warning: instrument.warning,
     order_book_summary: instrument.order_book_summary,
@@ -708,6 +780,12 @@ function shouldKeepPreviousQuote(
 }
 
 function isQuoteSnapshotStillFresh(instrument: MarketInstrumentOverview): boolean {
+  if (instrument.is_price_stale || instrument.stale_by_exchange_time) {
+    return false;
+  }
+  if (instrument.exchange_age_ms !== null && instrument.exchange_age_ms !== undefined) {
+    return Number(instrument.exchange_age_ms) <= 60_000;
+  }
   if (
     ![
       "live_order_book_mid",

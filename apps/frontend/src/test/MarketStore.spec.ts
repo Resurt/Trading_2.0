@@ -12,11 +12,31 @@ const apiClientMock = vi.hoisted(() => ({
   marketInstrumentDetails: vi.fn(),
   dataShadowStatus: vi.fn(),
 }));
+const openAuthenticatedWebSocketMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../api/client", () => ({
   apiClient: apiClientMock,
-  openAuthenticatedWebSocket: vi.fn(),
+  openAuthenticatedWebSocket: openAuthenticatedWebSocketMock,
 }));
+
+class FakeWebSocket {
+  static readonly OPEN = 1;
+  static readonly CLOSING = 2;
+  readonly readyState = FakeWebSocket.OPEN;
+  onopen: (() => void) | null = null;
+  onmessage: ((event: MessageEvent<string>) => void) | null = null;
+  onerror: (() => void) | null = null;
+  onclose: (() => void) | null = null;
+  sent: string[] = [];
+
+  send(payload: string): void {
+    this.sent.push(payload);
+  }
+
+  close(): void {
+    this.onclose?.();
+  }
+}
 
 function instrument(
   overrides: Partial<MarketInstrumentOverview> = {},
@@ -40,6 +60,14 @@ function instrument(
     last_price_source: null,
     is_price_stale: true,
     price_staleness_seconds: null,
+    received_ts: null,
+    exchange_ts: null,
+    received_age_ms: null,
+    exchange_age_ms: null,
+    stale_by_received_time: true,
+    stale_by_exchange_time: true,
+    freshness_status: "unknown",
+    freshness_reason: null,
     previous_close: null,
     change_abs: null,
     change_bps: null,
@@ -72,6 +100,8 @@ function instrument(
     recent_market_trades: [],
     market_trades_source: null,
     market_trades_age_ms: null,
+    trade_tape_status: null,
+    trade_tape_reason: null,
     reason_code: null,
     warning: null,
     order_book_summary: {},
@@ -131,6 +161,8 @@ describe("market store", () => {
   beforeEach(() => {
     setActivePinia(createPinia());
     Object.values(apiClientMock).forEach((mock) => mock.mockReset());
+    openAuthenticatedWebSocketMock.mockReset();
+    vi.stubGlobal("WebSocket", FakeWebSocket);
   });
 
   it("starts with eight core instruments and selects SBER by default", () => {
@@ -231,12 +263,25 @@ describe("market store", () => {
 
   it("starts dashboard feed polling without requiring Start", async () => {
     const market = useMarketStore();
+    openAuthenticatedWebSocketMock.mockResolvedValue(new FakeWebSocket());
     apiClientMock.dashboardMarketFeedSnapshot.mockResolvedValue(
       feedSnapshot([instrument({ last_price: "313.10", quote_status: "live" })]),
     );
     apiClientMock.dataShadowStatus.mockResolvedValue({
       enabled: true,
       collector_state: "stopped",
+      day_collection_state: "inactive",
+      daily_collection_active: false,
+      current_window_state: "stopped",
+      next_collection_window_at: null,
+      remaining_windows_today: 0,
+      collector_left_running: false,
+      paused_at: null,
+      completed_for_day_at: null,
+      last_stop_reason: null,
+      last_pause_reason: null,
+      last_resume_at: null,
+      last_window_completed_at: null,
       strategy_trading_disabled: true,
       real_orders_disabled: true,
       market_open: null,
@@ -259,6 +304,14 @@ describe("market store", () => {
       last_command_reason_code: null,
       instruments: [],
       stream_batches: [],
+      supervisor_enabled: false,
+      supervisor_state: "not_configured",
+      stream_restart_count: 0,
+      last_restart_at: null,
+      last_restart_reason: null,
+      stream_stale_count: 0,
+      last_stream_error: null,
+      per_stream_status: {},
       warnings: [],
       warning: null,
     });
@@ -267,9 +320,140 @@ describe("market store", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(apiClientMock.dashboardMarketFeedSnapshot).toHaveBeenCalled();
+    expect(openAuthenticatedWebSocketMock).toHaveBeenCalledWith(
+      expect.stringContaining("/ws/market-feed?"),
+    );
     expect(market.currentInstrument?.last_price).toBe("313.10");
     expect(market.dataShadowStatus.collector_state).toBe("stopped");
     market.stopDashboardFeed();
+  });
+
+  it("uses dashboard WebSocket snapshots as primary live feed without Start", async () => {
+    const market = useMarketStore();
+    const socket = new FakeWebSocket();
+    openAuthenticatedWebSocketMock.mockResolvedValue(socket);
+    apiClientMock.dashboardMarketFeedSnapshot.mockResolvedValue(feedSnapshot([]));
+    apiClientMock.dataShadowStatus.mockResolvedValue({
+      enabled: true,
+      collector_state: "stopped",
+      day_collection_state: "inactive",
+      daily_collection_active: false,
+      current_window_state: "stopped",
+      next_collection_window_at: null,
+      remaining_windows_today: 0,
+      collector_left_running: false,
+      paused_at: null,
+      completed_for_day_at: null,
+      last_stop_reason: null,
+      last_pause_reason: null,
+      last_resume_at: null,
+      last_window_completed_at: null,
+      strategy_trading_disabled: true,
+      real_orders_disabled: true,
+      market_open: null,
+      market_closed_expected: null,
+      reason_code: null,
+      next_session_at: null,
+      stream_alive: false,
+      last_message_age_seconds: null,
+      candles_received: null,
+      order_book_snapshots: 0,
+      market_microstructure_snapshots: 0,
+      avg_spread_bps: null,
+      p95_spread_bps: null,
+      avg_market_quality_score: null,
+      current_session: null,
+      started_at: null,
+      stopped_at: null,
+      last_command_id: null,
+      last_command_status: null,
+      last_command_reason_code: null,
+      instruments: [],
+      stream_batches: [],
+      supervisor_enabled: false,
+      supervisor_state: "not_configured",
+      stream_restart_count: 0,
+      last_restart_at: null,
+      last_restart_reason: null,
+      stream_stale_count: 0,
+      last_stream_error: null,
+      per_stream_status: {},
+      warnings: [],
+      warning: null,
+    });
+
+    market.startDashboardFeed();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "market.snapshot",
+        payload: {
+          data: feedSnapshot([
+            instrument({
+              instrument_id: "MOEX:SBER",
+              ticker: "SBER",
+              last_price: "313.10",
+              quote_status: "live",
+            }),
+          ]),
+        },
+      }),
+    } as MessageEvent<string>);
+
+    expect(market.currentInstrument?.last_price).toBe("313.10");
+    expect(market.liveConnection).toBe("live");
+    market.stopDashboardFeed();
+  });
+
+  it("sends selected instrument changes over the market WebSocket", async () => {
+    const market = useMarketStore();
+    const socket = new FakeWebSocket();
+    openAuthenticatedWebSocketMock.mockResolvedValue(socket);
+    market.applyOverview({
+      generated_at: new Date().toISOString(),
+      instruments: [
+        instrument({ instrument_id: "MOEX:SBER", ticker: "SBER" }),
+        instrument({ instrument_id: "MOEX:GAZP", ticker: "GAZP" }),
+      ],
+    });
+
+    await market.connectMarketSocket();
+    market.selectedInstrumentId = "MOEX:GAZP";
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(JSON.parse(socket.sent[socket.sent.length - 1] ?? "{}")).toEqual({
+      type: "market.select",
+      selected_instrument: "MOEX:GAZP",
+    });
+  });
+
+  it("does not keep old trade tape forever when freshness age is unknown", () => {
+    const market = useMarketStore();
+    const now = new Date().toISOString();
+    market.applyOverview({
+      generated_at: now,
+      instruments: [
+        instrument({
+          recent_market_trades: [{ price: "313.10" }],
+          market_trades_source: "tbank_get_last_trades",
+          market_trades_age_ms: null,
+          trade_tape_status: "stale",
+        }),
+      ],
+    });
+
+    market.applyOverview({
+      generated_at: now,
+      instruments: [
+        instrument({
+          market_trades_source: "tbank_get_last_trades",
+          market_trades_age_ms: null,
+          trade_tape_status: "stale",
+        }),
+      ],
+    });
+
+    expect(market.currentInstrument?.recent_market_trades).toEqual([]);
   });
 
   it("keeps broker order book metrics when weaker snapshots arrive later", () => {
@@ -283,6 +467,10 @@ describe("market store", () => {
           last_price: "313.19",
           last_price_at: now,
           last_price_source: "live_exchange_order_book",
+          is_price_stale: false,
+          exchange_age_ms: 0,
+          stale_by_exchange_time: false,
+          freshness_status: "fresh",
           quote_source: "live_exchange_order_book",
           venue_type: "official_exchange",
           trading_mode: "standard_exchange",

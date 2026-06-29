@@ -372,13 +372,15 @@ Dashboard Live Feed. This feed is independent from the Start button: it can disp
 last prices, selected-instrument order book and trade-tape status while the
 data-only collector is stopped. Start controls only persistent data-only log writing.
 
-The feed is exposed through `/dashboard/market-feed/status` and
-`/dashboard/market-feed/snapshot`. `GET /market/overview` is the cheap quote-board
-read-model backed by the feed cache first, then stored `order_book_summary`,
-`market_candle` and previous-close fallbacks. It always returns one row per core
-instrument and avoids heavy all-instrument order-book calls. Selected-instrument
-bid/ask ladder and trade tape load lazily from
-`GET /market/instruments/{instrument_id}/details` or the selected snapshot fields.
+The feed is exposed primarily through WebSocket `/ws/market-feed`; `/ws/market`
+is kept as a compatible alias for the same DashboardMarketFeed snapshot. REST
+`/dashboard/market-feed/status` and `/dashboard/market-feed/snapshot` are fallback
+and diagnostic endpoints. `GET /market/overview` is the cheap quote-board read-model
+backed by the feed cache first, then stored `order_book_summary`, `market_candle`
+and previous-close fallbacks. It always returns one row per core instrument and
+avoids heavy all-instrument order-book calls. Selected-instrument bid/ask ladder
+and trade tape come through the selected snapshot/details fields; the frontend
+sends `market.select` over the WebSocket when the operator switches instruments.
 
 Explicit readonly broker quote refresh remains `POST /market/quotes/refresh`.
 Temporary request failures must not clear already displayed quotes; if the readonly
@@ -393,6 +395,12 @@ ribbon, data-only status every 2-5 seconds, and broker balance refresh every
 60 seconds. Polling is silent and must not clear the last good balance or quote rows
 on timeout. Empty or partial `/ws/market` snapshots are merged into the existing board
 and never delete missing core-universe rows.
+
+Dashboard freshness uses both BFF receipt time and exchange data time:
+`received_ts`/`received_age_ms` are not enough to mark data live. Old
+`exchange_ts` data must show as stale/display-only, and stale candles must not be
+labeled live. Trade tape either contains recent readonly trades or exposes an
+explicit `trade_tape_status`/`trade_tape_reason`.
 
 Runbook: `Docs/runbooks/data-only-shadow.md`.
 
@@ -423,6 +431,7 @@ Spread units are explicit: `spread_abs`/`spread_abs_rub` are RUB, while
 display quality and calibration quality. Display quality describes the visible book;
 calibration quality is zero/not applicable when the venue is not `official_exchange`.
 
-The frontend uses `/ws/market` as the primary live market update path and REST polling as
-a fallback. Failed refreshes must not clear the last good quotes; stale/local candle
-fallbacks must show source and timestamp.
+The frontend uses `/ws/market-feed` as the primary live market update path
+(`/ws/market` remains an alias) and REST polling as a fallback. Failed refreshes
+must not clear the last good quotes; stale/local candle fallbacks must show source
+and timestamp.
