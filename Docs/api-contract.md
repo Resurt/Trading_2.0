@@ -352,9 +352,10 @@ an older trading date must not be labeled as current/live.
 with bounded timeouts. It must not call `PostOrder` or `CancelOrder`. If the readonly
 gateway cannot be constructed, the endpoint returns the local `/market/overview`
 payload quickly so the frontend does not get stuck on 500/504.
-When `GetOrderBook` succeeds, the quote is fresh by broker response receipt time;
-the original exchange timestamp is exposed only as diagnostic payload
-(`exchange_ts` / `exchange_age_seconds`).
+When `GetOrderBook` succeeds, BFF receipt time and exchange data time remain
+separate. A broker response received now does not make old exchange data live.
+`exchange_ts` / `exchange_age_ms` decide exchange freshness together with the
+configured dashboard thresholds.
 The API keeps successful readonly quote refresh rows in a short in-process cache
 (`MARKET_QUOTE_REFRESH_CACHE_TTL_SECONDS`, default 45 seconds). During that TTL,
 `GET /market/overview`, `/dashboard/state`, and `/ws/market` overlay the cached

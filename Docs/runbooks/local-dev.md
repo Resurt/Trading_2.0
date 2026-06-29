@@ -153,7 +153,8 @@ WebSocket каналы:
 
 - `ws://localhost:8000/ws/dashboard`
 - `ws://localhost:8000/ws/orders`
-- `ws://localhost:8000/ws/market`
+- `ws://localhost:8000/ws/market-feed` - primary Dashboard Live Feed
+- `ws://localhost:8000/ws/market` - compatibility alias for the same market feed
 - `ws://localhost:8000/ws/reports`
 
 Для Vite frontend API должен разрешать локальный origin:
