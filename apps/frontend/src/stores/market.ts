@@ -104,6 +104,7 @@ export const useMarketStore = defineStore("market", () => {
   let quoteRefreshInFlight = false;
   let selectedDetailsInFlight = false;
   let dataShadowStatusInFlight = false;
+  let selectedDetailsRequestId = 0;
 
   const currentInstrument = computed<MarketInstrumentOverview | null>(() => {
     if (overview.value.instruments.length === 0) {
@@ -189,12 +190,13 @@ export const useMarketStore = defineStore("market", () => {
     }
     error.value = null;
     try {
+      const requestedInstrumentId = selectedInstrumentId.value ?? DEFAULT_SELECTED_INSTRUMENT_ID;
       const snapshot = await apiClient.dashboardMarketFeedSnapshot({
-        selected_instrument: selectedInstrumentId.value ?? DEFAULT_SELECTED_INSTRUMENT_ID,
+        selected_instrument: requestedInstrumentId,
         include_order_book: options.includeOrderBook ?? false,
         include_trades: options.includeTrades ?? false,
       });
-      applyDashboardFeedSnapshot(snapshot);
+      applyDashboardFeedSnapshot(snapshot, requestedInstrumentId);
     } catch (unknownError) {
       recordWarning("dashboard_market_feed_unavailable");
       feedErrors.value = [errorText(unknownError)];
@@ -215,20 +217,22 @@ export const useMarketStore = defineStore("market", () => {
     includeOrderBook?: boolean;
     includeTrades?: boolean;
   } = {}): Promise<void> {
+    const requestedInstrumentId = selectedInstrumentId.value ?? DEFAULT_SELECTED_INSTRUMENT_ID;
     const snapshot = await apiClient.refreshDashboardMarketFeed({
-      selected_instrument: selectedInstrumentId.value ?? DEFAULT_SELECTED_INSTRUMENT_ID,
+      selected_instrument: requestedInstrumentId,
       include_order_book: options.includeOrderBook ?? true,
       include_trades: options.includeTrades ?? true,
     });
-    applyDashboardFeedSnapshot(snapshot);
+    applyDashboardFeedSnapshot(snapshot, requestedInstrumentId);
   }
 
   async function refreshSelectedInstrumentDetails(): Promise<void> {
     const instrument = currentInstrument.value;
     const instrumentId = instrument?.instrument_id ?? selectedInstrumentId.value;
-    if (!instrumentId || selectedDetailsInFlight) {
+    if (!instrumentId) {
       return;
     }
+    const requestId = ++selectedDetailsRequestId;
     selectedDetailsInFlight = true;
     selectedDetailsLoading.value = true;
     lastSelectedDetailsFetchAt = Date.now();
@@ -238,19 +242,30 @@ export const useMarketStore = defineStore("market", () => {
         include_order_book: true,
         include_trades: true,
       });
-      applyDashboardFeedSnapshot(snapshot);
+      if (requestId === selectedDetailsRequestId && selectedInstrumentId.value === instrumentId) {
+        applyDashboardFeedSnapshot(snapshot, instrumentId);
+      } else if (snapshot.selected_details) {
+        applyOverview({ generated_at: snapshot.generated_at, instruments: [snapshot.selected_details] });
+      }
     } catch (unknownError) {
-      recordWarning("selected_instrument_details_unavailable");
+      if (requestId === selectedDetailsRequestId) {
+        recordWarning("selected_instrument_details_unavailable");
+      }
       if (overview.value.instruments.length === 0) {
         error.value = unknownError instanceof Error ? unknownError.message : "Selected market details failed";
       }
     } finally {
-      selectedDetailsLoading.value = false;
-      selectedDetailsInFlight = false;
+      if (requestId === selectedDetailsRequestId) {
+        selectedDetailsLoading.value = false;
+        selectedDetailsInFlight = false;
+      }
     }
   }
 
-  function applyDashboardFeedSnapshot(snapshot: DashboardMarketFeedSnapshot): void {
+  function applyDashboardFeedSnapshot(
+    snapshot: DashboardMarketFeedSnapshot,
+    expectedSelectedInstrumentId?: string,
+  ): void {
     dashboardFeedStatus.value = snapshot.status ?? {
       ...dashboardFeedStatus.value,
       running: true,
@@ -271,9 +286,17 @@ export const useMarketStore = defineStore("market", () => {
       lastQuoteRefreshAt.value = snapshot.generated_at;
     }
     if (snapshot.selected_details) {
-      selectedInstrumentId.value = snapshot.selected_details.instrument_id;
+      const selectedDetailsMatchesRequest =
+        expectedSelectedInstrumentId === undefined ||
+        snapshot.selected_details.instrument_id === expectedSelectedInstrumentId;
+      const selectionStillCurrent =
+        expectedSelectedInstrumentId === undefined ||
+        selectedInstrumentId.value === expectedSelectedInstrumentId;
+      if (selectedDetailsMatchesRequest && selectionStillCurrent) {
+        selectedInstrumentId.value = snapshot.selected_details.instrument_id;
+        lastDetailsRefreshAt.value = snapshot.generated_at;
+      }
       applyOverview({ generated_at: snapshot.generated_at, instruments: [snapshot.selected_details] });
-      lastDetailsRefreshAt.value = snapshot.generated_at;
     }
     liveConnection.value = feedErrors.value.length ? "degraded" : "live";
   }

@@ -384,10 +384,7 @@ def create_fastapi_app(
         include_trades: Annotated[bool, Query()] = True,
     ) -> dict[str, object]:
         require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
-        preflight = await _fresh_operator_preflight_or_none(
-            request,
-            instruments=instruments,
-        )
+        preflight = await _dashboard_preflight_or_none(request)
         return await _dashboard_market_feed_snapshot(
             request,
             service=service,
@@ -409,10 +406,7 @@ def create_fastapi_app(
         include_trades: Annotated[bool, Query()] = True,
     ) -> dict[str, object]:
         require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
-        preflight = await _fresh_operator_preflight_or_none(
-            request,
-            instruments=instruments,
-        )
+        preflight = await _dashboard_preflight_or_none(request)
         return await _dashboard_market_feed_snapshot(
             request,
             service=service,
@@ -433,10 +427,7 @@ def create_fastapi_app(
         include_details: Annotated[bool, Query()] = False,
     ) -> MarketOverviewResponse:
         del refresh
-        preflight = await _fresh_operator_preflight_or_none(
-            request,
-            instruments=instruments,
-        )
+        preflight = await _dashboard_preflight_or_none(request)
         snapshot = await _dashboard_market_feed_snapshot(
             request,
             service=service,
@@ -460,7 +451,7 @@ def create_fastapi_app(
         request: Request,
         service: ReadServiceDep,
     ) -> MarketInstrumentOverview:
-        preflight = await _fresh_operator_preflight_or_none(request)
+        preflight = await _dashboard_preflight_or_none(request)
         selected_base = service.market_instrument_details(instrument_id, preflight=preflight)
         quote_overview = service.market_overview(
             instruments=None,
@@ -506,10 +497,7 @@ def create_fastapi_app(
     ) -> MarketOverviewResponse:
         require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
         include_details = details or include_order_book or not quotes_only
-        preflight = await _fresh_operator_preflight_or_none(
-            request,
-            instruments=instruments,
-        )
+        preflight = await _dashboard_preflight_or_none(request)
         base_overview = service.market_overview(
             instruments=instruments,
             include_details=include_details,
@@ -1782,6 +1770,17 @@ async def _fresh_operator_preflight_or_none(
         return None
 
 
+async def _dashboard_preflight_or_none(request: Request) -> SessionPreflightResponse | None:
+    timeout_seconds = float(os.environ.get("DASHBOARD_SESSION_PREFLIGHT_TIMEOUT_SECONDS", "1.5"))
+    try:
+        return await asyncio.wait_for(
+            _run_dashboard_session_preflight(request),
+            timeout=timeout_seconds,
+        )
+    except Exception:
+        return None
+
+
 async def _run_dashboard_session_preflight(request: Request) -> SessionPreflightResponse:
     from trade_core.broker_gateway import BrokerGateway
     from trade_core.session.preflight import (
@@ -2612,15 +2611,86 @@ async def _dashboard_market_feed_snapshot(
         _database_service(request),
         instruments or _default_preflight_instruments(),
     )
-    return await _dashboard_market_feed(request.app).snapshot(
-        base_overview=base_overview,
-        refs=refs,
-        selected_instrument=selected_instrument,
-        gateway_factory=_readonly_tbank_gateway,
-        include_order_book=include_order_book,
-        include_trades=include_trades,
-        force=force,
+    feed = _dashboard_market_feed(request.app)
+    timeout_seconds = float(os.environ.get("DASHBOARD_MARKET_FEED_SNAPSHOT_TIMEOUT_SECONDS", "6"))
+    try:
+        return await asyncio.wait_for(
+            feed.snapshot(
+                base_overview=base_overview,
+                refs=refs,
+                selected_instrument=selected_instrument,
+                gateway_factory=_readonly_tbank_gateway,
+                include_order_book=include_order_book,
+                include_trades=include_trades,
+                force=force,
+            ),
+            timeout=timeout_seconds,
+        )
+    except TimeoutError:
+        return _dashboard_market_feed_timeout_snapshot(
+            feed,
+            base_overview=base_overview,
+            selected_instrument=selected_instrument,
+        )
+
+
+def _dashboard_market_feed_timeout_snapshot(
+    feed: DashboardMarketFeedService,
+    *,
+    base_overview: MarketOverviewResponse,
+    selected_instrument: str,
+) -> dict[str, object]:
+    selected_id = selected_instrument or "MOEX:SBER"
+    selected_details = next(
+        (row for row in base_overview.instruments if row.instrument_id == selected_id),
+        base_overview.instruments[0] if base_overview.instruments else None,
     )
+    market_open = bool(selected_details and selected_details.official_exchange_open)
+    session_phase = "continuous_trading" if market_open else "closed"
+    status = feed.status()
+    errors = list(status.get("errors") if isinstance(status.get("errors"), list) else [])
+    if "dashboard_market_feed_timeout" not in errors:
+        errors.insert(0, "dashboard_market_feed_timeout")
+    generated_at = datetime.now(tz=UTC).isoformat()
+    return {
+        "generated_at": generated_at,
+        "source": "dashboard_market_feed",
+        "data_only_collection_required": False,
+        "session": {
+            "market_open": market_open,
+            "session_type": (
+                selected_details.session_type
+                if selected_details is not None and selected_details.session_type
+                else "unknown"
+            ),
+            "session_phase": session_phase,
+            "venue_type": selected_details.venue_type if selected_details else "unknown",
+            "data_only_collection_allowed": (
+                selected_details.quote_allowed_for_data_collection
+                if selected_details is not None
+                else False
+            ),
+            "reason_code": "dashboard_market_feed_timeout",
+            "next_session_at": None,
+        },
+        "quote_rows": [row.model_dump(mode="json") for row in base_overview.instruments],
+        "market_overview": base_overview.model_dump(mode="json"),
+        "selected_instrument": selected_id,
+        "selected_details": (
+            selected_details.model_dump(mode="json") if selected_details is not None else None
+        ),
+        "errors": errors[:5],
+        "warnings": list(
+            status.get("warnings") if isinstance(status.get("warnings"), list) else []
+        ),
+        "status": {
+            **status,
+            "running": bool(status.get("running")),
+            "last_refresh_at": status.get("last_refresh_at") or generated_at,
+            "selected_instrument": selected_id,
+            "errors": errors[:5],
+        },
+    }
 
 
 def _report_task_client(request: Request) -> ReportTaskClient:

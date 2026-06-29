@@ -211,6 +211,24 @@ describe("market store", () => {
     expect(market.currentInstrument?.best_bid).toBe("144.18");
   });
 
+  it("does not revert selected instrument when an old details response arrives late", () => {
+    const market = useMarketStore();
+    const now = new Date().toISOString();
+    const sber = instrument({ instrument_id: "MOEX:SBER", ticker: "SBER", last_price: "313.10" });
+    const gazp = instrument({ instrument_id: "MOEX:GAZP", ticker: "GAZP", last_price: "144.20" });
+    market.applyOverview({ generated_at: now, instruments: [sber, gazp] });
+
+    market.selectedInstrumentId = "MOEX:GAZP";
+    market.applyDashboardFeedSnapshot(
+      feedSnapshot([{ ...sber, best_bid: "313.00", best_ask: "313.20" }], "MOEX:SBER"),
+      "MOEX:SBER",
+    );
+
+    expect(market.selectedInstrumentId).toBe("MOEX:GAZP");
+    expect(market.currentInstrument?.instrument_id).toBe("MOEX:GAZP");
+    expect(market.quoteRows.find((row) => row.instrument_id === "MOEX:SBER")?.best_bid).toBe("313.00");
+  });
+
   it("starts dashboard feed polling without requiring Start", async () => {
     const market = useMarketStore();
     apiClientMock.dashboardMarketFeedSnapshot.mockResolvedValue(

@@ -1279,6 +1279,45 @@ def test_market_overview_uses_dashboard_feed_without_heavy_order_books(
     assert sber["quote_payload"]["dashboard_live_feed"] is True
 
 
+def test_dashboard_display_endpoints_do_not_run_operator_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app_module = importlib.import_module("trading_api.app")
+
+    async def fail_operator_preflight(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise AssertionError("operator preflight must not run for dashboard display")
+
+    monkeypatch.setenv("DASHBOARD_MARKET_FEED_ENABLED", "true")
+    force_exchange_open(monkeypatch)
+    monkeypatch.setattr(app_module, "_run_session_preflight", fail_operator_preflight)
+    monkeypatch.setattr(app_module, "_readonly_tbank_gateway", lambda: FakeDashboardFeedGateway())
+    client = make_client(tmp_path)
+
+    snapshot = client.get(
+        "/dashboard/market-feed/snapshot",
+        headers={"X-API-Role": "observer"},
+        params={
+            "selected_instrument": "MOEX:SBER",
+            "include_order_book": True,
+            "include_trades": True,
+        },
+    )
+    overview = client.get("/market/overview")
+    details = client.get("/market/instruments/MOEX%3ASBER/details")
+    refresh = client.post(
+        "/market/quotes/refresh?instruments=SBER&details=true",
+        headers={"X-API-Role": "observer"},
+    )
+
+    assert snapshot.status_code == 200
+    assert overview.status_code == 200
+    assert details.status_code == 200
+    assert refresh.status_code == 200
+    assert snapshot.json()["selected_details"]["instrument_id"] == "MOEX:SBER"
+
+
 def test_market_quotes_refresh_falls_back_when_broker_gateway_unavailable(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

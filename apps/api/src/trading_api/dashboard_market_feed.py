@@ -58,6 +58,7 @@ class DashboardMarketFeedService:
     _last_details_refresh_at: dict[str, datetime] = field(default_factory=dict)
     _last_trades_refresh_at: dict[str, datetime] = field(default_factory=dict)
     _last_status_refresh_at: dict[str, datetime] = field(default_factory=dict)
+    _refresh_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _running: bool = False
     _selected_instrument: str | None = None
     _errors: list[str] = field(default_factory=list)
@@ -125,6 +126,33 @@ class DashboardMarketFeedService:
         self._selected_instrument = selected_id
         overview = _limit_overview(base_overview, self.config.max_instruments)
 
+        if self._refresh_lock.locked():
+            self._record_warning("dashboard_refresh_in_progress")
+            overview = _merge_overviews(overview, self._overview)
+            return self._snapshot_payload(overview, selected_id)
+
+        async with self._refresh_lock:
+            return await self._refresh_snapshot(
+                overview=overview,
+                refs=refs,
+                selected_id=selected_id,
+                gateway_factory=gateway_factory,
+                include_order_book=include_order_book,
+                include_trades=include_trades,
+                force=force,
+            )
+
+    async def _refresh_snapshot(
+        self,
+        *,
+        overview: MarketOverviewResponse,
+        refs: Sequence[Any],
+        selected_id: str,
+        gateway_factory: GatewayFactory,
+        include_order_book: bool,
+        include_trades: bool,
+        force: bool,
+    ) -> dict[str, object]:
         if self.config.enabled:
             overview = await self._refresh_quotes_if_needed(
                 overview=overview,
@@ -147,6 +175,13 @@ class DashboardMarketFeedService:
         else:
             self._record_warning("dashboard_market_feed_disabled")
 
+        return self._snapshot_payload(overview, selected_id)
+
+    def _snapshot_payload(
+        self,
+        overview: MarketOverviewResponse,
+        selected_id: str,
+    ) -> dict[str, object]:
         self._overview = overview
         selected_details = self._selected_details.get(selected_id) or next(
             (row for row in overview.instruments if row.instrument_id == selected_id),

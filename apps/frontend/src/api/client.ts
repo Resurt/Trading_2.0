@@ -247,7 +247,9 @@ export const apiClient = {
       withQuery("/market/microstructure/summary", query),
     ),
   dataShadowStatus: () =>
-    requestJson<DataShadowStatusResponse>("/runtime/data-shadow/status"),
+    requestJson<DataShadowStatusResponse>("/runtime/data-shadow/status", {
+      timeoutMs: 5000,
+    }),
   hourlyReports: (query: Record<string, QueryValue>) =>
     requestJson<HourlyReportResponse[]>(withQuery("/reports/hourly", query)),
   dailyReports: (query: Record<string, QueryValue>) =>
