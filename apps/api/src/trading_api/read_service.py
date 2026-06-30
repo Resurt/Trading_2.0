@@ -940,6 +940,23 @@ class BffReadService:
             if collector_day_complete
             else None
         )
+        next_collection_window_at = (
+            None
+            if collector_day_complete
+            else _datetime_payload_value(lifecycle_payload, "next_collection_window_at")
+        )
+        preflight_next_session_at = _next_session_from_preflight(preflight_payload)
+        if (
+            collector_day_complete
+            and preflight_next_session_at is not None
+            and preflight_next_session_at <= datetime.now(tz=UTC) + timedelta(seconds=60)
+        ):
+            preflight_next_session_at = None
+        next_session_at = (
+            preflight_next_session_at
+            if collector_day_complete
+            else next_collection_window_at or preflight_next_session_at
+        )
         last_window_completed_at = (
             _datetime_payload_value(lifecycle_payload, "last_window_completed_at")
             if collector_paused or collector_day_complete
@@ -989,10 +1006,7 @@ class BffReadService:
             or _str_payload_value(result_payload, "error"),
             next_retry_at=_datetime_payload_value(lifecycle_payload, "next_retry_at")
             or _datetime_payload_value(result_payload, "next_retry_at"),
-            next_collection_window_at=_datetime_payload_value(
-                lifecycle_payload,
-                "next_collection_window_at",
-            ),
+            next_collection_window_at=next_collection_window_at,
             remaining_windows_today=_int_payload_value(
                 lifecycle_payload,
                 "remaining_windows_today",
@@ -1015,11 +1029,7 @@ class BffReadService:
             if lifecycle_payload.get("reason_code")
             else _str_payload_value(preflight_payload, "reason_code")
             or (command.reason_code if command is not None else None),
-            next_session_at=_datetime_payload_value(
-                lifecycle_payload,
-                "next_collection_window_at",
-            )
-            or _next_session_from_preflight(preflight_payload),
+            next_session_at=next_session_at,
             stream_alive=stream_alive,
             last_message_age_seconds=last_message_age_seconds,
             candles_received=None,

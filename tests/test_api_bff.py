@@ -1112,6 +1112,81 @@ def test_data_shadow_status_reports_auto_stopped_even_with_recent_snapshots(
     assert status.stopped_at == now - timedelta(seconds=3)
 
 
+def test_data_shadow_day_complete_suppresses_stale_next_collection_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TRADING_DATA_ONLY_SHADOW", "true")
+    database = DatabaseService(f"sqlite+pysqlite:///{tmp_path / 'day-complete.db'}")
+    Base.metadata.create_all(database.engine)
+    now = datetime.now(tz=UTC)
+    next_session = "2026-07-01T07:00:00+03:00"
+    stale_runtime_window = now + timedelta(seconds=30)
+    with database.session_scope() as session:
+        command_id = uuid4()
+        session.add(
+            RobotCommand(
+                command_id=command_id,
+                command_type="start",
+                requested_by="frontend_operator",
+                requested_role="operator",
+                requested_at=now - timedelta(minutes=20),
+                status="applied",
+                reason_code="data_only_collection_started",
+                accepted_at=now - timedelta(minutes=20),
+                applied_at=now - timedelta(minutes=20),
+                finished_at=now - timedelta(minutes=20),
+                payload={
+                    "preflight_result": {
+                        "market_open": False,
+                        "market_closed_expected": True,
+                        "session_type": "closed",
+                        "session_phase": "closed",
+                        "reason_code": "no_trading_window",
+                        "next_session_at": next_session,
+                    }
+                },
+                result_payload={
+                    "collector_state": "stopped_day_complete",
+                    "stopped_at": now.isoformat(),
+                },
+            )
+        )
+        session.add(
+            AuditEvent(
+                **session_context(),
+                audit_event_id=uuid4(),
+                ts_utc=now,
+                exchange_ts=None,
+                received_ts=now,
+                service="trade-core",
+                actor="runtime",
+                action="data_only_shadow_collection_day_complete",
+                entity_type="runtime",
+                entity_id=str(command_id),
+                severity="info",
+                correlation_id=str(command_id),
+                audit_payload={
+                    "collector_state": "stopped_day_complete",
+                    "day_collection_state": "completed_for_day",
+                    "daily_collection_active": False,
+                    "current_window_state": "stopped_day_complete",
+                    "next_collection_window_at": stale_runtime_window.isoformat(),
+                    "completed_for_day_at": now.isoformat(),
+                    "last_window_completed_at": now.isoformat(),
+                    "reason_code": "data_only_session_window_closed",
+                },
+            )
+        )
+
+    with database.session_factory() as session:
+        status = BffReadService(session).data_shadow_status()
+
+    assert status.collector_state == "stopped_day_complete"
+    assert status.next_collection_window_at is None
+    assert status.next_session_at == datetime.fromisoformat(next_session)
+
+
 def test_data_shadow_lifecycle_status_distinguishes_paused_collector(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
