@@ -142,6 +142,31 @@ class BffReadService:
         data_shadow_collector_state = str(
             data_shadow_lifecycle.get("collector_state") or "stopped"
         )
+        command = self._latest_robot_command()
+        command_payload = command.payload if command is not None else {}
+        result_payload = command.result_payload if command is not None else {}
+        if not isinstance(command_payload, dict):
+            command_payload = {}
+        if not isinstance(result_payload, dict):
+            result_payload = {}
+        command_status = _command_status_for_read_model(command, data_shadow_lifecycle)
+        preflight_phase = _str_payload_value(
+            data_shadow_lifecycle,
+            "preflight_phase",
+        ) or _str_payload_value(result_payload, "preflight_phase") or _str_payload_value(
+            command_payload,
+            "preflight_phase",
+        )
+        start_in_progress = bool(
+            command is not None
+            and command.command_type in {"start", "resume"}
+            and (
+                command.status in {"requested", "accepted"}
+                or data_shadow_collector_state in {"starting", "preflight_running"}
+                or preflight_phase
+                in {"preflight_pending", "preflight_running", "preflight_retrying"}
+            )
+        )
         if (
             robot_control_state == "running"
             and data_shadow_collector_state
@@ -166,10 +191,33 @@ class BffReadService:
             daily_collection_active=bool(
                 data_shadow_lifecycle.get("daily_collection_active")
             ),
-            effective_logging_state=str(
-                data_shadow_lifecycle.get("effective_logging_state")
-                or data_shadow_collector_state
+            effective_logging_state=_effective_logging_state(
+                collector_state=data_shadow_collector_state,
+                daily_collection_active=bool(
+                    data_shadow_lifecycle.get("daily_collection_active")
+                ),
+                start_in_progress=start_in_progress,
             ),
+            command_id=command.command_id if command is not None else None,
+            command_status=command_status,
+            preflight_phase=preflight_phase,
+            start_in_progress=start_in_progress,
+            start_requested_at=command.requested_at if command is not None else None,
+            preflight_started_at=_datetime_payload_value(
+                data_shadow_lifecycle,
+                "preflight_started_at",
+            )
+            or _datetime_payload_value(result_payload, "preflight_started_at"),
+            collector_started_at=_datetime_payload_value(
+                data_shadow_lifecycle,
+                "collector_started_at",
+            )
+            or _datetime_payload_value(result_payload, "started_at"),
+            last_command_error=_str_payload_value(data_shadow_lifecycle, "last_command_error")
+            or _str_payload_value(result_payload, "error"),
+            last_command_reason_code=command.reason_code if command is not None else None,
+            next_retry_at=_datetime_payload_value(data_shadow_lifecycle, "next_retry_at")
+            or _datetime_payload_value(result_payload, "next_retry_at"),
             session_source=current_session.source,
             session_stale=current_session.stale,
             session_stale_reason=current_session.stale_reason,
@@ -775,6 +823,11 @@ class BffReadService:
         enabled = _bool_env(os.environ.get("TRADING_DATA_ONLY_SHADOW"))
         command = self._latest_robot_command()
         result_payload = command.result_payload if command is not None else {}
+        command_payload = command.payload if command is not None else {}
+        if not isinstance(result_payload, dict):
+            result_payload = {}
+        if not isinstance(command_payload, dict):
+            command_payload = {}
         preflight_payload = _preflight_payload_from_command(command)
         collector_state = _collector_state_from_command(command, stream_alive=False)
         last_message_age_seconds: Decimal | None = None
@@ -809,6 +862,22 @@ class BffReadService:
             or collector_state == "paused_until_next_window"
         ):
             stream_alive = False
+        command_status = _command_status_for_read_model(command, lifecycle_payload)
+        preflight_phase = (
+            _str_payload_value(lifecycle_payload, "preflight_phase")
+            or _str_payload_value(result_payload, "preflight_phase")
+            or _str_payload_value(command_payload, "preflight_phase")
+        )
+        start_in_progress = bool(
+            command is not None
+            and command.command_type in {"start", "resume"}
+            and (
+                command.status in {"requested", "accepted"}
+                or collector_state in {"starting", "preflight_running"}
+                or preflight_phase
+                in {"preflight_pending", "preflight_running", "preflight_retrying"}
+            )
+        )
         warnings = []
         if enabled and collector_state in {"collecting", "starting"} and not stream_alive:
             warnings.append("collector_no_recent_samples")
@@ -822,9 +891,36 @@ class BffReadService:
             stream_alive=stream_alive,
             last_message_age_seconds=last_message_age_seconds,
         )
+        collector_paused = collector_state == "paused_until_next_window"
+        collector_stopped = _collector_state_is_stopped(collector_state)
+        collector_day_complete = collector_state == "stopped_day_complete" or str(
+            lifecycle_payload.get("day_collection_state") or ""
+        ) in {"completed", "completed_for_day"}
+        paused_at = (
+            _datetime_payload_value(lifecycle_payload, "paused_at")
+            if collector_paused
+            else None
+        )
+        completed_for_day_at = (
+            _datetime_payload_value(lifecycle_payload, "completed_for_day_at")
+            if collector_day_complete
+            else None
+        )
+        last_window_completed_at = (
+            _datetime_payload_value(lifecycle_payload, "last_window_completed_at")
+            if collector_paused or collector_day_complete
+            else None
+        )
+        stopped_at = (
+            _datetime_payload_value(lifecycle_payload, "stopped_at")
+            or _datetime_payload_value(result_payload, "stopped_at")
+            if collector_stopped and not collector_paused
+            else None
+        )
         return DataShadowStatusResponse(
             enabled=enabled,
             collector_state=collector_state,
+            data_shadow_collector_state=collector_state,
             day_collection_state=str(
                 lifecycle_payload.get("day_collection_state") or "inactive"
             ),
@@ -836,6 +932,29 @@ class BffReadService:
                 or lifecycle_payload.get("window_collector_state")
                 or collector_state
             ),
+            effective_logging_state=_effective_logging_state(
+                collector_state=collector_state,
+                daily_collection_active=bool(lifecycle_payload.get("daily_collection_active")),
+                start_in_progress=start_in_progress,
+            ),
+            command_status=command_status,
+            preflight_phase=preflight_phase,
+            start_in_progress=start_in_progress,
+            start_requested_at=command.requested_at if command is not None else None,
+            preflight_started_at=_datetime_payload_value(
+                lifecycle_payload,
+                "preflight_started_at",
+            )
+            or _datetime_payload_value(result_payload, "preflight_started_at"),
+            collector_started_at=_datetime_payload_value(
+                lifecycle_payload,
+                "collector_started_at",
+            )
+            or _datetime_payload_value(result_payload, "started_at"),
+            last_command_error=_str_payload_value(lifecycle_payload, "last_command_error")
+            or _str_payload_value(result_payload, "error"),
+            next_retry_at=_datetime_payload_value(lifecycle_payload, "next_retry_at")
+            or _datetime_payload_value(result_payload, "next_retry_at"),
             next_collection_window_at=_datetime_payload_value(
                 lifecycle_payload,
                 "next_collection_window_at",
@@ -845,18 +964,12 @@ class BffReadService:
                 "remaining_windows_today",
             ),
             collector_left_running=collector_state == "collecting" and stream_alive,
-            paused_at=_datetime_payload_value(lifecycle_payload, "paused_at"),
-            completed_for_day_at=_datetime_payload_value(
-                lifecycle_payload,
-                "completed_for_day_at",
-            ),
+            paused_at=paused_at,
+            completed_for_day_at=completed_for_day_at,
             last_stop_reason=_str_payload_value(lifecycle_payload, "last_stop_reason"),
             last_pause_reason=_str_payload_value(lifecycle_payload, "last_pause_reason"),
             last_resume_at=_datetime_payload_value(lifecycle_payload, "last_resume_at"),
-            last_window_completed_at=_datetime_payload_value(
-                lifecycle_payload,
-                "last_window_completed_at",
-            ),
+            last_window_completed_at=last_window_completed_at,
             strategy_trading_disabled=enabled,
             real_orders_disabled=True,
             market_open=_bool_payload_value(preflight_payload, "market_open"),
@@ -883,10 +996,7 @@ class BffReadService:
             avg_market_quality_score=_decimal_or_none(avg_quality),
             current_session=latest_session or _str_payload_value(preflight_payload, "session_type"),
             started_at=_datetime_payload_value(result_payload, "started_at"),
-            stopped_at=None
-            if collector_state == "paused_until_next_window"
-            else _datetime_payload_value(lifecycle_payload, "stopped_at")
-            or _datetime_payload_value(result_payload, "stopped_at"),
+            stopped_at=stopped_at,
             last_command_id=command.command_id if command is not None else None,
             last_command_status=command.status if command is not None else None,
             last_command_reason_code=command.reason_code if command is not None else None,
@@ -1016,6 +1126,12 @@ class BffReadService:
             "daily_collection_active": daily_collection_active,
             "effective_logging_state": effective_logging_state,
             "day_collection_state": str(payload.get("day_collection_state") or "inactive"),
+            "preflight_phase": payload.get("preflight_phase"),
+            "preflight_started_at": payload.get("preflight_started_at"),
+            "collector_started_at": payload.get("collector_started_at"),
+            "last_command_error": payload.get("last_command_error"),
+            "next_retry_at": payload.get("next_retry_at"),
+            "command_status": payload.get("command_status"),
         }
 
     def _latest_robot_command(self) -> RobotCommand | None:
@@ -1036,6 +1152,9 @@ class BffReadService:
             "data_only_shadow_collection_stopped",
             "data_only_shadow_collection_auto_stopped",
             "data_only_shadow_collection_resume_failed",
+            "data_only_shadow_preflight_started",
+            "data_only_shadow_preflight_retrying",
+            "robot_command_blocked_preflight",
         }
         filters: list[ColumnElement[bool]] = [AuditEvent.action.in_(lifecycle_actions)]
         if command is not None:
@@ -2494,6 +2613,14 @@ def _collector_state_from_command(command: RobotCommand | None, *, stream_alive:
         if raw_state == "collecting" and not stream_alive:
             return "collecting"
         return raw_state
+    command_payload = command.payload if isinstance(command.payload, dict) else {}
+    preflight_phase = command_payload.get("preflight_phase")
+    if (
+        command.command_type in {"start", "resume"}
+        and command.status in {"requested", "accepted"}
+        and preflight_phase in {"preflight_pending", "preflight_running", "preflight_retrying"}
+    ):
+        return "preflight_running" if command.status == "accepted" else "starting"
     if command.status == "rejected":
         return "preflight_blocked"
     if command.status in {"requested", "accepted"}:
@@ -2507,6 +2634,42 @@ def _collector_state_from_command(command: RobotCommand | None, *, stream_alive:
         return "collecting" if stream_alive else "collecting"
     if command.status == "failed":
         return "degraded"
+    return "stopped"
+
+
+def _command_status_for_read_model(
+    command: RobotCommand | None,
+    lifecycle_payload: JsonPayload,
+) -> str | None:
+    if command is None:
+        return None
+    command_payload = command.payload if isinstance(command.payload, dict) else {}
+    result_payload = command.result_payload if isinstance(command.result_payload, dict) else {}
+    for payload in (lifecycle_payload, result_payload, command_payload):
+        value = payload.get("command_status") or payload.get("preflight_phase")
+        if isinstance(value, str) and value:
+            return value
+    if command.status == "requested" and command.command_type in {"start", "resume"}:
+        return "preflight_pending"
+    if command.status == "accepted" and command.command_type in {"start", "resume"}:
+        return "preflight_running"
+    return command.status
+
+
+def _effective_logging_state(
+    *,
+    collector_state: str,
+    daily_collection_active: bool,
+    start_in_progress: bool,
+) -> str:
+    if start_in_progress:
+        return "start_pending"
+    if daily_collection_active and collector_state == "paused_until_next_window":
+        return "paused_until_next_window"
+    if daily_collection_active and collector_state in {"collecting", "starting"}:
+        return "collecting"
+    if collector_state in {"preflight_blocked", "degraded", "failed"}:
+        return collector_state
     return "stopped"
 
 

@@ -34,6 +34,7 @@ class ReportScope(StrEnum):
 
 class RobotCommandResponse(BaseModel):
     accepted: bool
+    queued: bool = False
     command_id: UUID | None = None
     command: RobotCommand
     command_type: str | None = None
@@ -44,6 +45,9 @@ class RobotCommandResponse(BaseModel):
     reason_code: str | None = None
     payload: JsonPayload = Field(default_factory=dict)
     preflight_result: JsonPayload | None = None
+    preflight_summary: JsonPayload | None = None
+    next_poll_after_seconds: int | None = None
+    effective_logging_state: str | None = None
     message: str
 
 
@@ -107,6 +111,16 @@ class RobotStatusResponse(BaseModel):
     data_shadow_collector_state: str | None = None
     daily_collection_active: bool = False
     effective_logging_state: str = "stopped"
+    command_id: UUID | None = None
+    command_status: str | None = None
+    preflight_phase: str | None = None
+    start_in_progress: bool = False
+    start_requested_at: datetime | None = None
+    preflight_started_at: datetime | None = None
+    collector_started_at: datetime | None = None
+    last_command_error: str | None = None
+    last_command_reason_code: str | None = None
+    next_retry_at: datetime | None = None
     micro_session_id: str | None = None
     session_source: str = "runtime_session_snapshot"
     session_stale: bool = False
@@ -336,9 +350,19 @@ class MarketMicrostructureSummaryResponse(BaseModel):
 class DataShadowStatusResponse(BaseModel):
     enabled: bool
     collector_state: str = "stopped"
+    data_shadow_collector_state: str | None = None
     day_collection_state: str = "inactive"
     daily_collection_active: bool = False
     current_window_state: str = "stopped"
+    effective_logging_state: str = "stopped"
+    command_status: str | None = None
+    preflight_phase: str | None = None
+    start_in_progress: bool = False
+    start_requested_at: datetime | None = None
+    preflight_started_at: datetime | None = None
+    collector_started_at: datetime | None = None
+    last_command_error: str | None = None
+    next_retry_at: datetime | None = None
     next_collection_window_at: datetime | None = None
     remaining_windows_today: int = 0
     collector_left_running: bool = False

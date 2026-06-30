@@ -153,7 +153,7 @@ def create_fastapi_app(
     )
 
     @app.get("/health", tags=["health"])
-    def get_health() -> Response:
+    async def get_health() -> Response:
         return Response(
             content=render_health(ServiceHealth(identity=identity, status=HealthStatus.OK)),
             media_type="application/json; charset=utf-8",
@@ -201,24 +201,41 @@ def create_fastapi_app(
     ) -> RobotCommandResponse:
         allowed_auth = require_role(auth, (ApiRole.OPERATOR, ApiRole.ADMIN))
         control = _robot_control(request)
+        payload_dict = dict(payload or {})
         requested_instruments = _requested_instruments_csv(
-            dict(payload or {}).get("requested_instruments")
+            payload_dict.get("requested_instruments") or payload_dict.get("instruments")
         )
-        preflight = await _run_session_preflight(request, instruments=requested_instruments)
-        preflight_payload = preflight.model_dump(mode="json")
+        instrument_list = [
+            item.strip()
+            for item in requested_instruments.split(",")
+            if item.strip()
+        ]
+        _dashboard_market_feed(request.app).pause_broker_calls(
+            seconds=_float_env("DASHBOARD_FEED_PAUSE_DURING_START_SECONDS", 120.0),
+            reason="start_preflight_pending",
+        )
+        preflight: SessionPreflightResponse | None = None
+        preflight_payload: dict[str, object] | None = None
         command_payload: dict[str, object] = {
-            **dict(payload or {}),
+            **payload_dict,
             "preflight_result": preflight_payload,
             "mode": "data_shadow",
             "trading_disabled": True,
             "data_only_shadow": True,
-            "requested_instruments": [
-                item.strip()
-                for item in requested_instruments.split(",")
-                if item.strip()
-            ],
+            "real_orders_disabled": True,
+            "strategy_trading_disabled": True,
+            "requested_instruments": instrument_list,
+            "instruments": instrument_list,
+            "preflight_required": True,
+            "preflight_phase": "preflight_pending",
+            "authoritative_preflight": "trade_core",
+            "broker_preflight_retries": _int_env("TRADING_SESSION_PREFLIGHT_RETRY_COUNT", 2),
         }
-        if not preflight.data_only_collection_allowed:
+        if (
+            os.getenv("TRADING_API_LEGACY_SYNC_PREFLIGHT_REJECT") == "1"
+            and preflight is not None
+            and not preflight.data_only_collection_allowed
+        ):
             if preflight.official_exchange_closed:
                 message = (
                     "Официальная сессия MOEX закрыта: ДСВД 20-21 июня отменена. "
@@ -242,8 +259,13 @@ def create_fastapi_app(
             command=RobotCommand.START,
             auth=allowed_auth,
             payload=command_payload,
+            reason_code="preflight_pending",
+            response_status="preflight_pending",
+            queued=True,
+            next_poll_after_seconds=2,
+            effective_logging_state="start_pending",
+            message="Запуск сбора логов запрошен. Проверяю сессию.",
         )
-        response.message = "Data-only collection start requested. Trading disabled."
         return response
 
     @app.post("/robot/stop", response_model=RobotCommandResponse, tags=["robot"])
@@ -259,8 +281,13 @@ def create_fastapi_app(
                 "data_only_shadow": True,
                 "reason_code": "operator_stop_requested",
             },
+            reason_code="operator_stop_requested",
+            response_status="stop_requested",
+            queued=True,
+            next_poll_after_seconds=2,
+            effective_logging_state="stop_pending",
+            message="Остановка сбора логов запрошена.",
         )
-        response.message = "Data-only collection stop requested. Trading disabled."
         return response
 
     @app.post("/robot/pause", response_model=RobotCommandResponse, tags=["robot"])
@@ -566,7 +593,7 @@ def create_fastapi_app(
         response_model=DataShadowStatusResponse,
         tags=["runtime"],
     )
-    def data_shadow_status(service: ReadServiceDep) -> DataShadowStatusResponse:
+    async def data_shadow_status(service: ReadServiceDep) -> DataShadowStatusResponse:
         return service.data_shadow_status()
 
     @app.get("/reports/hourly", response_model=list[HourlyReportResponse], tags=["reports"])
@@ -1760,14 +1787,8 @@ async def _fresh_operator_preflight_or_none(
     *,
     instruments: str | None = None,
 ) -> SessionPreflightResponse | None:
-    try:
-        return await _run_session_preflight(
-            request,
-            instruments=instruments or _default_preflight_instruments(),
-            use_cache=False,
-        )
-    except Exception:
-        return None
+    del instruments
+    return await _dashboard_preflight_or_none(request)
 
 
 async def _dashboard_preflight_or_none(request: Request) -> SessionPreflightResponse | None:
@@ -1815,7 +1836,7 @@ async def _run_dashboard_session_preflight_from_app(
         TradingSessionPreflightService,
     )
 
-    refs = _instrument_refs_for_preflight(database, None)
+    refs = await asyncio.to_thread(_instrument_refs_for_preflight, database, None)
     cached = _cached_session_preflight(
         app,
         _session_preflight_cache_key(refs),
@@ -2508,6 +2529,20 @@ def _default_preflight_instruments() -> str:
     return os.getenv("TRADING_INSTRUMENTS", "SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR")
 
 
+def _float_env(name: str, default: float) -> float:
+    try:
+        return max(0.0, float(os.getenv(name, str(default))))
+    except ValueError:
+        return default
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return max(0, int(os.getenv(name, str(default))))
+    except ValueError:
+        return default
+
+
 def _requested_instruments_csv(value: object) -> str:
     if isinstance(value, (list, tuple)):
         instruments = [str(item).strip() for item in value if str(item).strip()]
@@ -2625,17 +2660,12 @@ async def _dashboard_market_feed_snapshot(
     force: bool = False,
     preflight: SessionPreflightResponse | None = None,
 ) -> dict[str, object]:
-    base_overview = _market_overview_with_cached_quotes(
-        request.app,
-        service.market_overview(
-            instruments=instruments,
-            include_details=False,
-            preflight=preflight,
-        ),
-    )
-    refs = _instrument_refs_for_preflight(
-        _database_service(request),
-        instruments or _default_preflight_instruments(),
+    del service
+    base_overview, refs = await asyncio.to_thread(
+        _dashboard_market_feed_base_and_refs,
+        cast(FastAPI, request.app),
+        instruments=instruments,
+        preflight=preflight,
     )
     feed = _dashboard_market_feed(request.app)
     timeout_seconds = float(os.environ.get("DASHBOARD_MARKET_FEED_SNAPSHOT_TIMEOUT_SECONDS", "6"))
@@ -2671,19 +2701,11 @@ async def _dashboard_market_feed_snapshot_from_app(
 ) -> dict[str, object]:
     database = _database_service_from_app(app)
     preflight = await _dashboard_preflight_or_none_from_app(app, database)
-    with database.session_scope() as session:
-        service = BffReadService(session)
-        base_overview = _market_overview_with_cached_quotes(
-            app,
-            service.market_overview(
-                instruments=instruments,
-                include_details=False,
-                preflight=preflight,
-            ),
-        )
-    refs = _instrument_refs_for_preflight(
-        database,
-        instruments or _default_preflight_instruments(),
+    base_overview, refs = await asyncio.to_thread(
+        _dashboard_market_feed_base_and_refs,
+        app,
+        instruments=instruments,
+        preflight=preflight,
     )
     feed = _dashboard_market_feed(app)
     timeout_seconds = float(os.environ.get("DASHBOARD_MARKET_FEED_SNAPSHOT_TIMEOUT_SECONDS", "6"))
@@ -2767,6 +2789,32 @@ def _dashboard_market_feed_timeout_snapshot(
     }
 
 
+def _dashboard_market_feed_base_and_refs(
+    app: FastAPI,
+    *,
+    instruments: str | None,
+    preflight: SessionPreflightResponse | None,
+) -> tuple[MarketOverviewResponse, list[Any]]:
+    """Build the dashboard read model away from the FastAPI event loop."""
+
+    database = _database_service_from_app(app)
+    with database.session_scope() as session:
+        service = BffReadService(session)
+        base_overview = _market_overview_with_cached_quotes(
+            app,
+            service.market_overview(
+                instruments=instruments,
+                include_details=False,
+                preflight=preflight,
+            ),
+        )
+    refs = _instrument_refs_for_preflight(
+        database,
+        instruments or _default_preflight_instruments(),
+    )
+    return base_overview, refs
+
+
 def _report_task_client(request: Request) -> ReportTaskClient:
     return cast(ReportTaskClient, request.app.state.report_task_client)
 
@@ -2784,7 +2832,7 @@ def _cors_origins_from_env() -> list[str]:
 
 
 def _ws_push_interval_from_env() -> float:
-    return max(0.05, float(os.getenv("TRADING_WS_PUSH_INTERVAL_SECONDS", "1.0")))
+    return max(0.05, float(os.getenv("TRADING_WS_PUSH_INTERVAL_SECONDS", "3.0")))
 
 
 def _ensure_historical_api_mode(runtime_mode: RuntimeMode) -> None:

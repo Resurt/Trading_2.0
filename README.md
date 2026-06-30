@@ -298,13 +298,18 @@ a strategy failure:
 python scripts/run_data_only_shadow_smoke.py --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR --minutes 0 --preflight-only --require-dividend-sync --json-output
 ```
 
-The dashboard Start action calls `/session/preflight` first. If `market_open=false`,
-the UI shows a rejected/preflight-blocked command with `reason_code` and
-`next_session_at` and does not call `POST /robot/start`. Direct `POST /robot/start`
-calls are also guarded by API preflight and return
-`accepted=false` when the market is closed or unavailable.
-The API keeps a short 30-second server-side preflight cache so the Start request can
-reuse the fresh dashboard preflight result instead of repeating a slow broker status pass.
+The dashboard Start action may call `/session/preflight` first, but that check is
+advisory. A broker preflight timeout must not dead-end the operator click. The
+button calls `POST /robot/start`, which quickly creates a durable command with
+`status=preflight_pending`, `command_id`, `queued=true` and
+`effective_logging_state=start_pending`. `trade-core` performs the authoritative
+fresh preflight/retry in the background and then either starts data-only
+collection or marks the command blocked with `reason_code` and `next_session_at`
+when available.
+Dashboard readonly quote/order-book refresh uses a bounded broker executor and is
+briefly paused during Start so it does not starve the command preflight. API
+`/health` is service liveness; broker connectivity degradation belongs in status
+payloads, not in the container health endpoint.
 For incident triage, compare the CLI result with
 `GET /session/preflight?...&cache=false`. If T-Bank `TradingSchedules` omits the
 current local MOEX fallback window but broker `GetTradingStatus` reports exchange
@@ -347,7 +352,8 @@ from primary calibration/logging tables. The protected CLI is
 
 The Start button must show an animated preflight/start progress state, not a silent
 disabled button. The command strip shows the phase, message, reason code and next
-session time when available.
+session time when available. Success and already-running messages auto-dismiss
+after 10-15 seconds; blocked/failed messages remain dismissible.
 
 Broker balance can be refreshed independently of market hours. This is readonly account
 state for operator visibility and never enables trading:

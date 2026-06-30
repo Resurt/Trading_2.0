@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import os
 from collections.abc import Awaitable, Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
@@ -16,6 +17,7 @@ from trading_api.market_quality import calculate_market_quality, calculate_sprea
 from trading_api.schemas import MarketInstrumentOverview, MarketOverviewResponse
 
 GatewayFactory = Callable[[], Any]
+_READONLY_BROKER_EXECUTOR: ThreadPoolExecutor | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,10 +25,10 @@ class DashboardMarketFeedConfig:
     """Runtime knobs for the readonly dashboard feed."""
 
     enabled: bool = True
-    quote_refresh_seconds: float = 2.0
-    selected_book_refresh_seconds: float = 1.0
-    trades_refresh_seconds: float = 1.0
-    session_refresh_seconds: float = 5.0
+    quote_refresh_seconds: float = 5.0
+    selected_book_refresh_seconds: float = 10.0
+    trades_refresh_seconds: float = 15.0
+    session_refresh_seconds: float = 30.0
     max_instruments: int = 8
     last_price_max_exchange_age_seconds: float = 10.0
     order_book_max_exchange_age_seconds: float = 5.0
@@ -36,12 +38,12 @@ class DashboardMarketFeedConfig:
     def from_env(cls) -> DashboardMarketFeedConfig:
         return cls(
             enabled=_env_bool("DASHBOARD_MARKET_FEED_ENABLED", True),
-            quote_refresh_seconds=_env_float("DASHBOARD_QUOTE_REFRESH_SECONDS", 2.0),
+            quote_refresh_seconds=_env_float("DASHBOARD_QUOTE_REFRESH_SECONDS", 5.0),
             selected_book_refresh_seconds=_env_float(
-                "DASHBOARD_SELECTED_BOOK_REFRESH_SECONDS", 1.0
+                "DASHBOARD_SELECTED_BOOK_REFRESH_SECONDS", 10.0
             ),
-            trades_refresh_seconds=_env_float("DASHBOARD_TRADES_REFRESH_SECONDS", 1.0),
-            session_refresh_seconds=_env_float("DASHBOARD_SESSION_REFRESH_SECONDS", 5.0),
+            trades_refresh_seconds=_env_float("DASHBOARD_TRADES_REFRESH_SECONDS", 15.0),
+            session_refresh_seconds=_env_float("DASHBOARD_SESSION_REFRESH_SECONDS", 30.0),
             max_instruments=max(1, _env_int("DASHBOARD_FEED_MAX_INSTRUMENTS", 8)),
             last_price_max_exchange_age_seconds=_env_float(
                 "DASHBOARD_LAST_PRICE_MAX_EXCHANGE_AGE_SECONDS", 10.0
@@ -76,6 +78,8 @@ class DashboardMarketFeedService:
     _selected_instrument: str | None = None
     _errors: list[str] = field(default_factory=list)
     _warnings: list[str] = field(default_factory=list)
+    _broker_calls_paused_until: datetime | None = None
+    _broker_calls_pause_reason: str | None = None
 
     def status(self) -> dict[str, object]:
         overview = self._overview
@@ -119,9 +123,38 @@ class DashboardMarketFeedService:
                 selected and selected.order_book_source and not selected.order_book_stale
             ),
             "trade_tape_available": bool(selected and selected.recent_market_trades),
+            "broker_calls_paused_until": (
+                self._broker_calls_paused_until.isoformat()
+                if self._broker_calls_paused_until is not None
+                else None
+            ),
+            "broker_calls_pause_reason": self._broker_calls_pause_reason,
             "errors": list(self._errors[-5:]),
             "warnings": list(self._warnings[-8:]),
         }
+
+    def pause_broker_calls(self, *, seconds: float, reason: str) -> None:
+        if seconds <= 0:
+            return
+        paused_until = datetime.now(tz=UTC) + timedelta(seconds=seconds)
+        if (
+            self._broker_calls_paused_until is None
+            or paused_until > self._broker_calls_paused_until
+        ):
+            self._broker_calls_paused_until = paused_until
+        self._broker_calls_pause_reason = reason
+        self._record_warning(reason)
+
+    def _broker_calls_paused(self) -> bool:
+        paused_until = self._broker_calls_paused_until
+        if paused_until is None:
+            return False
+        if datetime.now(tz=UTC) < paused_until:
+            return True
+        self._broker_calls_paused_until = None
+        self._broker_calls_pause_reason = None
+        self._clear_warning("start_preflight_pending")
+        return False
 
     async def snapshot(
         self,
@@ -166,6 +199,10 @@ class DashboardMarketFeedService:
         include_trades: bool,
         force: bool,
     ) -> dict[str, object]:
+        if self._broker_calls_paused():
+            self._record_warning(self._broker_calls_pause_reason or "broker_calls_paused")
+            overview = _merge_overviews(overview, self._overview)
+            return self._snapshot_payload(overview, selected_id)
         if self.config.enabled:
             overview = await self._refresh_quotes_if_needed(
                 overview=overview,
@@ -1262,7 +1299,11 @@ async def _run_readonly_broker_call(
             return asyncio.run(_await_any(result))
         return result
 
-    return await asyncio.wait_for(asyncio.to_thread(_invoke), timeout=timeout_seconds)
+    loop = asyncio.get_running_loop()
+    return await asyncio.wait_for(
+        loop.run_in_executor(_readonly_broker_executor(), _invoke),
+        timeout=timeout_seconds,
+    )
 
 
 async def _await_any(awaitable: Awaitable[Any]) -> Any:
@@ -1288,6 +1329,17 @@ def _env_int(name: str, default: int) -> int:
         return int(os.getenv(name, str(default)))
     except ValueError:
         return default
+
+
+def _readonly_broker_executor() -> ThreadPoolExecutor:
+    global _READONLY_BROKER_EXECUTOR
+    if _READONLY_BROKER_EXECUTOR is None:
+        max_workers = max(1, _env_int("BROKER_READONLY_MAX_CONCURRENCY", 4))
+        _READONLY_BROKER_EXECUTOR = ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix="dashboard-broker-readonly",
+        )
+    return _READONLY_BROKER_EXECUTOR
 
 
 __all__ = ["DashboardMarketFeedConfig", "DashboardMarketFeedService"]

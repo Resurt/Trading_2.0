@@ -237,23 +237,29 @@ export const useRobotStore = defineStore("robot", () => {
 
   async function startRobot(): Promise<void> {
     startLoading.value = true;
-    commandPhase.value = "preflight";
+    commandPhase.value = "start_command";
     setCommandState({
-      status: "checking_preflight",
-      message: "Проверяю торговую сессию.",
-      reasonCode: "session_preflight_running",
+      status: "preflight_pending",
+      message: "Запуск сбора логов запрошен. Проверяю сессию...",
+      reasonCode: "preflight_pending",
     });
+    let advisoryPreflight: SessionPreflightResponse | null = null;
     try {
-      const preflight = await apiClient.sessionPreflight({
+      advisoryPreflight = await apiClient.sessionPreflightFast({
         instruments: CORE_UNIVERSE,
         mode: "data_shadow",
-        cache: false,
+        cache: true,
       });
-      applySessionPreflight(preflight);
-      if (!preflight.market_open || !preflight.data_only_collection_allowed) {
-        setCommandFromPreflight(preflight);
-        return;
-      }
+      applySessionPreflight(advisoryPreflight);
+    } catch {
+      advisoryPreflight = null;
+      setCommandState({
+        status: "preflight_pending",
+        message: "Брокер временно не ответил, повторяю проверку...",
+        reasonCode: "preflight_retrying",
+      });
+    }
+    try {
       commandPhase.value = "start_command";
       setCommandState({
         status: "start_requesting",
@@ -267,16 +273,17 @@ export const useRobotStore = defineStore("robot", () => {
         requested_instruments: CORE_UNIVERSE,
         real_orders_disabled: true,
         strategy_trading_disabled: true,
-        preflight_result: preflight,
+        preflight_result: advisoryPreflight,
       });
       setCommandFromResponse(response);
-      void pollDataShadowStatusUntilSettled();
+      if (!commandResponseIsFinal(response)) {
+        void pollDataShadowStatusUntilSettled();
+      }
     } catch (unknownError) {
       setCommandState({
-        status: "preflight_failed",
-        message: `Не удалось проверить торговую сессию. Сбор не запущен. ${errorMessage(unknownError)}`,
-        reasonCode: "preflight_unavailable",
-        autoDismissMs: COMMAND_AUTO_DISMISS_MS,
+        status: "start_command_failed",
+        message: `Не удалось отправить команду Start: ${errorMessage(unknownError)}`,
+        reasonCode: "start_command_unavailable",
       });
     } finally {
       startLoading.value = false;
@@ -391,6 +398,12 @@ export const useRobotStore = defineStore("robot", () => {
     });
   }
 
+  function blockedCommandMessage(reasonCode: string | null, nextSessionAt: string | null): string {
+    const reason = reasonCode ?? "preflight_blocked";
+    const nextSession = nextSessionAt ? ` Следующая сессия: ${nextSessionAt}.` : "";
+    return `Сбор логов не запущен: ${reason}.${nextSession}`;
+  }
+
   function setCommandFromResponse(response: RobotCommandResponse): void {
     const preflight = response.preflight_result as Partial<SessionPreflightResponse> | null;
     setCommandState({
@@ -398,8 +411,24 @@ export const useRobotStore = defineStore("robot", () => {
       message: commandMessageFromResponse(response),
       reasonCode: response.reason_code,
       nextSessionAt: preflight?.next_session_at ?? null,
-      autoDismissMs: COMMAND_AUTO_DISMISS_MS,
+      autoDismissMs: commandAutoDismissMs(response.status),
     });
+  }
+
+  function commandAutoDismissMs(commandStatus: string): number | null {
+    return ["collecting", "start_applied", "already_running", "already_collecting", "stop_requested"]
+      .includes(commandStatus)
+      ? COMMAND_AUTO_DISMISS_MS
+      : null;
+  }
+
+  function commandResponseIsFinal(response: RobotCommandResponse): boolean {
+    return (
+      response.status === "already_running" ||
+      response.status === "already_collecting" ||
+      response.status === "collecting" ||
+      response.status === "start_applied"
+    );
   }
 
   function setCommandState(payload: {
@@ -444,6 +473,26 @@ export const useRobotStore = defineStore("robot", () => {
 
   function commandMessageFromResponse(response: RobotCommandResponse): string {
     if (
+      response.status === "preflight_pending" ||
+      response.status === "start_requested" ||
+      response.reason_code === "preflight_pending"
+    ) {
+      return "Запуск сбора логов запрошен. Проверяю сессию...";
+    }
+    if (
+      response.status === "preflight_retrying" ||
+      response.reason_code === "preflight_retrying"
+    ) {
+      return "Брокер временно не ответил, повторяю проверку...";
+    }
+    if (
+      response.status === "collecting" ||
+      response.status === "start_applied" ||
+      response.reason_code === "data_only_collection_started"
+    ) {
+      return "Сбор логов запущен.";
+    }
+    if (
       response.reason_code === "data_only_collection_already_collecting" ||
       response.reason_code === "data_only_collection_already_running" ||
       response.status === "already_running" ||
@@ -465,18 +514,55 @@ export const useRobotStore = defineStore("robot", () => {
 
   async function pollDataShadowStatusUntilSettled(): Promise<void> {
     const market = useMarketStore();
-    for (let attempt = 0; attempt < 8; attempt += 1) {
+    for (let attempt = 0; attempt < 30; attempt += 1) {
       await market.fetchDataShadowStatus();
       const state = market.dataShadowStatus.collector_state;
+      const commandStatus = market.dataShadowStatus.command_status;
+      const preflightPhase = market.dataShadowStatus.preflight_phase;
+      if (
+        commandStatus === "preflight_retrying" ||
+        preflightPhase === "preflight_retrying"
+      ) {
+        setCommandState({
+          status: "preflight_retrying",
+          message: "Брокер временно не ответил, повторяю проверку...",
+          reasonCode: market.dataShadowStatus.reason_code ?? "preflight_retrying",
+        });
+      } else if (
+        commandStatus === "preflight_pending" ||
+        preflightPhase === "preflight_pending" ||
+        preflightPhase === "preflight_running"
+      ) {
+        setCommandState({
+          status: "preflight_pending",
+          message: "Запуск сбора логов запрошен. Проверяю сессию...",
+          reasonCode: market.dataShadowStatus.reason_code ?? "preflight_pending",
+        });
+      }
       if (
         state === "collecting" ||
         state === "stopped_by_operator" ||
         state === "preflight_blocked" ||
         state === "degraded"
       ) {
+        if (state === "collecting") {
+          setCommandState({
+            status: "collecting",
+            message: "Сбор логов запущен.",
+            reasonCode: market.dataShadowStatus.reason_code,
+            autoDismissMs: COMMAND_AUTO_DISMISS_MS,
+          });
+        } else if (state === "preflight_blocked") {
+          setCommandState({
+            status: "blocked_by_preflight",
+            message: blockedCommandMessage(market.dataShadowStatus.reason_code, market.dataShadowStatus.next_session_at),
+            reasonCode: market.dataShadowStatus.reason_code,
+            nextSessionAt: market.dataShadowStatus.next_session_at,
+          });
+        }
         return;
       }
-      await new Promise((resolve) => window.setTimeout(resolve, 1500));
+      await new Promise((resolve) => window.setTimeout(resolve, 2000));
     }
   }
 

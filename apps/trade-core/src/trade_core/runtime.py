@@ -303,6 +303,11 @@ class TradeCoreRuntimeStats:
     last_command_id: str | None = None
     last_command_status: str | None = None
     last_command_reason_code: str | None = None
+    preflight_phase: str | None = None
+    start_requested_at: datetime | None = None
+    preflight_started_at: datetime | None = None
+    last_command_error: str | None = None
+    next_retry_at: datetime | None = None
     data_only_order_book_polls: int = 0
     data_only_order_book_poll_errors: int = 0
     last_data_only_order_book_poll_at: datetime | None = None
@@ -1453,6 +1458,58 @@ class TradeCoreRuntime:
         )
         return result.as_payload()
 
+    async def _fresh_data_only_preflight_payload_with_retries(
+        self,
+        *,
+        command: RobotCommand,
+        now: datetime,
+    ) -> JsonPayload:
+        retry_count = max(0, _int_env("TRADING_SESSION_PREFLIGHT_RETRY_COUNT", 2))
+        backoff_seconds = max(
+            0.1,
+            _float_env("TRADING_SESSION_PREFLIGHT_RETRY_BACKOFF_SECONDS", 2.0),
+        )
+        attempts = retry_count + 1
+        last_error: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            self.stats.preflight_phase = "preflight_running"
+            self.stats.preflight_started_at = (
+                self.stats.preflight_started_at or datetime.now(tz=UTC)
+            )
+            self.stats.next_retry_at = None
+            self._write_audit_event(
+                action="data_only_shadow_preflight_started"
+                if attempt == 1
+                else "data_only_shadow_preflight_retrying",
+                severity="info" if attempt == 1 else "warning",
+                payload={
+                    **self._data_only_lifecycle_payload(),
+                    "command_id": str(command.command_id),
+                    "attempt": attempt,
+                    "attempts": attempts,
+                    "readonly_calls_only": True,
+                    "real_orders_disabled": True,
+                    "strategy_trading_disabled": True,
+                },
+            )
+            try:
+                payload = await self._fresh_data_only_preflight_payload(now=now)
+                self.stats.preflight_phase = "preflight_completed"
+                self.stats.next_retry_at = None
+                self.stats.last_command_error = None
+                return payload
+            except Exception as exc:
+                last_error = exc
+                self.stats.last_command_error = str(exc)
+                if attempt >= attempts:
+                    break
+                retry_at = datetime.now(tz=UTC) + timedelta(seconds=backoff_seconds)
+                self.stats.preflight_phase = "preflight_retrying"
+                self.stats.next_retry_at = retry_at
+                await asyncio.sleep(backoff_seconds)
+        assert last_error is not None
+        raise last_error
+
     def _preflight_allows_data_only_collection(
         self,
         preflight: Mapping[str, object],
@@ -1480,7 +1537,10 @@ class TradeCoreRuntime:
     ) -> JsonPayload:
         payload: JsonPayload = dict(preflight)
         now_msk = _ensure_msk(now)
-        trading_date = _payload_date(payload, "trading_date") or now_msk.date()
+        payload_now = _preflight_now_msk(payload)
+        trading_date = _payload_date(payload, "trading_date") or (
+            payload_now.date() if payload_now is not None else now_msk.date()
+        )
         current_window = self._collection_window_for_now(now_msk, trading_date=trading_date)
         next_window = self._next_collection_window_after(
             trading_date=trading_date,
@@ -1593,6 +1653,12 @@ class TradeCoreRuntime:
             "last_window_completed_at": _iso_or_none(self.stats.last_window_completed_at),
             "last_pause_reason": self.stats.last_pause_reason,
             "last_stop_reason": self.stats.last_stop_reason,
+            "preflight_phase": self.stats.preflight_phase,
+            "start_requested_at": _iso_or_none(self.stats.start_requested_at),
+            "preflight_started_at": _iso_or_none(self.stats.preflight_started_at),
+            "collector_started_at": _iso_or_none(self.stats.collector_started_at),
+            "last_command_error": self.stats.last_command_error,
+            "next_retry_at": _iso_or_none(self.stats.next_retry_at),
             "readonly_calls_only": True,
             "real_orders_disabled": True,
             "strategy_trading_disabled": True,
@@ -1775,6 +1841,10 @@ class TradeCoreRuntime:
             now = datetime.now(tz=UTC)
             previous_state = self.robot_control_state
             self.stats.last_command_id = str(command.command_id)
+            if command.command_type in {"start", "resume"}:
+                self.stats.start_requested_at = command.requested_at
+                self.stats.preflight_phase = "preflight_pending"
+                self.stats.last_command_error = None
             repository.mark_accepted(command, accepted_at=now)
             try:
                 reason_code, result_payload = await self._apply_robot_command(command)
@@ -1803,6 +1873,8 @@ class TradeCoreRuntime:
                 )
                 self.stats.last_command_status = "failed"
                 self.stats.last_command_reason_code = "runtime_command_failed"
+                self.stats.last_command_error = str(exc)
+                self.stats.preflight_phase = "failed"
                 self._write_robot_command_audit(
                     command=command,
                     payload={
@@ -1953,7 +2025,61 @@ class TradeCoreRuntime:
         command: RobotCommand,
     ) -> tuple[str, JsonPayload]:
         payload = dict(command.payload or {})
-        preflight = payload.get("preflight_result")
+        self.robot_control_state = "preflight_running"
+        self.stats.collector_state = "starting"
+        self.stats.current_window_state = "preflight_running"
+        self.stats.day_collection_state = "preflight_running"
+        self.stats.preflight_phase = "preflight_running"
+        payload_preflight = payload.get("preflight_result")
+        if (
+            isinstance(payload_preflight, Mapping)
+            and payload.get("authoritative_preflight") != "trade_core"
+        ):
+            preflight = dict(payload_preflight)
+            self.stats.preflight_phase = "preflight_completed"
+        else:
+            try:
+                preflight = await self._fresh_data_only_preflight_payload_with_retries(
+                    command=command,
+                    now=datetime.now(tz=MSK),
+                )
+            except Exception as exc:
+                reason_code = "data_only_preflight_unavailable"
+                self.robot_control_state = "preflight_blocked"
+                self.stats.collector_state = "preflight_blocked"
+                self.stats.current_window_state = "preflight_blocked"
+                self.stats.day_collection_state = "preflight_blocked"
+                self.stats.daily_collection_active = False
+                self.stats.preflight_phase = "preflight_failed"
+                self.stats.last_command_reason_code = reason_code
+                self.stats.last_command_error = str(exc)
+                self._write_audit_event(
+                    action="robot_command_blocked_preflight",
+                    severity="warning",
+                    payload={
+                        "command_id": str(command.command_id),
+                        "reason_code": reason_code,
+                        "error_code": type(exc).__name__,
+                        "error_message": str(exc),
+                        "readonly_calls_only": True,
+                        "real_orders_disabled": True,
+                        "strategy_trading_disabled": True,
+                        "collector_state": self.stats.collector_state,
+                        "preflight_phase": self.stats.preflight_phase,
+                    },
+                )
+                return (
+                    reason_code,
+                    {
+                        "collector_state": self.stats.collector_state,
+                        "accepted": False,
+                        "stream_tasks": 0,
+                        "real_orders_disabled": True,
+                        "strategy_trading_disabled": True,
+                        "preflight_phase": self.stats.preflight_phase,
+                        "error": str(exc),
+                    },
+                )
         market_open = isinstance(preflight, Mapping) and preflight.get("market_open") is True
         collection_allowed = (
             isinstance(preflight, Mapping)
@@ -1970,6 +2096,7 @@ class TradeCoreRuntime:
             self.stats.current_window_state = "preflight_blocked"
             self.stats.day_collection_state = "preflight_blocked"
             self.stats.daily_collection_active = False
+            self.stats.preflight_phase = "blocked_by_preflight"
             self.stats.last_command_reason_code = reason_code
             self._write_audit_event(
                 action="data_only_shadow_collection_preflight_blocked",
@@ -1987,6 +2114,20 @@ class TradeCoreRuntime:
                     ),
                 },
             )
+            self._write_audit_event(
+                action="robot_command_blocked_preflight",
+                severity="warning",
+                payload={
+                    "command_id": str(command.command_id),
+                    "reason_code": reason_code,
+                    "preflight_result": preflight if isinstance(preflight, Mapping) else None,
+                    "readonly_calls_only": True,
+                    "real_orders_disabled": True,
+                    "strategy_trading_disabled": True,
+                    "collector_state": self.stats.collector_state,
+                    "preflight_phase": self.stats.preflight_phase,
+                },
+            )
             return (
                 reason_code,
                 {
@@ -1995,6 +2136,8 @@ class TradeCoreRuntime:
                     "stream_tasks": 0,
                     "real_orders_disabled": True,
                     "strategy_trading_disabled": True,
+                    "preflight_phase": self.stats.preflight_phase,
+                    "preflight_result": preflight if isinstance(preflight, Mapping) else None,
                 },
             )
 
@@ -2061,6 +2204,9 @@ class TradeCoreRuntime:
         self.robot_control_state = "collecting"
         self.stats.collector_state = "collecting"
         self.stats.current_window_state = "collecting"
+        self.stats.preflight_phase = "completed"
+        self.stats.next_retry_at = None
+        self.stats.last_command_error = None
         self.stats.collector_started_at = now
         self.stats.collector_stopped_at = None
         self.stats.last_data_only_order_book_poll_at = None
@@ -2127,6 +2273,8 @@ class TradeCoreRuntime:
         self.stats.completed_for_day = False
         self.stats.collector_stopped_at = now
         self.stats.last_stop_reason = reason_code
+        self.stats.preflight_phase = None
+        self.stats.next_retry_at = None
         self.stats.next_collection_window_at = None
         self.stats.next_resume_at = None
         self.stats.remaining_windows_today = 0
@@ -3218,6 +3366,20 @@ def _bool_env(value: str | None, *, default: bool) -> bool:
     if value is None or value.strip() == "":
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
 
 
 def _stream_names_from_env(value: str | None, *, default: tuple[str, ...]) -> tuple[str, ...]:

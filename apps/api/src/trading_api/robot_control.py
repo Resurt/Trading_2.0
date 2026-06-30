@@ -26,8 +26,15 @@ class RobotControlService:
         command: RobotCommand,
         auth: AuthContext,
         payload: Mapping[str, object] | None = None,
+        reason_code: str | None = None,
+        response_status: str | None = None,
+        message: str | None = None,
+        queued: bool = False,
+        next_poll_after_seconds: int | None = None,
+        effective_logging_state: str | None = None,
     ) -> RobotCommandResponse:
         requested_at = datetime.now(tz=UTC)
+        row_reason_code = reason_code or "operator_requested"
         with self._database.session_scope() as session:
             repository = RobotCommandRepository(session)
             row = repository.create(
@@ -36,7 +43,7 @@ class RobotControlService:
                 requested_role=auth.role.value,
                 requested_at=requested_at,
                 payload=payload,
-                reason_code="operator_requested",
+                reason_code=row_reason_code,
             )
             session.add(
                 _audit_event(
@@ -47,6 +54,8 @@ class RobotControlService:
                         "command_type": command.value,
                         "requested_role": auth.role.value,
                         "auth_mode": auth.auth_mode,
+                        "reason_code": row_reason_code,
+                        "command_status": response_status or row.status,
                         "payload": dict(payload or {}),
                     },
                     ts_utc=requested_at,
@@ -54,17 +63,21 @@ class RobotControlService:
             )
             return RobotCommandResponse(
                 accepted=True,
+                queued=queued,
                 command_id=row.command_id,
                 command=command,
                 command_type=command.value,
                 requested_by_role=auth.role,
                 requested_by=auth.subject,
                 requested_at=row.requested_at,
-                status=row.status,
+                status=response_status or row.status,
                 reason_code=row.reason_code,
                 payload=dict(row.payload),
                 preflight_result=_preflight_payload(payload),
-                message=f"Robot command {command.value} persisted for trade-core",
+                preflight_summary=_preflight_payload(payload),
+                next_poll_after_seconds=next_poll_after_seconds,
+                effective_logging_state=effective_logging_state,
+                message=message or f"Robot command {command.value} persisted for trade-core",
             )
 
     def reject(
@@ -116,6 +129,7 @@ class RobotControlService:
             )
             return RobotCommandResponse(
                 accepted=False,
+                queued=False,
                 command_id=row.command_id,
                 command=command,
                 command_type=command.value,
@@ -126,6 +140,7 @@ class RobotControlService:
                 reason_code=row.reason_code,
                 payload=dict(row.payload),
                 preflight_result=_preflight_payload(payload),
+                preflight_summary=_preflight_payload(payload),
                 message=message,
             )
 

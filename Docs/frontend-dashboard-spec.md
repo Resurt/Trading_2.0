@@ -161,15 +161,26 @@ When market display is online and logging is stopped, use copy like:
 
 ## Start/Stop Command UX
 
-Start first calls `/session/preflight` for the core universe. If preflight blocks
-collection, the frontend must not call `/robot/start`.
+Start may call a fast advisory `/session/preflight` for the core universe, but the
+operator click must not depend on that request finishing. If the advisory preflight
+times out, the frontend still calls `/robot/start`. `/robot/start` is the
+authoritative async command endpoint and returns `command_id`, `status=preflight_pending`,
+`queued=true`, `next_poll_after_seconds`, and `effective_logging_state=start_pending`.
+The backend/trade-core fresh preflight decides whether collector startup is allowed.
 
-When Start is allowed, `/robot/start` payload must use:
+`/robot/start` payload must use:
 
 - `mode=data_shadow`;
 - the core universe;
 - `real_orders_disabled=true`;
 - `strategy_trading_disabled=true`.
+
+Command progress is read from `/robot/status` and `/runtime/data-shadow/status`:
+
+- `preflight_pending`: `Запуск сбора логов запрошен. Проверяю сессию...`;
+- `preflight_retrying`: `Брокер временно не ответил, повторяю проверку...`;
+- `collecting`: `Сбор логов запущен.`;
+- `preflight_blocked`: `Сбор логов не запущен: <reason>. Следующая сессия: <time>.`.
 
 Command messages must be short, dismissible and auto-dismiss after 10-15 seconds:
 
@@ -177,7 +188,10 @@ Command messages must be short, dismissible and auto-dismiss after 10-15 seconds
 - started: `Сбор логов запущен.`
 - stopped: `Сбор логов остановлен.`
 - preflight blocked: `Сбор логов не запущен: <reason>. Следующая сессия: <time>.`
-- preflight timeout: `Не удалось проверить торговую сессию. Сбор не запущен.`
+- advisory preflight timeout after command queueing:
+  `Брокер временно не ответил, повторяю проверку...`
+- start endpoint timeout before command id:
+  `Не удалось отправить команду Start. Проверьте API.`
 
 Do not show long technical command payloads in the operator banner.
 

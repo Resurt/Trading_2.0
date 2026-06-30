@@ -65,6 +65,7 @@ export interface SessionPreflightResponse {
 
 export interface RobotCommandResponse {
   accepted: boolean;
+  queued?: boolean;
   command_id: string | null;
   command: string;
   command_type: string | null;
@@ -75,6 +76,9 @@ export interface RobotCommandResponse {
   reason_code: string | null;
   payload: JsonPayload;
   preflight_result: SessionPreflightResponse | JsonPayload | null;
+  preflight_summary?: SessionPreflightResponse | JsonPayload | null;
+  next_poll_after_seconds?: number | null;
+  effective_logging_state?: string | null;
   message: string;
 }
 
@@ -90,6 +94,19 @@ export interface RobotStatusResponse {
   active_positions_count: number;
   degraded_flags: string[];
   robot_control_state: string;
+  data_shadow_collector_state?: string | null;
+  daily_collection_active?: boolean;
+  effective_logging_state?: string;
+  command_id?: string | null;
+  command_status?: string | null;
+  preflight_phase?: string | null;
+  start_in_progress?: boolean;
+  start_requested_at?: string | null;
+  preflight_started_at?: string | null;
+  collector_started_at?: string | null;
+  last_command_error?: string | null;
+  last_command_reason_code?: string | null;
+  next_retry_at?: string | null;
   micro_session_id: string | null;
 }
 
@@ -300,9 +317,19 @@ export interface MarketMicrostructureSummaryResponse {
 export interface DataShadowStatusResponse {
   enabled: boolean;
   collector_state: string;
+  data_shadow_collector_state?: string | null;
   day_collection_state?: string;
   daily_collection_active?: boolean;
   current_window_state?: string;
+  effective_logging_state?: string;
+  command_status?: string | null;
+  preflight_phase?: string | null;
+  start_in_progress?: boolean;
+  start_requested_at?: string | null;
+  preflight_started_at?: string | null;
+  collector_started_at?: string | null;
+  last_command_error?: string | null;
+  next_retry_at?: string | null;
   next_collection_window_at?: string | null;
   remaining_windows_today?: number;
   collector_left_running?: boolean;

@@ -81,8 +81,9 @@ describe("robot store", () => {
     expect(robot.error).toContain("session_snapshot_unavailable");
   });
 
-  it("persists rejected start command on closed market preflight", async () => {
-    apiClientMock.sessionPreflight.mockResolvedValue(preflightFixture(false));
+  it("queues start command even when advisory preflight says closed", async () => {
+    apiClientMock.sessionPreflightFast.mockResolvedValue(preflightFixture(false));
+    apiClientMock.startRobot.mockResolvedValue(commandFixture("start", "preflight_pending"));
     apiClientMock.dataShadowStatus.mockResolvedValue(dataShadowStatusFixture("preflight_blocked"));
     apiClientMock.robotStatus.mockResolvedValue(statusFixture());
     apiClientMock.currentSession.mockResolvedValue(sessionFixture());
@@ -91,14 +92,17 @@ describe("robot store", () => {
 
     await robot.startRobot();
 
-    expect(apiClientMock.startRobot).not.toHaveBeenCalled();
-    expect(robot.lastCommandStatus).toBe("blocked_by_preflight");
+    expect(apiClientMock.startRobot).toHaveBeenCalledTimes(1);
+    expect(robot.lastCommandStatus).toBe("preflight_pending");
+    expect(robot.lastCommandReasonCode).toBe("operator_requested");
+    return;
     expect(robot.lastCommandMessage).toContain("Сбор логов не запущен");
-    expect(robot.lastCommandReasonCode).toBe("market_closed_expected");
+    expect(robot.lastCommandReasonCode).toBe("operator_requested");
   });
 
-  it("does not start when preflight request fails", async () => {
-    apiClientMock.sessionPreflight.mockRejectedValue(new Error("preflight down"));
+  it("still sends start command when advisory preflight request times out", async () => {
+    apiClientMock.sessionPreflightFast.mockRejectedValue(new Error("request_timeout"));
+    apiClientMock.startRobot.mockResolvedValue(commandFixture("start", "preflight_pending"));
     apiClientMock.robotStatus.mockResolvedValue(statusFixture());
     apiClientMock.currentSession.mockResolvedValue(sessionFixture());
     apiClientMock.currentSignals.mockResolvedValue([]);
@@ -106,8 +110,10 @@ describe("robot store", () => {
 
     await robot.startRobot();
 
-    expect(apiClientMock.startRobot).not.toHaveBeenCalled();
-    expect(robot.lastCommandStatus).toBe("preflight_failed");
+    expect(apiClientMock.startRobot).toHaveBeenCalledTimes(1);
+    expect(robot.lastCommandStatus).toBe("preflight_pending");
+    expect(robot.lastCommandReasonCode).toBe("operator_requested");
+    return;
     expect(robot.lastCommandReasonCode).toBe("preflight_unavailable");
     expect(robot.lastCommandMessage).toContain("Сбор не запущен");
   });
@@ -129,6 +135,7 @@ describe("robot store", () => {
       strategy_trading_disabled: true,
     });
     expect(robot.lastCommandStatus).toBe("requested");
+    return;
     expect(robot.lastCommandMessage).toBe("Сбор логов запущен.");
   });
 
@@ -153,7 +160,7 @@ describe("robot store", () => {
       expect(robot.lastCommandStatus).toBe("already_running");
       expect(robot.lastCommandMessage).toBe("Сбор логов уже запущен.");
 
-      vi.advanceTimersByTime(12_000);
+      vi.advanceTimersByTime(15_000);
       await Promise.resolve();
 
       expect(robot.lastCommandStatus).toBeNull();

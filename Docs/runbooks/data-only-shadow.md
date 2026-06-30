@@ -222,17 +222,26 @@ The dashboard Start button is not a blind start command. It first calls:
 GET /session/preflight?instruments=SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR&mode=data_shadow
 ```
 
-If preflight is unavailable, the UI shows `preflight_unavailable` and does not call
-`POST /robot/start`. If `market_open=false` or
-`data_only_collection_allowed=false`, the UI shows `blocked_by_preflight`, the
-`reason_code` and `next_session_at` when available. The frontend does not call
-`POST /robot/start` in this state; trade-core does not start streams and no data-only
-runtime command is created from the closed-market click.
-
-The Start button must show an animated progress state while preflight/start is in
-flight. A disabled button without command feedback is a UI bug. The command strip
-must show the current phase, operator message, reason code and next session time when
+Current policy: the dashboard preflight is advisory only. The Start button must not
+die on a long broker preflight or `request_timeout`. The browser creates an operator
+command immediately through `POST /robot/start`; the API returns quickly with
+`status=preflight_pending`, `command_id`, `queued=true`, `next_poll_after_seconds`
+and `effective_logging_state=start_pending`. `trade-core` then performs the
+authoritative fresh preflight with bounded retries/background status updates. If
+collection is allowed it starts the data-only collector; if not, the command moves
+to `blocked_by_preflight`/`preflight_blocked` with reason and next session when
 available.
+
+The Start button progress states are:
+
+- checking session / `preflight_pending`;
+- broker retry / `preflight_retrying`;
+- collector starting;
+- collecting;
+- blocked or failed with reason.
+
+The command strip must show short operator text. Success/already-running messages
+auto-dismiss after 10-15 seconds. Blocked/failed messages remain dismissible.
 
 Stop remains a controlled operator command. In data-only mode it stops/cancels market
 stream tasks, moves collector state to `stopped_by_operator`, and shows the result in

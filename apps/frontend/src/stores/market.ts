@@ -417,9 +417,9 @@ export const useMarketStore = defineStore("market", () => {
   }
 
   function startDashboardFeed(
-    intervalMs = 2_000,
-    selectedActiveIntervalMs = 1_000,
-    selectedIdleIntervalMs = 5_000,
+    intervalMs = 3_000,
+    selectedActiveIntervalMs = 10_000,
+    selectedIdleIntervalMs = 15_000,
   ): void {
     if (marketPollTimer !== null) {
       return;
@@ -463,9 +463,9 @@ export const useMarketStore = defineStore("market", () => {
   }
 
   function startMarketPolling(
-    intervalMs = 2_000,
-    selectedActiveIntervalMs = 1_000,
-    selectedIdleIntervalMs = 5_000,
+    intervalMs = 5_000,
+    selectedActiveIntervalMs = 10_000,
+    selectedIdleIntervalMs = 15_000,
   ): void {
     startDashboardFeed(intervalMs, selectedActiveIntervalMs, selectedIdleIntervalMs);
   }

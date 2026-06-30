@@ -36,14 +36,16 @@ production.
 читает команды, переводит их в `accepted/applied/rejected/failed` и применяет
 safe runtime policy без физического рестарта процесса.
 
-`POST /robot/start` is guarded by a fast calendar/session preflight. For operator
-UI responsiveness it uses the same fallback calendar path as
-`GET /session/preflight?broker_checks=false`; full broker schedule and per-instrument
-status checks remain mandatory for data-only smoke/readiness scripts. If
-`market_open=false`, API writes a rejected `robot_command`/audit event with the
-preflight `reason_code` and returns HTTP 200 with `accepted=false`,
-`status=rejected`, and `preflight_result`. The rejected command does not start
-runtime streams and does not enable live trading.
+`POST /robot/start` is the authoritative operator command endpoint and must return
+quickly. It no longer waits for a full synchronous broker preflight before creating
+`robot_command`. The response includes `command_id`, `accepted=true`, `queued=true`,
+`status=preflight_pending`, `reason_code=preflight_pending`,
+`next_poll_after_seconds`, and `effective_logging_state=start_pending`.
+`trade-core` performs the fresh broker/session preflight in the background with
+bounded retry/backoff, then either starts data-only collection or marks the command
+blocked with the preflight `reason_code`. The browser may call a fast advisory
+`GET /session/preflight`, but a timeout there must not prevent `POST /robot/start`
+from queuing the command.
 
 The API keeps a short server-side preflight cache controlled by
 `TRADING_SESSION_PREFLIGHT_CACHE_TTL_SECONDS`, default 30 seconds. This lets
@@ -53,10 +55,14 @@ Incident triage can bypass this cache with
 `GET /session/preflight?...&cache=false`; the response includes `cache_hit` and
 `cache_key` so CLI/API comparisons are explicit.
 Fresh broker preflight is bounded by `TRADING_SESSION_PREFLIGHT_TIMEOUT_SECONDS`,
-default 30 seconds in code and 45 seconds in Docker Compose, because
-full-universe readonly broker status checks can take longer than a lightweight
-dashboard calendar pass, especially while the dashboard live feed is polling
-readonly quotes.
+default 30 seconds in code and 45 seconds in Docker Compose. Start-command
+preflight retry is controlled by `TRADING_SESSION_PREFLIGHT_RETRY_COUNT` and
+`TRADING_SESSION_PREFLIGHT_RETRY_BACKOFF_SECONDS`. Dashboard readonly broker calls
+must yield to Start pressure: the API uses a separate bounded readonly executor
+(`BROKER_READONLY_MAX_CONCURRENCY`, default 4) and briefly pauses dashboard broker
+refreshes during Start (`DASHBOARD_FEED_PAUSE_DURING_START_SECONDS`, default 120).
+`GET /health` is service liveness and must remain responsive even when broker
+connectivity is degraded.
 
 `GET /session/preflight` uses the same `TradingSessionPreflightService` rules as
 the data-only smoke CLI. The response includes schedule/status diagnostics:
@@ -121,7 +127,10 @@ collector startup or micro-session rollover.
 - `reason_code`;
 - `message`;
 - `accepted`;
-- optional `preflight_result`.
+- `queued`;
+- optional `preflight_result`/`preflight_summary`;
+- `next_poll_after_seconds`;
+- `effective_logging_state`.
 
 Для локального Vue frontend BFF разрешает CORS origins из `CORS_ALLOW_ORIGINS`.
 Значение по умолчанию: `http://localhost:5173,http://127.0.0.1:5173`.
@@ -606,10 +615,12 @@ Anchor: data-only shadow endpoints are listed above and remain observer/read-onl
 
 `GET /session/preflight` exposes both official exchange status and raw broker
 availability. `official_exchange_open=true` is required before data-only calibration
-collection may start. The operator dashboard must not call `/robot/start` when
-preflight returns closed/blocked. If an API client still calls `/robot/start` with a
-closed preflight, the API returns `accepted=false`, `status=rejected`, and a concrete
-`reason_code` such as `moex_dsvd_cancelled_platform_update`.
+collection may start. The operator dashboard may use preflight for advisory copy,
+but `/robot/start` is the authoritative async command endpoint. If a queued Start is
+later blocked by closed-market or broker/session preflight, trade-core marks the
+command `blocked_by_preflight`/`preflight_blocked` with a concrete `reason_code`
+such as `moex_dsvd_cancelled_platform_update`; streams are not started and no
+calibration rows are written.
 
 `GET /market/overview?include_details=false` returns one row per core instrument.
 `POST /market/quotes/refresh?instruments=...` may return the requested subset, and

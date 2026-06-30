@@ -52,6 +52,16 @@ requested/working instruments, `day_collection_state`, `collector_state`,
 `strategy_trading_disabled=true`. Future data-only events must not include
 misleading `uses_pseudo_orders=true` or `shadow_pseudo_order` metadata.
 
+Operator Start control-plane events are also structured audit evidence. The API
+first writes `robot_command_start_requested` with `reason_code=preflight_pending`.
+`trade-core` then emits `data_only_shadow_preflight_started`,
+`data_only_shadow_preflight_retrying` when broker readonly preflight is transiently
+unavailable, `data_only_shadow_collection_started` on success, or
+`robot_command_blocked_preflight`/`data_only_shadow_collection_preflight_blocked`
+on a safe block. These events must include `command_id`, `preflight_phase`,
+`readonly_calls_only=true`, `real_orders_disabled=true`, and
+`strategy_trading_disabled=true`.
+
 Primary calibration/logging tables must contain only valid active-window samples.
 No `market_microstructure_snapshot` or `order_book_summary` rows may be written
 between morning/main/evening windows, after final close, during official exchange

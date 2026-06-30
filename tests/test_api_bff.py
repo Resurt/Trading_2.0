@@ -870,8 +870,20 @@ def test_robot_status_and_market_overview(
             reason_code="moex_dsvd_cancelled_platform_update",
         )
 
+    async def dashboard_preflight(*args: object, **kwargs: object) -> SessionPreflightResponse:
+        del args, kwargs
+        return preflight_response(
+            market_open=True,
+            reason_code="market_open",
+        ).model_copy(update={"session_type": "weekday_morning"})
+
     app_module = importlib.import_module("trading_api.app")
     monkeypatch.setattr(app_module, "_run_session_preflight", closed_preflight)
+    monkeypatch.setattr(
+        app_module,
+        "_run_dashboard_session_preflight_from_app",
+        dashboard_preflight,
+    )
     monkeypatch.setenv("TRADING_DATA_ONLY_SHADOW", "true")
     force_exchange_closed(monkeypatch)
     client = make_client(tmp_path)
@@ -892,8 +904,8 @@ def test_robot_status_and_market_overview(
     data_shadow_status = client.get("/runtime/data-shadow/status").json()
 
     assert status["strategy_state"] == "candidate"
-    assert status["session_type"] == "weekend"
-    assert status["session_phase"] == "closed"
+    assert status["session_type"] == "weekday_morning"
+    assert status["session_phase"] == "continuous_trading"
     assert status["session_source"] == "fresh_preflight"
     assert status["session_stale"] is True
     assert status["session_stale_reason"] == "runtime_snapshot_mismatch"
@@ -1621,7 +1633,9 @@ def test_management_auth_and_daily_report_job(
         json={"trading_date": "2026-06-12", "strategy_id": "baseline"},
     ).json()
 
-    assert started["status"] == "requested"
+    assert started["status"] == "preflight_pending"
+    assert started["queued"] is True
+    assert started["reason_code"] == "preflight_pending"
     assert started["command_id"]
     assert started["requested_by"] == "local-dev:operator"
     assert job["status"] == "queued"
@@ -1643,7 +1657,7 @@ def test_management_auth_and_daily_report_job(
     assert job_status["successful"] is True
 
 
-def test_robot_start_closed_market_is_rejected_by_preflight(
+def test_robot_start_closed_market_queues_async_preflight_command(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1661,10 +1675,11 @@ def test_robot_start_closed_market_is_rejected_by_preflight(
 
     response = client.post("/robot/start", headers={"X-API-Role": "operator"}).json()
 
-    assert response["accepted"] is False
-    assert response["status"] == "rejected"
-    assert response["reason_code"] == "weekend_session_closed"
-    assert response["preflight_result"]["market_closed_expected"] is True
+    assert response["accepted"] is True
+    assert response["queued"] is True
+    assert response["status"] == "preflight_pending"
+    assert response["reason_code"] == "preflight_pending"
+    assert response["effective_logging_state"] == "start_pending"
     with database.session_scope() as session:
         command = session.get(RobotCommand, UUID(response["command_id"]))
         audit = (
@@ -1673,8 +1688,9 @@ def test_robot_start_closed_market_is_rejected_by_preflight(
             .one()
         )
         assert command is not None
-        assert command.status == "rejected"
-        assert audit.action == "robot_command_start_rejected_preflight"
+        assert command.status == "requested"
+        assert command.reason_code == "preflight_pending"
+        assert audit.action == "robot_command_start_requested"
 
 
 def test_session_preflight_endpoint_returns_closed_market(
@@ -1778,7 +1794,7 @@ def test_robot_control_persists_command_and_audit(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["status"] == "requested"
+    assert payload["status"] == "stop_requested"
     with database.session_scope() as session:
         command = session.get(RobotCommand, UUID(payload["command_id"]))
         assert command is not None
