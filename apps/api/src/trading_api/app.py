@@ -2217,7 +2217,7 @@ async def _broker_market_trades_by_instrument(
         if not isinstance(trades, list):
             return instrument_id, []
         normalized: list[dict[str, object]] = []
-        for item in trades[:limit]:
+        for item in trades:
             if not isinstance(item, dict):
                 continue
             normalized.append(
@@ -2230,6 +2230,8 @@ async def _broker_market_trades_by_instrument(
                     "include_in_calibration": include_in_calibration,
                 }
             )
+        normalized.sort(key=_trade_sort_ts, reverse=True)
+        normalized = normalized[:limit]
         return instrument_id, normalized
 
     results = await asyncio.gather(*(fetch(ref) for ref in refs))
@@ -2282,7 +2284,20 @@ def _order_book_overview_payload(
         if official_exchange_closed
         else "broker_indicative_quote"
     )
-    recent_market_trades = recent_market_trades or []
+    raw_recent_market_trades = recent_market_trades or []
+    market_trades_age_ms = _market_trades_age_ms(raw_recent_market_trades)
+    trade_tape_status = _trade_tape_status(raw_recent_market_trades, market_trades_age_ms)
+    trade_tape_reason = _trade_tape_reason(raw_recent_market_trades, market_trades_age_ms)
+    recent_market_trades = (
+        raw_recent_market_trades if trade_tape_status == "live" else []
+    )
+    market_trades_source = (
+        "tbank_get_last_trades"
+        if recent_market_trades
+        else "tbank_get_last_trades_stale_diagnostic"
+        if raw_recent_market_trades
+        else "no_market_trades_samples"
+    )
     quality_components = calculate_market_quality(
         spread_bps=spread_bps,
         bid_depth_lots=bid_depth,
@@ -2343,12 +2358,10 @@ def _order_book_overview_payload(
         "order_book_age_ms": int(age_seconds * 1000),
         "order_book_stale": False,
         "recent_market_trades": recent_market_trades,
-        "market_trades_source": (
-            "tbank_get_last_trades"
-            if recent_market_trades
-            else "no_market_trades_samples"
-        ),
-        "market_trades_age_ms": _market_trades_age_ms(recent_market_trades),
+        "market_trades_source": market_trades_source,
+        "market_trades_age_ms": market_trades_age_ms,
+        "trade_tape_status": trade_tape_status,
+        "trade_tape_reason": trade_tape_reason,
         "reason_code": (
             "moex_dsvd_cancelled_platform_update"
             if official_exchange_closed
@@ -2602,6 +2615,39 @@ def _market_trades_age_ms(trades: list[dict[str, object]]) -> int | None:
     if newest is None:
         return None
     return max(0, int((datetime.now(tz=UTC) - newest).total_seconds() * 1000))
+
+
+def _trade_sort_ts(trade: dict[str, object]) -> datetime:
+    return _datetime_or_none(
+        trade.get("exchange_ts")
+        or trade.get("ts_utc")
+        or trade.get("time")
+        or trade.get("ts")
+    ) or datetime.min.replace(tzinfo=UTC)
+
+
+def _trade_tape_status(trades: list[dict[str, object]], age_ms: int | None) -> str:
+    if not trades:
+        return "no_market_trades_samples"
+    if age_ms is None:
+        return "stale"
+    max_age_ms = int(
+        float(os.environ.get("DASHBOARD_TRADES_MAX_EXCHANGE_AGE_SECONDS", "15"))
+        * 1000
+    )
+    return "live" if age_ms <= max_age_ms else "stale"
+
+
+def _trade_tape_reason(trades: list[dict[str, object]], age_ms: int | None) -> str:
+    if not trades:
+        return "no_market_trades_samples"
+    if age_ms is None:
+        return "missing_trade_exchange_ts"
+    max_age_ms = int(
+        float(os.environ.get("DASHBOARD_TRADES_MAX_EXCHANGE_AGE_SECONDS", "15"))
+        * 1000
+    )
+    return "fresh" if age_ms <= max_age_ms else "trade_exchange_ts_too_old"
 
 
 def _read_service(request: Request) -> Iterator[BffReadService]:

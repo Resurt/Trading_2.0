@@ -499,6 +499,7 @@ def test_data_only_shadow_runtime_waits_for_operator_start_and_stops(tmp_path: P
             )
         assert await runtime.process_robot_commands_async() == 1
         await asyncio.sleep(0)
+        assert "market_trades" in runtime.config.data_only_stream_names
         assert gateway.market_stream_names == list(runtime.config.data_only_stream_names)
         assert gateway.order_stream_accounts == []
         assert runtime.stats.stream_tasks_started == len(runtime.config.data_only_stream_names)

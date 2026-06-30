@@ -184,6 +184,7 @@ class TradeCoreRuntimeConfig:
         "order_book",
         "last_prices",
         "trading_status",
+        "market_trades",
     )
     data_only_order_book_poll_interval_seconds: float = 15.0
     dividend_sync_enabled: bool = False
@@ -234,7 +235,7 @@ class TradeCoreRuntimeConfig:
             ),
             data_only_stream_names=_stream_names_from_env(
                 env.get("TRADING_DATA_ONLY_STREAM_NAMES"),
-                default=("order_book", "last_prices", "trading_status"),
+                default=("order_book", "last_prices", "trading_status", "market_trades"),
             ),
             data_only_order_book_poll_interval_seconds=float(
                 env.get("TRADING_DATA_ONLY_ORDER_BOOK_POLL_INTERVAL_SECONDS", "15")

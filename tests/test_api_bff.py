@@ -293,6 +293,39 @@ class FakeDashboardFeedGateway(FakeQuoteGateway):
         )
 
 
+class FakeOldFirstTradesGateway(FakeDashboardFeedGateway):
+    async def get_last_trades(
+        self,
+        request: object,
+        metadata: object = None,
+    ) -> BrokerUnaryResponse:
+        del request, metadata
+        now = datetime.now(tz=UTC)
+        return BrokerUnaryResponse(
+            method_name="GetLastTrades",
+            data={
+                "trades": [
+                    {
+                        "instrument_uid": "uid-sber",
+                        "figi": "figi-sber",
+                        "price": "312.00",
+                        "quantity_lots": "1",
+                        "side": "sell",
+                        "ts_utc": (now - timedelta(minutes=29)).isoformat(),
+                    },
+                    {
+                        "instrument_uid": "uid-sber",
+                        "figi": "figi-sber",
+                        "price": "314.01",
+                        "quantity_lots": "3",
+                        "side": "buy",
+                        "ts_utc": (now - timedelta(seconds=1)).isoformat(),
+                    },
+                ]
+            },
+        )
+
+
 def make_client(tmp_path: Path) -> TestClient:
     os.environ.setdefault("DASHBOARD_MARKET_FEED_ENABLED", "false")
     database = DatabaseService(f"sqlite+pysqlite:///{tmp_path / 'api-bff.db'}")
@@ -1348,8 +1381,44 @@ def test_dashboard_market_feed_snapshot_does_not_require_collector_or_write_db(
     assert snapshot["session"]["market_open"] is False
     assert snapshot["selected_details"]["instrument_id"] == "MOEX:SBER"
     assert snapshot["selected_details"]["order_book_source"] == "broker_quote_exchange_closed"
-    assert snapshot["selected_details"]["recent_market_trades"][0]["price"] == "313.20"
+    assert snapshot["selected_details"]["recent_market_trades"] == []
+    assert snapshot["selected_details"]["market_trades_source"] == (
+        "tbank_get_last_trades_stale_diagnostic"
+    )
+    assert snapshot["selected_details"]["trade_tape_status"] == "stale"
+    assert snapshot["selected_details"]["trade_tape_reason"] == "trade_exchange_ts_too_old"
     assert before == after
+
+
+def test_dashboard_market_feed_sorts_last_trades_newest_first(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app_module = importlib.import_module("trading_api.app")
+
+    monkeypatch.setenv("DASHBOARD_MARKET_FEED_ENABLED", "true")
+    force_exchange_open(monkeypatch)
+    monkeypatch.setattr(app_module, "_readonly_tbank_gateway", lambda: FakeOldFirstTradesGateway())
+    database = DatabaseService(f"sqlite+pysqlite:///{tmp_path / 'dashboard-feed-trades.db'}")
+    Base.metadata.create_all(database.engine)
+    seed_database(database)
+    app = create_fastapi_app(database=database, report_task_client=FakeReportTaskClient())
+    client = TestClient(app)
+
+    snapshot = client.get(
+        "/dashboard/market-feed/snapshot",
+        headers={"X-API-Role": "observer"},
+        params={
+            "selected_instrument": "MOEX:SBER",
+            "include_order_book": True,
+            "include_trades": True,
+        },
+    ).json()
+
+    selected = snapshot["selected_details"]
+    assert selected["recent_market_trades"][0]["price"] == "314.01"
+    assert selected["trade_tape_status"] == "live"
+    assert selected["trade_tape_reason"] == "fresh"
 
 
 def test_market_websocket_uses_dashboard_feed_and_preserves_selection(
@@ -1580,10 +1649,10 @@ def test_market_quotes_refresh_marks_successful_order_book_refresh_display_only_
     assert sber["price_staleness_seconds"] == 0
     assert sber["order_book_summary"]["exchange_ts"] == "2026-06-21T10:00:00+00:00"
     assert sber["order_book_summary"]["exchange_age_seconds"] is not None
-    assert sber["market_trades_source"] == "tbank_get_last_trades"
-    assert sber["recent_market_trades"][0]["price"] == "313.20"
-    assert sber["recent_market_trades"][0]["venue_type"] == "broker_otc"
-    assert sber["recent_market_trades"][0]["include_in_calibration"] is False
+    assert sber["market_trades_source"] == "tbank_get_last_trades_stale_diagnostic"
+    assert sber["recent_market_trades"] == []
+    assert sber["trade_tape_status"] == "stale"
+    assert sber["trade_tape_reason"] == "trade_exchange_ts_too_old"
 
 
 def test_order_book_payload_on_official_closed_is_display_only_broker_quote() -> None:
@@ -1645,8 +1714,10 @@ def test_market_overview_uses_recent_readonly_quote_refresh_cache(
     assert sber["is_price_stale"] is False
     assert sber["best_bid"] == "312.98"
     assert sber["best_ask"] == "313.40"
-    assert sber["market_trades_source"] == "tbank_get_last_trades"
-    assert sber["recent_market_trades"][0]["price"] == "313.20"
+    assert sber["market_trades_source"] == "tbank_get_last_trades_stale_diagnostic"
+    assert sber["recent_market_trades"] == []
+    assert sber["trade_tape_status"] == "stale"
+    assert sber["trade_tape_reason"] == "trade_exchange_ts_too_old"
 
 
 def test_portfolio_refresh_masks_account_id_and_updates_summary(

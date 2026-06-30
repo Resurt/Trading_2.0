@@ -328,10 +328,14 @@ Trade tape is explicit: selected details include either `recent_market_trades` o
 `get_last_trades_timeout`, `market_closed`, `stale`, or `unavailable`. Missing
 trade tape must not block quotes or order-book display.
 If broker `GetLastTrades` returns rows whose `exchange_ts` is older than
-`DASHBOARD_TRADES_MAX_EXCHANGE_AGE_SECONDS`, the tape must be displayed as
-stale/delayed (`trade_exchange_ts_too_old`), not as a live market stream. A fresh
-order book with a stale trade tape is a display limitation, not a data-only logging
-failure by itself.
+`DASHBOARD_TRADES_MAX_EXCHANGE_AGE_SECONDS`, those rows are diagnostic only:
+they must not populate the live tape table. The selected details should return an
+empty `recent_market_trades` list with `trade_tape_status=stale` and
+`trade_tape_reason=trade_exchange_ts_too_old`. A fresh order book with a stale
+trade tape is a display limitation, not a data-only logging failure by itself.
+Data-only collector stream names must include `market_trades`; otherwise the
+dashboard can only report `no_market_trades_samples`/stale diagnostics and cannot
+show a true live tape.
 Selected order-book refresh must remain below the freshness threshold. The current
 defaults are `DASHBOARD_SELECTED_BOOK_REFRESH_SECONDS=3` and
 `DASHBOARD_ORDER_BOOK_MAX_EXCHANGE_AGE_SECONDS=5`; if operators see an open-market

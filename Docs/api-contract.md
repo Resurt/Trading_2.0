@@ -365,10 +365,11 @@ Price source priority for the dashboard is:
 Stale data must stay visible with `quote_status=stale` and timestamp. A candle from
 an older trading date must not be labeled as current/live.
 
-Trade tape freshness is independent from order-book freshness. `recent_market_trades`
-may be returned with `trade_tape_status=stale` and
-`trade_tape_reason=trade_exchange_ts_too_old`; clients must display that as delayed
-or stale instead of `live`/`market stream`.
+Trade tape freshness is independent from order-book freshness. Stale
+`GetLastTrades` diagnostics must not populate `recent_market_trades`; return an
+empty trade list with `trade_tape_status=stale` and
+`trade_tape_reason=trade_exchange_ts_too_old` instead. Clients must display that
+as delayed/stale status text, not as `live`/`market stream` rows.
 
 `POST /market/quotes/refresh` remains an explicit readonly broker path. It accepts
 `quotes_only=true` and `include_order_book=false` defaults. It may call T-Invest

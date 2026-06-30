@@ -152,7 +152,10 @@ status/reason plainly.
 If readonly last trades are present but their exchange timestamp is older than the
 configured threshold, the UI must show the tape as delayed/stale, for example
 `trade_tape_status=stale` and `trade_tape_reason=trade_exchange_ts_too_old`. It
-must not label those rows as a live market stream.
+must not label those rows as a live market stream and must not render them as
+live tape rows. The table is reserved for fresh market-trades stream samples (or
+fresh readonly snapshots when explicitly marked as such); stale diagnostic
+`GetLastTrades` rows are represented only by status/reason text.
 
 The frontend must not preserve old trade rows across refreshes when the current
 selected details mark the tape stale or unknown.

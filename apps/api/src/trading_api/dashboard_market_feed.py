@@ -399,14 +399,26 @@ class DashboardMarketFeedService:
             if status_payload is not None:
                 current = current.model_copy(update=status_payload)
 
-        recent_trades: list[dict[str, object]] = current.recent_market_trades
-        if should_refresh_trades:
-            recent_trades = await self._get_last_trades(
+        trade_update = _visible_trade_tape_update(
+            current.recent_market_trades,
+            source=current.market_trades_source or "order_book_summary_payload",
+        )
+        current = current.model_copy(update=trade_update)
+        recent_trades = cast(list[dict[str, object]], trade_update["recent_market_trades"])
+        if should_refresh_trades and not _has_stream_trade_rows(current):
+            fetched_trades = await self._get_last_trades(
                 gateway=gateway,
                 ref=ref,
                 instrument=current,
             )
             self._last_trades_refresh_at[selected_instrument] = now
+            trade_update = _visible_trade_tape_update(
+                fetched_trades,
+                source="tbank_get_last_trades",
+                stale_source="tbank_get_last_trades_stale_diagnostic",
+            )
+            current = current.model_copy(update=trade_update)
+            recent_trades = cast(list[dict[str, object]], trade_update["recent_market_trades"])
 
         if should_refresh_book:
             payload = await self._get_order_book(
@@ -417,17 +429,19 @@ class DashboardMarketFeedService:
             )
             self._last_details_refresh_at[selected_instrument] = now
             if payload is not None:
+                if (
+                    not recent_trades
+                    and trade_update.get("trade_tape_status") != "no_market_trades_samples"
+                ):
+                    payload = {**payload, **trade_update}
                 current = current.model_copy(update=payload)
             elif recent_trades:
-                trade_age_ms = _market_trades_age_ms(recent_trades)
+                trade_update = _visible_trade_tape_update(
+                    recent_trades,
+                    source=current.market_trades_source or "order_book_summary_payload",
+                )
                 current = current.model_copy(
-                    update={
-                        "recent_market_trades": recent_trades,
-                        "market_trades_source": "tbank_get_last_trades",
-                        "market_trades_age_ms": trade_age_ms,
-                        "trade_tape_status": _trade_tape_status(recent_trades, trade_age_ms),
-                        "trade_tape_reason": _trade_tape_reason(recent_trades, trade_age_ms),
-                    }
+                    update=trade_update
                 )
             elif should_refresh_trades:
                 current = current.model_copy(
@@ -440,15 +454,12 @@ class DashboardMarketFeedService:
                     }
                 )
         elif recent_trades:
-            trade_age_ms = _market_trades_age_ms(recent_trades)
+            trade_update = _visible_trade_tape_update(
+                recent_trades,
+                source=current.market_trades_source or "order_book_summary_payload",
+            )
             current = current.model_copy(
-                update={
-                    "recent_market_trades": recent_trades,
-                    "market_trades_source": "tbank_get_last_trades",
-                    "market_trades_age_ms": trade_age_ms,
-                    "trade_tape_status": _trade_tape_status(recent_trades, trade_age_ms),
-                    "trade_tape_reason": _trade_tape_reason(recent_trades, trade_age_ms),
-                }
+                update=trade_update
             )
 
         if current.order_book_ts is not None:
@@ -597,7 +608,7 @@ class DashboardMarketFeedService:
             else "tbank_get_last_trades_broker"
         )
         normalized: list[dict[str, object]] = []
-        for item in raw_trades[:limit]:
+        for item in raw_trades:
             if isinstance(item, dict):
                 normalized.append(
                     {
@@ -608,6 +619,8 @@ class DashboardMarketFeedService:
                         "include_in_calibration": instrument.official_exchange_open,
                     }
                 )
+        normalized.sort(key=_trade_sort_ts, reverse=True)
+        normalized = normalized[:limit]
         if not normalized:
             self._record_warning("no_market_trades_samples")
         return normalized
@@ -904,7 +917,7 @@ def _order_book_overview_payload(
         "order_book_age_ms": order_book_age_ms,
         "order_book_stale": stale_by_exchange,
         "recent_market_trades": trades,
-        "market_trades_source": "tbank_get_last_trades" if trades else "no_market_trades_samples",
+        "market_trades_source": _market_trades_source(trades),
         "market_trades_age_ms": trade_age_ms,
         "trade_tape_status": trade_status,
         "trade_tape_reason": trade_reason,
@@ -1186,6 +1199,67 @@ def _market_trades_age_ms(trades: Sequence[dict[str, object]]) -> int | None:
     if newest is None:
         return None
     return max(0, int((datetime.now(tz=UTC) - newest).total_seconds() * 1000))
+
+
+def _trade_sort_ts(trade: dict[str, object]) -> datetime:
+    return _datetime_or_none(
+        trade.get("exchange_ts")
+        or trade.get("ts_utc")
+        or trade.get("time")
+        or trade.get("ts")
+    ) or datetime.min.replace(tzinfo=UTC)
+
+
+def _market_trades_source(trades: Sequence[dict[str, object]]) -> str:
+    if not trades:
+        return "no_market_trades_samples"
+    for trade in trades:
+        source = trade.get("source")
+        if isinstance(source, str) and source:
+            if source.startswith("tbank_get_last_trades"):
+                return "tbank_get_last_trades"
+            return source
+    return "market_trades_stream"
+
+
+def _visible_trade_tape_update(
+    trades: Sequence[dict[str, object]] | None,
+    *,
+    source: str,
+    stale_source: str | None = None,
+) -> dict[str, object]:
+    normalized = [dict(item) for item in trades or [] if isinstance(item, dict)]
+    age_ms = _market_trades_age_ms(normalized)
+    status = _trade_tape_status(normalized, age_ms)
+    reason = _trade_tape_reason(normalized, age_ms)
+    if status == "live":
+        return {
+            "recent_market_trades": normalized,
+            "market_trades_source": source,
+            "market_trades_age_ms": age_ms,
+            "trade_tape_status": status,
+            "trade_tape_reason": reason,
+        }
+    return {
+        "recent_market_trades": [],
+        "market_trades_source": (
+            "no_market_trades_samples"
+            if not normalized
+            else stale_source or source or "stale_market_trades_samples"
+        ),
+        "market_trades_age_ms": age_ms,
+        "trade_tape_status": status,
+        "trade_tape_reason": reason,
+    }
+
+
+def _has_stream_trade_rows(instrument: MarketInstrumentOverview) -> bool:
+    if not instrument.recent_market_trades:
+        return False
+    source = instrument.market_trades_source or ""
+    return source in {"market_trades_stream", "order_book_summary_payload"} or source.startswith(
+        "market_trades_stream"
+    )
 
 
 def _freshness_payload(

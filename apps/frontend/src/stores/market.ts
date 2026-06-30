@@ -662,6 +662,9 @@ function withPreservedRecentTrades(
   if ((next.recent_market_trades?.length ?? 0) > 0) {
     return next;
   }
+  if (next.trade_tape_status && !["live", "fresh"].includes(next.trade_tape_status)) {
+    return next;
+  }
   if (next.market_trades_source === "no_market_trades_samples") {
     return next;
   }

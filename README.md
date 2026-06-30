@@ -398,7 +398,9 @@ Stored `order_book_summary` rows may use broker `instrument_uid`/`figi` while th
 operator UI requests canonical `MOEX:*`; the BFF resolves these aliases so fresh
 collector books can populate quote cards. Stale `GetLastPrices` responses must not
 downgrade a fresh order-book mid. Trade tape has its own freshness status: old
-`GetLastTrades` rows must show as stale/delayed, not as a live market stream.
+`GetLastTrades` rows are diagnostic only and must not populate the live tape
+table; the table shows fresh market-trades stream rows or an explicit
+`trade_tape_status`/`trade_tape_reason`.
 Selected order-book refresh is intentionally faster than the freshness budget:
 `DASHBOARD_SELECTED_BOOK_REFRESH_SECONDS=3` with
 `DASHBOARD_ORDER_BOOK_MAX_EXCHANGE_AGE_SECONDS=5` by default.
@@ -420,8 +422,9 @@ and never delete missing core-universe rows.
 Dashboard freshness uses both BFF receipt time and exchange data time:
 `received_ts`/`received_age_ms` are not enough to mark data live. Old
 `exchange_ts` data must show as stale/display-only, and stale candles must not be
-labeled live. Trade tape either contains recent readonly trades or exposes an
-explicit `trade_tape_status`/`trade_tape_reason`.
+labeled live. Trade tape either contains fresh stream/recent trades or exposes an
+explicit `trade_tape_status`/`trade_tape_reason`; stale diagnostic trades are not
+rendered as table rows.
 
 Runbook: `Docs/runbooks/data-only-shadow.md`.
 
