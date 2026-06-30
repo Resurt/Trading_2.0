@@ -25,6 +25,10 @@ export const CORE_INSTRUMENT_IDS = [
 ];
 
 const DEFAULT_SELECTED_INSTRUMENT_ID = "MOEX:SBER";
+const TRANSIENT_DASHBOARD_FEED_ERRORS = new Set([
+  "request_timeout",
+  "dashboard_market_feed_timeout",
+]);
 const CORE_INSTRUMENT_ORDER = new Map(
   CORE_INSTRUMENT_IDS.map((instrumentId, index) => [instrumentId, index]),
 );
@@ -218,8 +222,17 @@ export const useMarketStore = defineStore("market", () => {
       });
       applyDashboardFeedSnapshot(snapshot, requestedInstrumentId);
     } catch (unknownError) {
-      recordWarning("dashboard_market_feed_unavailable");
-      feedErrors.value = [errorText(unknownError)];
+      const reason = errorText(unknownError);
+      if (isTransientDashboardFeedError(reason) && hasUsableDashboardFeedData()) {
+        feedErrors.value = [];
+        feedWarnings.value = boundedUnique([
+          "dashboard_refresh_retrying",
+          ...feedWarnings.value,
+        ]);
+      } else {
+        recordWarning("dashboard_market_feed_unavailable");
+        feedErrors.value = [reason];
+      }
       if (overview.value.instruments.length === 0) {
         error.value = unknownError instanceof Error ? unknownError.message : "Dashboard market feed failed";
       }
@@ -286,6 +299,17 @@ export const useMarketStore = defineStore("market", () => {
     snapshot: DashboardMarketFeedSnapshot,
     expectedSelectedInstrumentId?: string,
   ): void {
+    const rawErrors = snapshot.errors ?? snapshot.status?.errors ?? [];
+    const rawWarnings = snapshot.warnings ?? snapshot.status?.warnings ?? [];
+    const hasUsableData = snapshotHasUsableDashboardFeedData(snapshot) || hasUsableDashboardFeedData();
+    const transientErrors = rawErrors.filter(isTransientDashboardFeedError);
+    const blockingErrors = rawErrors.filter(
+      (item) => !(isTransientDashboardFeedError(item) && hasUsableData),
+    );
+    const visibleWarnings = boundedUnique([
+      ...rawWarnings,
+      ...transientErrors.map(() => "dashboard_refresh_retrying"),
+    ]);
     dashboardFeedStatus.value = snapshot.status ?? {
       ...dashboardFeedStatus.value,
       running: true,
@@ -295,8 +319,13 @@ export const useMarketStore = defineStore("market", () => {
       venue_type: snapshot.session?.venue_type ?? dashboardFeedStatus.value.venue_type,
       last_refresh_at: snapshot.generated_at,
     };
-    feedErrors.value = snapshot.errors ?? [];
-    feedWarnings.value = snapshot.warnings ?? [];
+    dashboardFeedStatus.value = {
+      ...dashboardFeedStatus.value,
+      errors: blockingErrors,
+      warnings: visibleWarnings,
+    };
+    feedErrors.value = blockingErrors;
+    feedWarnings.value = visibleWarnings;
     feedWarnings.value.forEach(recordWarning);
     if (snapshot.market_overview) {
       applyOverview(snapshot.market_overview);
@@ -321,6 +350,15 @@ export const useMarketStore = defineStore("market", () => {
     liveConnection.value = feedErrors.value.length ? "degraded" : "live";
   }
 
+  function hasUsableDashboardFeedData(): boolean {
+    if (
+      dashboardFeedStatus.value.running &&
+      isRecentIsoTimestamp(dashboardFeedStatus.value.last_refresh_at, 60_000)
+    ) {
+      return true;
+    }
+    return hasUsableDashboardSnapshotRows(overview.value.instruments);
+  }
 
   function applyOverview(nextOverview: MarketOverviewResponse): void {
     if (!nextOverview.instruments.length) {
@@ -836,6 +874,48 @@ function quoteTimestamp(value: string | null): number {
   }
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function isTransientDashboardFeedError(value: string): boolean {
+  return TRANSIENT_DASHBOARD_FEED_ERRORS.has(value);
+}
+
+function hasUsableInstrumentData(instrument: MarketInstrumentOverview): boolean {
+  return Boolean(
+    instrument.quote_status === "live" ||
+      instrument.freshness_status === "fresh" ||
+      instrument.order_book_stale === false ||
+      (instrument.last_price && instrument.is_price_stale === false) ||
+      instrument.best_bid ||
+      instrument.best_ask,
+  );
+}
+
+function hasUsableDashboardSnapshotRows(rows: MarketInstrumentOverview[] | undefined): boolean {
+  return Boolean(rows?.some(hasUsableInstrumentData));
+}
+
+function snapshotHasUsableDashboardFeedData(snapshot: DashboardMarketFeedSnapshot): boolean {
+  return Boolean(
+    hasUsableDashboardSnapshotRows(snapshot.quote_rows) ||
+      hasUsableDashboardSnapshotRows(snapshot.market_overview?.instruments) ||
+      (snapshot.selected_details && hasUsableInstrumentData(snapshot.selected_details)),
+  );
+}
+
+function isRecentIsoTimestamp(value: string | null | undefined, maxAgeMs: number): boolean {
+  if (!value) {
+    return false;
+  }
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) {
+    return false;
+  }
+  return Date.now() - parsed <= maxAgeMs;
+}
+
+function boundedUnique(values: string[], limit = 8): string[] {
+  return Array.from(new Set(values.filter(Boolean))).slice(0, limit);
 }
 
 function errorText(value: unknown): string {

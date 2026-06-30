@@ -2793,8 +2793,9 @@ def _dashboard_market_feed_timeout_snapshot(
     raw_errors = status.get("errors")
     errors = list(raw_errors) if isinstance(raw_errors, list) else []
     raw_warnings = status.get("warnings")
-    if "dashboard_market_feed_timeout" not in errors:
-        errors.insert(0, "dashboard_market_feed_timeout")
+    warnings = list(raw_warnings) if isinstance(raw_warnings, list) else []
+    if "dashboard_market_feed_timeout" not in warnings:
+        warnings.insert(0, "dashboard_market_feed_timeout")
     generated_at = datetime.now(tz=UTC).isoformat()
     return {
         "generated_at": generated_at,
@@ -2824,13 +2825,14 @@ def _dashboard_market_feed_timeout_snapshot(
             selected_details.model_dump(mode="json") if selected_details is not None else None
         ),
         "errors": errors[:5],
-        "warnings": list(raw_warnings) if isinstance(raw_warnings, list) else [],
+        "warnings": warnings[:8],
         "status": {
             **status,
             "running": bool(status.get("running")),
             "last_refresh_at": status.get("last_refresh_at") or generated_at,
             "selected_instrument": selected_id,
             "errors": errors[:5],
+            "warnings": warnings[:8],
         },
     }
 

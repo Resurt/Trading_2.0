@@ -163,6 +163,24 @@ describe("LiveDashboardView", () => {
     expect(sessionRibbon).not.toContain("2026-06-13");
   });
 
+  it("does not render stale request_timeout over a usable dashboard feed", async () => {
+    const wrapper = mountWithStores();
+    const market = useMarketStore();
+
+    market.feedErrors = ["request_timeout"];
+    market.dashboardFeedStatus = {
+      ...market.dashboardFeedStatus,
+      running: true,
+      market_open: true,
+      last_refresh_at: new Date().toISOString(),
+    };
+    await nextTick();
+
+    const sessionRibbon = wrapper.find('[data-testid="session-ribbon"]').text();
+    expect(sessionRibbon).toContain("online");
+    expect(sessionRibbon).not.toContain("request_timeout");
+  });
+
   it("renders degraded balance state with refresh guidance", async () => {
     const wrapper = mountWithStores();
     const robot = useRobotStore();

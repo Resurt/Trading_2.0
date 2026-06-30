@@ -163,6 +163,8 @@ function reasonLabel(reason: string | null | undefined): string {
     no_order_book_samples: "нет samples стакана",
     no_market_trades_feed_implemented: "market trades feed ещё не реализован",
     dashboard_market_feed_unavailable: "dashboard live feed временно недоступен",
+    dashboard_refresh_retrying: "dashboard feed повторяет refresh; показываю последнее свежее состояние",
+    dashboard_market_feed_timeout: "dashboard feed не успел обновиться; идёт повтор refresh",
     dashboard_last_prices_unavailable: "last prices временно недоступны",
     dashboard_gateway_unavailable: "readonly broker gateway недоступен",
     selected_order_book_unavailable: "стакан выбранного инструмента недоступен",
@@ -494,7 +496,7 @@ function collectionReason(): string {
 }
 
 function dashboardFeedValue(): string {
-  if (market.feedErrors.length) {
+  if (dashboardBlockingErrors().length) {
     return "ошибка";
   }
   if (market.dashboardFeedStatus.running) {
@@ -504,15 +506,52 @@ function dashboardFeedValue(): string {
 }
 
 function dashboardFeedDetail(): string {
-  if (market.feedErrors.length) {
-    return reasonLabel(market.feedErrors[0]);
+  const blockingErrors = dashboardBlockingErrors();
+  if (blockingErrors.length) {
+    return reasonLabel(blockingErrors[0]);
+  }
+  if (market.dashboardFeedStatus.last_refresh_at) {
+    return `feed ${compactDateTime(market.dashboardFeedStatus.last_refresh_at)}`;
   }
   if (market.feedWarnings.length) {
     return reasonLabel(market.feedWarnings[0]);
   }
-  return market.dashboardFeedStatus.last_refresh_at
-    ? `refresh ${compactDateTime(market.dashboardFeedStatus.last_refresh_at)}`
-    : "Start не требуется";
+  return "Start не требуется";
+}
+
+function dashboardBlockingErrors(): string[] {
+  if (hasUsableDashboardFeed()) {
+    return market.feedErrors.filter((item) => !isTransientDashboardFeedError(item));
+  }
+  return market.feedErrors;
+}
+
+function hasUsableDashboardFeed(): boolean {
+  return Boolean(
+    (market.dashboardFeedStatus.running &&
+      isRecentIsoTimestamp(market.dashboardFeedStatus.last_refresh_at, 60_000)) ||
+      market.quoteRows.some(
+        (instrument) =>
+          instrument.quote_status === "live" ||
+          instrument.freshness_status === "fresh" ||
+          instrument.order_book_stale === false,
+      ),
+  );
+}
+
+function isRecentIsoTimestamp(value: string | null | undefined, maxAgeMs: number): boolean {
+  if (!value) {
+    return false;
+  }
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) {
+    return false;
+  }
+  return Date.now() - parsed <= maxAgeMs;
+}
+
+function isTransientDashboardFeedError(value: string): boolean {
+  return value === "request_timeout" || value === "dashboard_market_feed_timeout";
 }
 
 function tradeTapeReason(): string {

@@ -5,6 +5,7 @@ import os
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -1372,6 +1373,60 @@ def test_dashboard_market_feed_merge_does_not_let_stale_cache_override_fresh_bas
 
     assert merged.instruments[0].last_price == Decimal("307.00")
     assert merged.instruments[0].quote_status == "live"
+
+
+def test_dashboard_market_feed_timeout_snapshot_is_retry_warning() -> None:
+    app_module = importlib.import_module("trading_api.app")
+    now = datetime.now(tz=UTC)
+    row = MarketInstrumentOverview(
+        instrument_id="MOEX:SBER",
+        ticker="SBER",
+        official_exchange_open=True,
+        quote_source="live_exchange_order_book",
+        last_price_source="live_exchange_order_book",
+        last_price=Decimal("307.00"),
+        last_price_at=now,
+        received_ts=now,
+        exchange_ts=now,
+        stale_by_received_time=False,
+        stale_by_exchange_time=False,
+        is_price_stale=False,
+        freshness_status="fresh",
+        quote_status="live",
+        order_book_source="live_exchange_order_book",
+        order_book_ts=now,
+        order_book_stale=False,
+    )
+
+    class Feed:
+        def status(self) -> dict[str, object]:
+            return {
+                "enabled": True,
+                "running": True,
+                "market_open": True,
+                "session_type": "weekday_evening",
+                "session_phase": "continuous_trading",
+                "venue_type": "official_exchange",
+                "last_refresh_at": now.isoformat(),
+                "selected_instrument": "MOEX:SBER",
+                "quote_rows_count": 1,
+                "order_book_available": True,
+                "trade_tape_available": False,
+                "errors": [],
+                "warnings": [],
+            }
+
+    snapshot = app_module._dashboard_market_feed_timeout_snapshot(
+        cast(Any, Feed()),
+        base_overview=MarketOverviewResponse(generated_at=now, instruments=[row]),
+        selected_instrument="MOEX:SBER",
+    )
+
+    assert snapshot["errors"] == []
+    assert "dashboard_market_feed_timeout" in snapshot["warnings"]
+    assert snapshot["status"]["errors"] == []
+    assert "dashboard_market_feed_timeout" in snapshot["status"]["warnings"]
+    assert snapshot["quote_rows"][0]["quote_status"] == "live"
 
 
 def test_market_overview_falls_back_when_dashboard_feed_gateway_unavailable(

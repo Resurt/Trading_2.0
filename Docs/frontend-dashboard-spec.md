@@ -43,6 +43,12 @@ The first WebSocket snapshot must include:
 
 If WebSocket fails, REST polling continues. If REST also fails, the UI keeps the
 last good data and shows a degraded/stale warning instead of clearing the board.
+Transient REST timeouts such as `request_timeout` or
+`dashboard_market_feed_timeout` are retry warnings when a current WebSocket or
+last-good dashboard snapshot is available. They must not override the top
+Dashboard Feed tile into `ошибка`; the ribbon should keep showing `online` and
+the latest successful `last_refresh_at` until there is no usable live/last-good
+market data left.
 
 ## Session Ribbon
 

@@ -222,6 +222,54 @@ describe("market store", () => {
     expect(market.currentInstrument?.last_price).toBe("313.10");
   });
 
+  it("does not show transient dashboard timeout as blocking when live rows are available", async () => {
+    const market = useMarketStore();
+    const now = new Date().toISOString();
+    market.applyOverview({
+      generated_at: now,
+      instruments: [
+        instrument({
+          last_price: "313.10",
+          last_price_at: now,
+          is_price_stale: false,
+          quote_status: "live",
+          freshness_status: "fresh",
+        }),
+      ],
+    });
+    apiClientMock.dashboardMarketFeedSnapshot.mockRejectedValue(new Error("request_timeout"));
+
+    await market.fetchOverview({ silent: true });
+
+    expect(market.currentInstrument?.last_price).toBe("313.10");
+    expect(market.feedErrors).toEqual([]);
+    expect(market.feedWarnings).toContain("dashboard_refresh_retrying");
+  });
+
+  it("treats backend dashboard timeout snapshot as retry warning with usable data", () => {
+    const market = useMarketStore();
+    const now = new Date().toISOString();
+    const snapshot = feedSnapshot(
+      [
+        instrument({
+          last_price: "313.10",
+          last_price_at: now,
+          is_price_stale: false,
+          quote_status: "live",
+          freshness_status: "fresh",
+        }),
+      ],
+    );
+    snapshot.errors = ["dashboard_market_feed_timeout"];
+    snapshot.status.errors = ["dashboard_market_feed_timeout"];
+
+    market.applyDashboardFeedSnapshot(snapshot);
+
+    expect(market.feedErrors).toEqual([]);
+    expect(market.feedWarnings).toContain("dashboard_refresh_retrying");
+    expect(market.dashboardFeedStatus.errors).toEqual([]);
+  });
+
   it("loads selected instrument details lazily", async () => {
     const market = useMarketStore();
     const gazp = instrument({ instrument_id: "MOEX:GAZP", ticker: "GAZP", last_price: "144.20" });
