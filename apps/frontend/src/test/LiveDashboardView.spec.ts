@@ -163,6 +163,56 @@ describe("LiveDashboardView", () => {
     expect(sessionRibbon).not.toContain("2026-06-13");
   });
 
+  it("uses closed dashboard feed status over stale robot session fields", async () => {
+    const wrapper = mountWithStores();
+    const robot = useRobotStore();
+    const market = useMarketStore();
+    robot.status = {
+      ...robot.status,
+      session_type: "weekday_evening",
+      session_phase: "continuous_trading",
+      broker_trading_status: "normal_trading",
+    };
+    robot.lastSessionPreflight = {
+      market_open: true,
+      data_only_collection_allowed: true,
+      reason_code: "market_open",
+      next_session_at: "2026-07-01T07:00:00+03:00",
+      venue_type: "official_exchange",
+    } as any;
+    market.dashboardFeedStatus = {
+      ...market.dashboardFeedStatus,
+      running: true,
+      market_open: false,
+      session_type: "closed",
+      session_phase: "closed",
+      venue_type: "broker_indicative",
+      next_session_at: "2026-07-01T07:00:00+03:00",
+      last_refresh_at: new Date().toISOString(),
+      warnings: [],
+    };
+    market.dataShadowStatus = {
+      ...market.dataShadowStatus,
+      collector_state: "stopped_day_complete",
+      market_open: false,
+      market_closed_expected: true,
+      reason_code: "data_only_session_window_closed",
+    };
+    await nextTick();
+
+    const sessionRibbon = wrapper.find('[data-testid="session-ribbon"]').text();
+    expect(sessionRibbon).toContain("Рынок закрыт");
+    expect(sessionRibbon).toContain("Торги закрыты");
+    expect(sessionRibbon).toContain("индикативная");
+    expect(sessionRibbon).toContain("заблокирован");
+    expect(sessionRibbon).not.toContain("Вечерняя сессия");
+    expect(sessionRibbon).not.toContain("рынок открыт");
+    expect(wrapper.text()).toContain("День завершён");
+    expect(wrapper.text()).toContain("окно data-only сбора закрыто");
+    expect(wrapper.text()).not.toContain("уточняется");
+    expect(wrapper.text()).not.toContain("stopped_day_complete");
+  });
+
   it("does not render stale request_timeout over a usable dashboard feed", async () => {
     const wrapper = mountWithStores();
     const market = useMarketStore();
@@ -231,7 +281,7 @@ describe("LiveDashboardView", () => {
     await nextTick();
 
     expect(wrapper.text()).toContain("Лента сделок недоступна");
-    expect(wrapper.text()).toContain("no_market_trades_samples");
+    expect(wrapper.text()).toContain("свежие сделки не пришли");
     expect(wrapper.text()).toContain("нет стакана");
     expect(wrapper.text()).toContain("display-only");
   });

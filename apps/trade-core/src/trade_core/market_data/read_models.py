@@ -123,8 +123,8 @@ class MarketReadModelStore:
                 "received_ts": trade.received_ts.isoformat(),
                 "trade_id": trade.trade_id,
                 "source": "market_trades_stream",
-                "venue_type": trade.payload.get("venue_type", "official_exchange"),
-                "include_in_calibration": True,
+                "venue_type": trade.payload.get("venue_type", "broker_market_trades"),
+                "include_in_calibration": False,
             }
             for trade in self._trades[instrument_id]
         ]

@@ -107,8 +107,6 @@ class DashboardMarketFeedService:
             last_refresh = max(refresh_values, default=last_refresh)
         market_open = bool(session_row.official_exchange_open) if session_row else False
         session_type, session_phase = _clock_session_context(market_open=market_open)
-        if not market_open and session_row and session_row.session_type:
-            session_type = session_row.session_type
         return {
             "enabled": self.config.enabled,
             "running": self._running,
@@ -116,6 +114,7 @@ class DashboardMarketFeedService:
             "session_type": session_type if session_row else "unknown",
             "session_phase": session_phase if session_row else "unknown",
             "venue_type": session_row.venue_type if session_row else "unknown",
+            "next_session_at": None,
             "last_refresh_at": last_refresh.isoformat() if last_refresh is not None else None,
             "selected_instrument": self._selected_instrument,
             "quote_rows_count": len(overview.instruments) if overview else 0,
@@ -173,7 +172,6 @@ class DashboardMarketFeedService:
         overview = _limit_overview(base_overview, self.config.max_instruments)
 
         if self._refresh_lock.locked():
-            self._record_warning("dashboard_refresh_in_progress")
             overview = _merge_overviews(overview, self._overview)
             return self._snapshot_payload(overview, selected_id)
 
@@ -415,7 +413,6 @@ class DashboardMarketFeedService:
             trade_update = _visible_trade_tape_update(
                 fetched_trades,
                 source="tbank_get_last_trades",
-                stale_source="tbank_get_last_trades_stale_diagnostic",
             )
             current = current.model_copy(update=trade_update)
             recent_trades = cast(list[dict[str, object]], trade_update["recent_market_trades"])
@@ -434,7 +431,8 @@ class DashboardMarketFeedService:
                     and trade_update.get("trade_tape_status") != "no_market_trades_samples"
                 ):
                     payload = {**payload, **trade_update}
-                current = current.model_copy(update=payload)
+                updated = current.model_copy(update=payload)
+                current = _preserve_fresh_selected_ladder(updated, current)
             elif recent_trades:
                 trade_update = _visible_trade_tape_update(
                     recent_trades,
@@ -579,7 +577,7 @@ class DashboardMarketFeedService:
             from_ts = to_ts - timedelta(
                 minutes=max(1, _env_int("DASHBOARD_TRADES_LOOKBACK_MINUTES", 30))
             )
-            trade_source = "exchange" if instrument.official_exchange_open else "all"
+            trade_source = "all"
             timeout_seconds = _env_float("DASHBOARD_TRADES_TIMEOUT_SECONDS", 1.0)
             response = await _run_readonly_broker_call(
                 lambda: gateway.get_last_trades(
@@ -603,11 +601,7 @@ class DashboardMarketFeedService:
             return []
         limit = max(1, _env_int("DASHBOARD_TRADES_LIMIT", 20))
         venue_type = "official_exchange" if instrument.official_exchange_open else "broker_otc"
-        source = (
-            "tbank_get_last_trades_exchange"
-            if instrument.official_exchange_open
-            else "tbank_get_last_trades_broker"
-        )
+        source = "tbank_get_last_trades"
         normalized: list[dict[str, object]] = []
         for item in raw_trades:
             if isinstance(item, dict):
@@ -622,8 +616,6 @@ class DashboardMarketFeedService:
                 )
         normalized.sort(key=_trade_sort_ts, reverse=True)
         normalized = normalized[:limit]
-        if not normalized:
-            self._record_warning("no_market_trades_samples")
         return normalized
 
     async def _get_order_book(
@@ -1106,7 +1098,81 @@ def _prefer_selected_details(
 ) -> MarketInstrumentOverview:
     if cached is None:
         return base
-    return _prefer_live_row(base, cached)
+    preferred = _prefer_live_row(base, cached)
+    if not _cached_row_safe_for_base_session(base, cached):
+        return preferred
+    return _preserve_fresh_selected_ladder(preferred, cached)
+
+
+def _preserve_fresh_selected_ladder(
+    preferred: MarketInstrumentOverview,
+    cached: MarketInstrumentOverview,
+) -> MarketInstrumentOverview:
+    if not _cached_row_safe_for_base_session(preferred, cached):
+        return preferred
+    if not _selected_ladder_display_fresh(cached):
+        return preferred
+    cached_levels = _order_book_level_count(cached)
+    preferred_levels = _order_book_level_count(preferred)
+    if cached_levels <= 0 or preferred_levels >= cached_levels:
+        return preferred
+    if cached_levels < 8 and preferred_levels > 0:
+        return preferred
+    return preferred.model_copy(update=_selected_ladder_fields(cached))
+
+
+def _selected_ladder_display_fresh(row: MarketInstrumentOverview) -> bool:
+    if row.order_book_source is None or row.order_book_stale:
+        return False
+    if row.order_book_ts is not None:
+        return datetime.now(tz=UTC) - _ensure_utc(row.order_book_ts) <= timedelta(seconds=30)
+    if row.order_book_age_ms is not None:
+        return row.order_book_age_ms <= 30_000
+    return False
+
+
+def _order_book_level_count(row: MarketInstrumentOverview) -> int:
+    summary = row.order_book_summary if isinstance(row.order_book_summary, dict) else {}
+    bids = summary.get("bids")
+    asks = summary.get("asks")
+    bid_count = len(bids) if isinstance(bids, list) else 0
+    ask_count = len(asks) if isinstance(asks, list) else 0
+    depth_levels = _safe_int(summary.get("depth_levels"))
+    return max(bid_count + ask_count, depth_levels or 0)
+
+
+def _safe_int(value: object) -> int | None:
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _selected_ladder_fields(row: MarketInstrumentOverview) -> dict[str, object]:
+    return {
+        "best_bid": row.best_bid,
+        "best_ask": row.best_ask,
+        "mid_price": row.mid_price,
+        "spread": row.spread,
+        "spread_abs": row.spread_abs,
+        "spread_bps": row.spread_bps,
+        "spread_abs_rub": row.spread_abs_rub,
+        "spread_units_validated": row.spread_units_validated,
+        "bid_depth_lots": row.bid_depth_lots,
+        "ask_depth_lots": row.ask_depth_lots,
+        "book_imbalance": row.book_imbalance,
+        "market_quality": row.market_quality,
+        "market_quality_score": row.market_quality_score,
+        "display_market_quality_score": row.display_market_quality_score,
+        "calibration_market_quality_score": row.calibration_market_quality_score,
+        "market_quality_label": row.market_quality_label,
+        "market_quality_components": row.market_quality_components,
+        "order_book_source": row.order_book_source,
+        "order_book_ts": row.order_book_ts,
+        "order_book_age_ms": row.order_book_age_ms,
+        "order_book_stale": row.order_book_stale,
+        "order_book_summary": row.order_book_summary,
+    }
 
 
 def _replace_instrument(
@@ -1164,8 +1230,6 @@ def _session_payload(instrument: MarketInstrumentOverview | None) -> dict[str, o
     session_type, session_phase = _clock_session_context(
         market_open=instrument.official_exchange_open
     )
-    if not instrument.official_exchange_open and instrument.session_type:
-        session_type = instrument.session_type
     return {
         "market_open": instrument.official_exchange_open,
         "session_type": session_type,
@@ -1181,9 +1245,7 @@ def _clock_session_context(*, market_open: bool) -> tuple[str, str]:
     now_msk = datetime.now(tz=UTC).astimezone(MSK)
     if market_open:
         return _clock_open_session_type(now_msk), "continuous_trading"
-    if now_msk.weekday() >= 5:
-        return "weekend", "closed"
-    return _clock_open_session_type(now_msk), "closed"
+    return "closed", "closed"
 
 
 def _clock_open_session_type(now_msk: datetime) -> str:
@@ -1275,7 +1337,7 @@ def _visible_trade_tape_update(
         "market_trades_source": (
             "no_market_trades_samples"
             if not normalized
-            else stale_source or source or "stale_market_trades_samples"
+            else source or stale_source or "stale_market_trades_samples"
         ),
         "market_trades_age_ms": age_ms,
         "trade_tape_status": status,

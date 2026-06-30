@@ -536,6 +536,187 @@ describe("market store", () => {
     expect(market.currentInstrument?.trade_tape_reason).toBe("trade_exchange_ts_too_old");
   });
 
+  it("keeps fresh trade tape when an intermittent no-samples snapshot arrives", () => {
+    const market = useMarketStore();
+    const now = new Date().toISOString();
+    market.applyOverview({
+      generated_at: now,
+      instruments: [
+        instrument({
+          recent_market_trades: [
+            { price: "307.61", exchange_ts: now, quantity_lots: "3", side: "buy" },
+          ],
+          market_trades_source: "market_trades_stream",
+          market_trades_age_ms: 500,
+          trade_tape_status: "live",
+          trade_tape_reason: "fresh",
+        }),
+      ],
+    });
+
+    market.applyOverview({
+      generated_at: now,
+      instruments: [
+        instrument({
+          market_trades_source: "no_market_trades_samples",
+          market_trades_age_ms: null,
+          trade_tape_status: "no_market_trades_samples",
+          trade_tape_reason: "no_market_trades_samples",
+        }),
+      ],
+    });
+
+    expect(market.currentInstrument?.recent_market_trades).toHaveLength(1);
+    expect(market.currentInstrument?.market_trades_source).toBe("market_trades_stream");
+    expect(market.currentInstrument?.trade_tape_status).toBe("live");
+  });
+
+  it("keeps a full fresh order book when a weaker one-level snapshot arrives", () => {
+    const market = useMarketStore();
+    const now = new Date().toISOString();
+    market.applyOverview({
+      generated_at: now,
+      instruments: [
+        instrument({
+          last_price: "307.61",
+          last_price_at: now,
+          last_price_source: "live_exchange_order_book",
+          is_price_stale: false,
+          exchange_age_ms: 0,
+          stale_by_exchange_time: false,
+          freshness_status: "fresh",
+          quote_source: "live_exchange_order_book",
+          official_exchange_open: true,
+          quote_status: "live",
+          best_bid: "307.60",
+          best_ask: "307.61",
+          bid_depth_lots: "28517",
+          ask_depth_lots: "135",
+          order_book_source: "live_exchange_order_book",
+          order_book_ts: now,
+          order_book_age_ms: 300,
+          order_book_stale: false,
+          order_book_summary: {
+            depth_levels: 20,
+            bids: [
+              { price: "307.60", quantity_lots: "10653" },
+              { price: "307.59", quantity_lots: "6857" },
+              { price: "307.58", quantity_lots: "1765" },
+              { price: "307.57", quantity_lots: "304" },
+              { price: "307.56", quantity_lots: "1452" },
+            ],
+            asks: [
+              { price: "307.61", quantity_lots: "20" },
+              { price: "307.62", quantity_lots: "25" },
+              { price: "307.63", quantity_lots: "25" },
+              { price: "307.64", quantity_lots: "30" },
+              { price: "307.65", quantity_lots: "35" },
+            ],
+          },
+        }),
+      ],
+    });
+
+    market.applyOverview({
+      generated_at: now,
+      instruments: [
+        instrument({
+          last_price: "307.62",
+          last_price_at: now,
+          last_price_source: "live_exchange_order_book",
+          is_price_stale: false,
+          exchange_age_ms: 0,
+          stale_by_exchange_time: false,
+          freshness_status: "fresh",
+          quote_source: "live_exchange_order_book",
+          official_exchange_open: true,
+          quote_status: "live",
+          best_bid: "307.61",
+          best_ask: "307.62",
+          order_book_source: "live_exchange_order_book",
+          order_book_ts: now,
+          order_book_age_ms: 300,
+          order_book_stale: false,
+          order_book_summary: {
+            depth_levels: 2,
+            bids: [{ price: "307.61", quantity_lots: "355" }],
+            asks: [{ price: "307.62", quantity_lots: "19" }],
+          },
+        }),
+      ],
+    });
+
+    const summary = market.currentInstrument?.order_book_summary ?? {};
+    expect(Array.isArray(summary.bids) ? summary.bids.length : 0).toBe(5);
+    expect(Array.isArray(summary.asks) ? summary.asks.length : 0).toBe(5);
+    expect(market.currentInstrument?.bid_depth_lots).toBe("28517");
+  });
+
+  it("does not keep a live exchange order book after the dashboard session closes", () => {
+    const market = useMarketStore();
+    const oldTs = new Date(Date.now() - 120_000).toISOString();
+    const now = new Date().toISOString();
+    market.applyOverview({
+      generated_at: oldTs,
+      instruments: [
+        instrument({
+          last_price: "307.61",
+          last_price_at: oldTs,
+          last_price_source: "live_exchange_order_book",
+          is_price_stale: false,
+          exchange_age_ms: 0,
+          stale_by_exchange_time: false,
+          freshness_status: "fresh",
+          quote_source: "live_exchange_order_book",
+          official_exchange_open: true,
+          quote_allowed_for_data_collection: true,
+          quote_status: "live",
+          best_bid: "307.60",
+          best_ask: "307.61",
+          order_book_source: "live_exchange_order_book",
+          order_book_ts: oldTs,
+          order_book_age_ms: 300,
+          order_book_stale: false,
+          order_book_summary: {
+            depth_levels: 20,
+            bids: [{ price: "307.60", quantity_lots: "10653" }],
+            asks: [{ price: "307.61", quantity_lots: "20" }],
+          },
+        }),
+      ],
+    });
+
+    market.applyOverview({
+      generated_at: now,
+      instruments: [
+        instrument({
+          last_price: "308.05",
+          last_price_at: now,
+          last_price_source: "broker_indicative_quote",
+          quote_source: "broker_indicative_quote",
+          venue_type: "broker_indicative",
+          trading_mode: "indicative_only",
+          official_exchange_open: false,
+          official_exchange_closed: true,
+          quote_allowed_for_data_collection: false,
+          quote_status: "indicative",
+          best_bid: null,
+          best_ask: null,
+          order_book_source: null,
+          order_book_ts: null,
+          order_book_age_ms: null,
+          order_book_stale: true,
+          order_book_summary: {},
+        }),
+      ],
+    });
+
+    expect(market.currentInstrument?.quote_source).toBe("broker_indicative_quote");
+    expect(market.currentInstrument?.order_book_source).toBeNull();
+    expect(market.currentInstrument?.order_book_summary).toEqual({});
+    expect(market.currentInstrument?.quote_allowed_for_data_collection).toBe(false);
+  });
+
   it("keeps broker order book metrics when weaker snapshots arrive later", () => {
     const market = useMarketStore();
     const now = new Date().toISOString();

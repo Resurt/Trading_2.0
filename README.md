@@ -426,7 +426,20 @@ kept as diagnostics and must not by itself flip a recently received book to
 `stale`. Last-price-only, candle, previous-close, OTC/indicative and trade-tape
 fallbacks remain exchange-time gated: stale candles must not be labeled live, and
 old `GetLastTrades` diagnostics are rendered as `trade_tape_status`/
-`trade_tape_reason` instead of table rows.
+`trade_tape_reason` with `market_trades_source=tbank_get_last_trades` instead of
+table rows. Short empty/no-samples selected refreshes must not erase an existing
+fresh trade tape or collapse a fresh full order-book ladder; once the freshness
+budget expires, the dashboard shows the explicit stale/unavailable reason.
+Dashboard trade tape is readonly display data: it may use all-source broker
+market trades for visibility, but it does not create calibration rows or trading
+entities.
+
+After the official session closes, the dashboard must show `Рынок закрыт` /
+`Торги закрыты` from the dashboard feed snapshot. Broker OTC or indicative
+quotes may still be displayed, but only as venue/source metadata; they must not
+make the ribbon jump back to `Вечерняя сессия`, must not keep
+`data_only_collection_allowed=true`, and must not preserve a cached live exchange
+order book as a fresh calibration-eligible book.
 
 Runbook: `Docs/runbooks/data-only-shadow.md`.
 

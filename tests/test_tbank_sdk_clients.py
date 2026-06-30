@@ -1132,7 +1132,7 @@ def test_market_data_stream_maps_non_candle_stream_payloads(
     assert payload["instrument_id"] == "uid-sber"
     assert payload_key in payload
     if stream_name == "market_trades":
-        assert subscription_request.trade_source is FakeTradeSourceType.TRADE_SOURCE_EXCHANGE
+        assert subscription_request.trade_source is FakeTradeSourceType.TRADE_SOURCE_ALL
         assert subscription_request.with_open_interest is False
 
 

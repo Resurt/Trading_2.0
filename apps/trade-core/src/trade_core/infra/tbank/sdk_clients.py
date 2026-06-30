@@ -592,7 +592,7 @@ def _market_stream_requests(
                     trade_source=_enum_or_none(
                         sdk,
                         "TradeSourceType",
-                        "TRADE_SOURCE_EXCHANGE",
+                        "TRADE_SOURCE_ALL",
                     ),
                     with_open_interest=False,
                 )
@@ -1047,6 +1047,8 @@ def _market_trade_payload(trade: Any) -> JsonPayload:
         "quantity_lots": str(_attr(trade, "quantity") or 0),
         "side": _enum_name(_attr(trade, "direction")),
         "exchange_ts": _iso_or_none(_attr(trade, "time")),
+        "source": "market_trades_stream",
+        "trade_source": "all",
     }
 
 

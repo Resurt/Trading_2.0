@@ -296,6 +296,36 @@ class FakeDashboardFeedGateway(FakeQuoteGateway):
         )
 
 
+class FakePartialOrderBookGateway(FakeDashboardFeedGateway):
+    def __init__(self) -> None:
+        self.order_book_calls = 0
+
+    async def get_order_book(self, request: object, metadata: object = None) -> BrokerUnaryResponse:
+        del request, metadata
+        self.order_book_calls += 1
+        if self.order_book_calls == 1:
+            bids = [
+                {"price": f"{100 - index * 0.01:.2f}", "quantity_lots": str(100 + index)}
+                for index in range(5)
+            ]
+            asks = [
+                {"price": f"{100.10 + index * 0.01:.2f}", "quantity_lots": str(80 + index)}
+                for index in range(5)
+            ]
+        else:
+            bids = [{"price": "100.01", "quantity_lots": "7"}]
+            asks = [{"price": "100.11", "quantity_lots": "8"}]
+        return BrokerUnaryResponse(
+            method_name="GetOrderBook",
+            data={
+                "instrument_uid": "uid-sber",
+                "exchange_ts": datetime.now(tz=UTC).isoformat(),
+                "bids": bids,
+                "asks": asks,
+            },
+        )
+
+
 class FakeOldFirstTradesGateway(FakeDashboardFeedGateway):
     async def get_last_trades(
         self,
@@ -1375,6 +1405,62 @@ def test_dashboard_market_feed_merge_does_not_let_stale_cache_override_fresh_bas
     assert merged.instruments[0].quote_status == "live"
 
 
+def test_dashboard_market_feed_does_not_preserve_live_ladder_after_close() -> None:
+    feed_module = importlib.import_module("trading_api.dashboard_market_feed")
+    now = datetime.now(tz=UTC)
+    closed_row = MarketInstrumentOverview(
+        instrument_id="MOEX:SBER",
+        ticker="SBER",
+        official_exchange_open=False,
+        official_exchange_closed=True,
+        quote_allowed_for_data_collection=False,
+        quote_source="broker_indicative_quote",
+        last_price_source="broker_indicative_quote",
+        last_price=Decimal("308.00"),
+        last_price_at=now,
+        received_ts=now,
+        exchange_ts=now,
+        stale_by_received_time=False,
+        stale_by_exchange_time=False,
+        is_price_stale=False,
+        freshness_status="display_only",
+        quote_status="indicative",
+        order_book_source=None,
+        order_book_ts=None,
+        order_book_age_ms=None,
+        order_book_stale=True,
+        order_book_summary={},
+    )
+    cached_live_row = closed_row.model_copy(
+        update={
+            "official_exchange_open": True,
+            "official_exchange_closed": False,
+            "quote_allowed_for_data_collection": True,
+            "quote_source": "live_order_book_mid",
+            "last_price_source": "live_order_book_mid",
+            "quote_status": "live",
+            "order_book_source": "live_order_book_mid",
+            "order_book_ts": now,
+            "order_book_age_ms": 300,
+            "order_book_stale": False,
+            "order_book_summary": {
+                "include_in_calibration": True,
+                "depth_levels": 20,
+                "bids": [{"price": "307.99", "quantity_lots": "100"}],
+                "asks": [{"price": "308.01", "quantity_lots": "100"}],
+            },
+        }
+    )
+
+    preferred = feed_module._prefer_selected_details(closed_row, cached_live_row)
+
+    assert preferred.official_exchange_open is False
+    assert preferred.quote_allowed_for_data_collection is False
+    assert preferred.quote_source == "broker_indicative_quote"
+    assert preferred.order_book_source is None
+    assert preferred.order_book_summary == {}
+
+
 def test_dashboard_market_feed_timeout_snapshot_is_retry_warning() -> None:
     app_module = importlib.import_module("trading_api.app")
     now = datetime.now(tz=UTC)
@@ -1519,9 +1605,7 @@ def test_dashboard_market_feed_snapshot_does_not_require_collector_or_write_db(
     assert snapshot["selected_details"]["instrument_id"] == "MOEX:SBER"
     assert snapshot["selected_details"]["order_book_source"] == "broker_quote_exchange_closed"
     assert snapshot["selected_details"]["recent_market_trades"] == []
-    assert snapshot["selected_details"]["market_trades_source"] == (
-        "tbank_get_last_trades_stale_diagnostic"
-    )
+    assert snapshot["selected_details"]["market_trades_source"] == "tbank_get_last_trades"
     assert snapshot["selected_details"]["trade_tape_status"] == "stale"
     assert snapshot["selected_details"]["trade_tape_reason"] == "trade_exchange_ts_too_old"
     assert before == after
@@ -1556,6 +1640,47 @@ def test_dashboard_market_feed_sorts_last_trades_newest_first(
     assert selected["recent_market_trades"][0]["price"] == "314.01"
     assert selected["trade_tape_status"] == "live"
     assert selected["trade_tape_reason"] == "fresh"
+
+
+def test_dashboard_market_feed_keeps_full_selected_ladder_over_partial_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app_module = importlib.import_module("trading_api.app")
+
+    monkeypatch.setenv("DASHBOARD_MARKET_FEED_ENABLED", "true")
+    monkeypatch.setenv("DASHBOARD_SELECTED_BOOK_REFRESH_SECONDS", "0")
+    force_exchange_open(monkeypatch)
+    gateway = FakePartialOrderBookGateway()
+    monkeypatch.setattr(app_module, "_readonly_tbank_gateway", lambda: gateway)
+    database = DatabaseService(f"sqlite+pysqlite:///{tmp_path / 'dashboard-feed-partial-book.db'}")
+    Base.metadata.create_all(database.engine)
+    seed_database(database)
+    app = create_fastapi_app(database=database, report_task_client=FakeReportTaskClient())
+    client = TestClient(app)
+
+    params = {
+        "selected_instrument": "MOEX:SBER",
+        "include_order_book": True,
+        "include_trades": False,
+    }
+    first = client.get(
+        "/dashboard/market-feed/snapshot",
+        headers={"X-API-Role": "observer"},
+        params=params,
+    ).json()
+    second = client.post(
+        "/dashboard/market-feed/refresh",
+        headers={"X-API-Role": "observer"},
+        params=params,
+    ).json()
+
+    assert gateway.order_book_calls == 2
+    assert len(first["selected_details"]["order_book_summary"]["bids"]) == 5
+    assert len(first["selected_details"]["order_book_summary"]["asks"]) == 5
+    assert len(second["selected_details"]["order_book_summary"]["bids"]) == 5
+    assert len(second["selected_details"]["order_book_summary"]["asks"]) == 5
+    assert second["selected_details"]["best_bid"] == first["selected_details"]["best_bid"]
 
 
 def test_market_websocket_uses_dashboard_feed_and_preserves_selection(
@@ -1786,7 +1911,7 @@ def test_market_quotes_refresh_marks_successful_order_book_refresh_display_only_
     assert sber["price_staleness_seconds"] == 0
     assert sber["order_book_summary"]["exchange_ts"] == "2026-06-21T10:00:00+00:00"
     assert sber["order_book_summary"]["exchange_age_seconds"] is not None
-    assert sber["market_trades_source"] == "tbank_get_last_trades_stale_diagnostic"
+    assert sber["market_trades_source"] == "tbank_get_last_trades"
     assert sber["recent_market_trades"] == []
     assert sber["trade_tape_status"] == "stale"
     assert sber["trade_tape_reason"] == "trade_exchange_ts_too_old"
@@ -1851,7 +1976,7 @@ def test_market_overview_uses_recent_readonly_quote_refresh_cache(
     assert sber["is_price_stale"] is False
     assert sber["best_bid"] == "312.98"
     assert sber["best_ask"] == "313.40"
-    assert sber["market_trades_source"] == "tbank_get_last_trades_stale_diagnostic"
+    assert sber["market_trades_source"] == "tbank_get_last_trades"
     assert sber["recent_market_trades"] == []
     assert sber["trade_tape_status"] == "stale"
     assert sber["trade_tape_reason"] == "trade_exchange_ts_too_old"

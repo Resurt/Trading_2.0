@@ -148,9 +148,30 @@ for example:
 
 Missing order book must not block the quote board.
 
+When a selected-instrument refresh returns a weaker snapshot, such as one
+book level or no levels, while the previous full ladder is still fresh by
+receipt time, the frontend keeps the previous full ladder until the order-book
+freshness budget expires. A transient partial refresh must not collapse a visible
+10-level ladder to a one-row or empty ladder.
+
+The BFF also builds `selected_details` from the full read-model row for the
+selected instrument before applying readonly broker refresh overlays. A thin
+`GetOrderBook` response must not replace a fresher, deeper
+`order_book_summary` stream/read-model ladder.
+
+When the dashboard session is closed, the selected order-book cache must not
+preserve an older live exchange ladder. Closed-session display rows must use
+`session_type=closed`, `session_phase=closed`, and a venue/source such as
+`broker_otc` or `broker_indicative` only as display metadata. The UI must not
+show `weekday_evening` or `quote_allowed_for_data_collection=true` merely because
+a cached live order book was fresh in a previous trading window.
+
 ## Trade Tape
 
 Selected details must include either recent trades or explicit trade tape status.
+The dashboard tape is an operator display surface and uses readonly all-source
+market-trades calls/stream samples where needed; it must not write calibration or
+trading entities.
 Supported status values include:
 
 - `live`
@@ -171,10 +192,15 @@ configured threshold, the UI must show the tape as delayed/stale, for example
 must not label those rows as a live market stream and must not render them as
 live tape rows. The table is reserved for fresh market-trades stream samples (or
 fresh readonly snapshots when explicitly marked as such); stale diagnostic
-`GetLastTrades` rows are represented only by status/reason text.
+`GetLastTrades` rows are represented only by status/reason text. Stale
+`GetLastTrades` diagnostics use `market_trades_source=tbank_get_last_trades`;
+raw diagnostic source names must not be rendered in the operator UI.
 
-The frontend must not preserve old trade rows across refreshes when the current
-selected details mark the tape stale or unknown.
+The frontend may preserve the last fresh trade tape across an intermittent empty
+or `no_market_trades_samples` refresh only while the newest trade exchange
+timestamp remains inside the trade freshness budget. Once that budget expires, or
+when the selected instrument changes, old rows must be dropped and the panel must
+show the explicit trade tape status/reason instead of stale table rows.
 
 ## Connection Indicator
 

@@ -244,13 +244,14 @@ export interface DashboardMarketFeedSession {
 }
 
 export interface DashboardMarketFeedStatus {
-  enabled: boolean;
-  running: boolean;
-  market_open: boolean;
-  session_type: string | null;
-  session_phase: string | null;
-  venue_type: string | null;
-  last_refresh_at: string | null;
+    enabled: boolean;
+    running: boolean;
+    market_open: boolean;
+    session_type: string | null;
+    session_phase: string | null;
+    venue_type: string | null;
+    next_session_at?: string | null;
+    last_refresh_at: string | null;
   selected_instrument: string | null;
   quote_rows_count: number;
   order_book_available: boolean;

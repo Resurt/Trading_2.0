@@ -278,7 +278,7 @@ dashboard request starts a lightweight refresh path:
 - quote board: `GetLastPrices` for the core universe, default every 2 seconds;
 - selected instrument: `GetOrderBook`, default every 1 second while the dashboard
   is polling;
-- selected trade tape: readonly last trades when available; otherwise
+- selected trade tape: readonly all-source last trades when available; otherwise
   `trade_tape_status=no_market_trades_samples` /
   `market_trades_source=no_market_trades_samples` or
   `no_market_trades_feed_implemented`;
@@ -318,6 +318,19 @@ The selected order-book feed refreshes below the freshness budget by default
 (`DASHBOARD_SELECTED_BOOK_REFRESH_SECONDS=3`,
 `DASHBOARD_ORDER_BOOK_MAX_EXCHANGE_AGE_SECONDS=30`) and forces a refresh when the
 cached selected ladder is about to become stale.
+For `selected_details`, the BFF loads the selected instrument with full
+read-model details before applying readonly broker overlays. A partial
+`GetOrderBook` response with fewer levels must not collapse a fresh stream-backed
+selected ladder.
+If the dashboard session is closed, `session.session_type` and
+`session.session_phase` must both be `closed`; broker OTC/indicative availability
+is reported through `venue_type`, `quote_source`, and `trading_mode`, not by
+rendering an old weekday session as active. Cached live exchange ladders from a
+previous open window must not be copied into closed-session selected details.
+If another refresh is already in progress, the service may return the last cache
+snapshot instead of starting a duplicate broker fan-out. That single-flight state
+is not an operator-facing error and must not overwrite an otherwise usable
+dashboard with a persistent `dashboard_refresh_in_progress` warning.
 
 ## `/market/overview`
 
@@ -370,8 +383,15 @@ an older trading date must not be labeled as current/live.
 Trade tape freshness is independent from order-book freshness. Stale
 `GetLastTrades` diagnostics must not populate `recent_market_trades`; return an
 empty trade list with `trade_tape_status=stale` and
-`trade_tape_reason=trade_exchange_ts_too_old` instead. Clients must display that
-as delayed/stale status text, not as `live`/`market stream` rows.
+`trade_tape_reason=trade_exchange_ts_too_old` instead. Use
+`market_trades_source=tbank_get_last_trades` for that diagnostic source; raw
+internal names such as stale diagnostic source variants must not appear in the
+operator UI. Clients must display that as delayed/stale status text, not as
+`live`/`market stream` rows.
+Dashboard trade tape is display-only. It may use T-Bank all-source market trades
+to avoid an empty exchange-only tape, but those rows are not primary calibration
+rows and must not create `market_microstructure_snapshot`,
+`signal_candidate`, `order_intent`, `broker_order`, or `order_state_event`.
 
 `POST /market/quotes/refresh` remains an explicit readonly broker path. It accepts
 `quotes_only=true` and `include_order_book=false` defaults. It may call T-Invest

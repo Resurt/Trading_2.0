@@ -1317,10 +1317,19 @@ diagnostics. Persistent calibration evidence is created only by data-only
 collection after Start/preflight and should be visible as
 `market_microstructure_snapshot` deltas. A broker response received now does not
 make an old exchange timestamp calibration-eligible.
+After an official close, dashboard session metadata must be `closed/closed`.
+Broker OTC/indicative quotes stay display-only venue/source metadata and must not
+carry `include_in_calibration=true` or resurrect a cached live exchange order
+book in selected details.
 
 Order-book analytics store spread in separate units: `spread_abs_rub` and `spread_bps`.
 Quality payloads store display and calibration scores plus transparent components. Trade
-tape absence is logged as `no_market_trades_samples`; it is not hidden.
+tape absence is logged as `no_market_trades_samples`; it is not hidden. Stale
+readonly `GetLastTrades` diagnostics are not analytics samples and must be
+reported with `trade_tape_status=stale`,
+`trade_tape_reason=trade_exchange_ts_too_old`, and
+`market_trades_source=tbank_get_last_trades` rather than being displayed or
+stored as live trade rows.
 
 Data-shadow runtime status exposes supervisor observability separately from
 analytics facts: `supervisor_enabled`, `supervisor_state`,

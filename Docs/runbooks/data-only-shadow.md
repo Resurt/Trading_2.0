@@ -327,11 +327,15 @@ Trade tape is explicit: selected details include either `recent_market_trades` o
 `trade_tape_status`/`trade_tape_reason` such as `no_market_trades_samples`,
 `get_last_trades_timeout`, `market_closed`, `stale`, or `unavailable`. Missing
 trade tape must not block quotes or order-book display.
+The operator dashboard requests all-source readonly market trades for display so
+the tape does not disappear when exchange-only samples are unavailable. These
+trade rows are display diagnostics, not primary calibration rows.
 If broker `GetLastTrades` returns rows whose `exchange_ts` is older than
 `DASHBOARD_TRADES_MAX_EXCHANGE_AGE_SECONDS`, those rows are diagnostic only:
 they must not populate the live tape table. The selected details should return an
 empty `recent_market_trades` list with `trade_tape_status=stale` and
-`trade_tape_reason=trade_exchange_ts_too_old`. A fresh order book with a stale
+`trade_tape_reason=trade_exchange_ts_too_old` and
+`market_trades_source=tbank_get_last_trades`. A fresh order book with a stale
 trade tape is a display limitation, not a data-only logging failure by itself.
 Data-only collector stream names must include `market_trades`; otherwise the
 dashboard can only report `no_market_trades_samples`/stale diagnostics and cannot
@@ -343,6 +347,10 @@ selected ladder flip to stale while broker health is OK, check whether the
 dashboard is receiving fresh snapshots or serving an old cache. For order books,
 `received_ts` drives operator-display freshness; `exchange_ts` is diagnostic and
 can stay older when the book has not changed.
+The frontend keeps the last full selected ladder through short intermittent
+partial refreshes while that ladder is still inside the freshness budget. If it
+expires, the UI must show the explicit stale/unavailable reason rather than an old
+ladder as live data.
 
 Readonly broker quote refresh remains explicit for diagnostics:
 `POST /market/quotes/refresh` may call T-Invest `GetLastPrices`/`GetOrderBook` with
@@ -394,6 +402,11 @@ Closed-session dashboard quotes and selected order books are display-only. They
 must keep `quote_allowed_for_data_collection=false`, must not use live exchange
 labels, and must set `include_in_calibration=false` /
 `calibration_market_quality_score=0`.
+The dashboard ribbon should show `Рынок закрыт` / `Торги закрыты` when the
+feed session is closed. OTC or indicative broker quotes are shown only as
+`venue_type`/`quote_source`; they must not make the UI jump back to
+`weekday_evening`, `continuous_trading`, or `data_only_collection_allowed=true`.
+Do not preserve an old live selected ladder across the official session close.
 
 `/runtime/data-shadow/status` exposes supervisor observability fields:
 `supervisor_enabled`, `supervisor_state`, `stream_restart_count`,

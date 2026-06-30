@@ -462,6 +462,7 @@ def create_fastapi_app(
             selected_instrument="MOEX:SBER",
             include_order_book=include_details,
             include_trades=include_details,
+            full_selected_details=include_details,
             preflight=preflight,
         )
         overview = MarketOverviewResponse(**cast(dict[str, Any], snapshot["market_overview"]))
@@ -2190,13 +2191,9 @@ async def _broker_market_trades_by_instrument(
         context = context_by_instrument.get(instrument_id, {})
         official_exchange_open = bool(context.get("official_exchange_open"))
         official_exchange_closed = bool(context.get("official_exchange_closed"))
-        trade_source = "exchange" if official_exchange_open else "all"
+        trade_source = "all"
         venue_type = "official_exchange" if official_exchange_open else "broker_otc"
-        source = (
-            "tbank_get_last_trades_exchange"
-            if official_exchange_open
-            else "tbank_get_last_trades_broker"
-        )
+        source = "tbank_get_last_trades"
         include_in_calibration = official_exchange_open and not official_exchange_closed
         try:
             async with semaphore:
@@ -2294,7 +2291,7 @@ def _order_book_overview_payload(
     market_trades_source = (
         "tbank_get_last_trades"
         if recent_market_trades
-        else "tbank_get_last_trades_stale_diagnostic"
+        else "tbank_get_last_trades"
         if raw_recent_market_trades
         else "no_market_trades_samples"
     )
@@ -2704,6 +2701,7 @@ async def _dashboard_market_feed_snapshot(
     include_order_book: bool,
     include_trades: bool,
     force: bool = False,
+    full_selected_details: bool = True,
     preflight: SessionPreflightResponse | None = None,
 ) -> dict[str, object]:
     del service
@@ -2711,6 +2709,8 @@ async def _dashboard_market_feed_snapshot(
         _dashboard_market_feed_base_and_refs,
         cast(FastAPI, request.app),
         instruments=instruments,
+        selected_instrument=selected_instrument,
+        full_selected_details=full_selected_details,
         preflight=preflight,
     )
     feed = _dashboard_market_feed(request.app)
@@ -2744,6 +2744,7 @@ async def _dashboard_market_feed_snapshot_from_app(
     include_order_book: bool,
     include_trades: bool,
     force: bool = False,
+    full_selected_details: bool = True,
 ) -> dict[str, object]:
     database = _database_service_from_app(app)
     preflight = await _dashboard_preflight_or_none_from_app(app, database)
@@ -2751,6 +2752,8 @@ async def _dashboard_market_feed_snapshot_from_app(
         _dashboard_market_feed_base_and_refs,
         app,
         instruments=instruments,
+        selected_instrument=selected_instrument,
+        full_selected_details=full_selected_details,
         preflight=preflight,
     )
     feed = _dashboard_market_feed(app)
@@ -2841,6 +2844,8 @@ def _dashboard_market_feed_base_and_refs(
     app: FastAPI,
     *,
     instruments: str | None,
+    selected_instrument: str | None,
+    full_selected_details: bool,
     preflight: SessionPreflightResponse | None,
 ) -> tuple[MarketOverviewResponse, list[Any]]:
     """Build the dashboard read model away from the FastAPI event loop."""
@@ -2856,6 +2861,21 @@ def _dashboard_market_feed_base_and_refs(
                 preflight=preflight,
             ),
         )
+        selected_id = _canonical_ws_instrument(selected_instrument or "MOEX:SBER")
+        if full_selected_details and any(
+            row.instrument_id == selected_id for row in base_overview.instruments
+        ):
+            selected_details = service.market_instrument_details(
+                selected_id,
+                preflight=preflight,
+            )
+            base_overview = MarketOverviewResponse(
+                generated_at=base_overview.generated_at,
+                instruments=[
+                    selected_details if row.instrument_id == selected_id else row
+                    for row in base_overview.instruments
+                ],
+            )
     refs = _instrument_refs_for_preflight(
         database,
         instruments or _default_preflight_instruments(),

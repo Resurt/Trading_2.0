@@ -67,6 +67,9 @@ const COLLECTOR_LABELS: Record<string, string> = {
   starting: "Запускается",
   collecting: "Идёт сбор",
   stopping: "Останавливается",
+  paused_until_next_window: "Пауза до следующего окна",
+  stopped_session_closed: "Окно сбора закрыто",
+  stopped_day_complete: "День завершён",
   stopped_by_operator: "Сбор остановлен",
   emergency_stopped: "Аварийно остановлен",
   degraded: "Degraded",
@@ -143,6 +146,7 @@ function reasonLabel(reason: string | null | undefined): string {
     collector_waiting_for_operator_start: "ожидает Start",
     collector_no_recent_samples: "нет свежих live samples",
     data_only_collection_stopped: "data-only сбор остановлен",
+    data_only_session_window_closed: "окно data-only сбора закрыто",
     data_only_collection_allowed: "data-only сбор разрешён",
     data_only_collection_blocked: "data-only сбор заблокирован",
     broker_balance_unavailable: "нет сохранённого broker balance",
@@ -156,6 +160,7 @@ function reasonLabel(reason: string | null | undefined): string {
     trade_exchange_ts_too_old: "последние сделки устарели",
     missing_trade_exchange_ts: "нет времени сделок",
     no_market_trades_samples: "лента сделок не пришла",
+    tbank_get_last_trades: "GetLastTrades не дал свежих сделок",
     instrument_unavailable: "инструмент недоступен",
     not_for_calibration: "не для калибровки",
     broker_quote_not_for_calibration: "брокерская котировка только для отображения",
@@ -278,10 +283,48 @@ function blockedCash(): string {
   return formatMoney(robot.status.balance.blocked_cash_rub ?? robot.status.balance.blocked, "RUB");
 }
 
+function displayMarketOpen(): boolean | null {
+  if (market.dashboardFeedStatus.running) {
+    return market.dashboardFeedStatus.market_open;
+  }
+  if (market.dataShadowStatus.market_open !== null && market.dataShadowStatus.market_open !== undefined) {
+    return market.dataShadowStatus.market_open;
+  }
+  return null;
+}
+
+function displaySessionType(): string | null | undefined {
+  if (displayMarketOpen() === false) {
+    return "closed";
+  }
+  return market.dashboardFeedStatus.session_type ?? robot.status.session_type;
+}
+
+function displaySessionPhase(): string | null | undefined {
+  if (displayMarketOpen() === false) {
+    return "closed";
+  }
+  return market.dashboardFeedStatus.session_phase ?? robot.status.session_phase;
+}
+
+function displayDataOnlyAllowed(): boolean | null {
+  if (displayMarketOpen() === false) {
+    return false;
+  }
+  const preflight = robot.lastSessionPreflight;
+  if (preflight?.data_only_collection_allowed !== undefined) {
+    return preflight.data_only_collection_allowed;
+  }
+  if (market.dataShadowStatus.market_open === false) {
+    return false;
+  }
+  return null;
+}
+
 function sessionDetail(): string {
-  const marketOpen = market.dashboardFeedStatus.market_open;
+  const marketOpen = displayMarketOpen();
   const reason =
-    selectedInstrument.value?.reason_code ??
+    (marketOpen === false ? market.dashboardFeedStatus.warnings[0] : selectedInstrument.value?.reason_code) ??
     market.dashboardFeedStatus.warnings[0] ??
     market.dataShadowStatus.reason_code ??
     robot.lastCommandReasonCode;
@@ -289,7 +332,7 @@ function sessionDetail(): string {
   if (marketOpen === true) {
     parts.push("рынок открыт");
   } else if (marketOpen === false) {
-    parts.push("рынок закрыт или уточняется");
+    parts.push("рынок закрыт");
   }
   if (reason && !isDuplicateSessionReason(reason, marketOpen)) {
     const label = reasonLabel(reason);
@@ -319,6 +362,15 @@ function isDuplicateSessionReason(reason: string, marketOpen: boolean | null | u
 
 function venueStatusValue(): string {
   const preflight = robot.lastSessionPreflight;
+  if (displayMarketOpen() === false) {
+    if (market.dashboardFeedStatus.venue_type && market.dashboardFeedStatus.venue_type !== "unknown") {
+      return venueLabel(market.dashboardFeedStatus.venue_type);
+    }
+    if (preflight?.venue_type && preflight.venue_type !== "unknown") {
+      return venueLabel(preflight.venue_type);
+    }
+    return "площадка закрыта";
+  }
   if (market.dashboardFeedStatus.venue_type && market.dashboardFeedStatus.venue_type !== "unknown") {
     return venueLabel(market.dashboardFeedStatus.venue_type);
   }
@@ -354,6 +406,10 @@ function venueStatusValue(): string {
 
 function phaseDetail(): string {
   const preflight = robot.lastSessionPreflight;
+  if (displayMarketOpen() === false) {
+    const nextSession = nextSessionAt();
+    return nextSession ? `Следующая: ${compactDateTime(nextSession)}` : "Биржевое окно закрыто.";
+  }
   if (market.dashboardFeedStatus.last_refresh_at) {
     return `feed ${compactDateTime(market.dashboardFeedStatus.last_refresh_at)}`;
   }
@@ -395,6 +451,9 @@ function tradingModeValue(): string {
 }
 
 function tradingModeDetail(): string {
+  if (displayMarketOpen() === false) {
+    return "Рынок закрыт. Запись data-only логов остановлена.";
+  }
   if (market.dashboardFeedStatus.running && market.dataShadowStatus.collector_state !== "collecting") {
     return "Рынок отображается. Запись data-only логов остановлена.";
   }
@@ -474,20 +533,25 @@ function venueLabel(value: string | null | undefined): string {
 }
 
 function collectionAllowedLabel(): string {
-  const preflight = robot.lastSessionPreflight;
-  if (preflight?.data_only_collection_allowed === true) {
+  const allowed = displayDataOnlyAllowed();
+  if (allowed === true) {
     return "разрешён";
   }
-  if (preflight?.data_only_collection_allowed === false) {
-    return "заблокирован";
-  }
-  if (market.dataShadowStatus.market_open === false) {
+  if (allowed === false) {
     return "заблокирован";
   }
   return "уточняется";
 }
 
 function collectionReason(): string {
+  if (displayMarketOpen() === false) {
+    return reasonLabel(
+      market.dashboardFeedStatus.warnings[0] ??
+        market.dataShadowStatus.reason_code ??
+        robot.lastSessionPreflight?.reason_code ??
+        "market_closed_expected",
+    );
+  }
   const reason =
     robot.lastSessionPreflight?.reason_code ??
     market.dataShadowStatus.reason_code ??
@@ -563,6 +627,17 @@ function tradeTapeReason(): string {
   );
 }
 
+function tradeTapeSourceLabel(): string {
+  const source = selectedInstrument.value?.market_trades_source;
+  if (source === "tbank_get_last_trades") {
+    return "GetLastTrades не дал свежих сделок";
+  }
+  if (source === "no_market_trades_samples") {
+    return "свежие сделки не пришли";
+  }
+  return reasonLabel(source);
+}
+
 function tradeTapeStatusLabel(): string {
   const status = selectedInstrument.value?.trade_tape_status;
   if (market.recentTrades.length && status === "live") {
@@ -575,8 +650,50 @@ function tradeTapeStatusLabel(): string {
 }
 
 function nextSessionLabel(): string {
-  const nextSession = robot.lastSessionPreflight?.next_session_at ?? market.dataShadowStatus.next_session_at;
+  const nextSession = nextSessionAt();
   return nextSession ? `Следующая: ${compactDateTime(nextSession)}` : "Следующая сессия не указана";
+}
+
+function nextSessionAt(): string | null | undefined {
+  return (
+    market.dashboardFeedStatus.next_session_at ??
+    robot.lastSessionPreflight?.next_session_at ??
+    market.dataShadowStatus.next_session_at
+  );
+}
+
+function collectorMarketLabel(): string {
+  const marketOpen = displayMarketOpen();
+  if (marketOpen === true) {
+    return "открыт";
+  }
+  if (marketOpen === false) {
+    return "закрыт";
+  }
+  return market.dataShadowStatus.market_open === true
+    ? "открыт"
+    : market.dataShadowStatus.market_open === false
+      ? "закрыт"
+      : "уточняется";
+}
+
+function collectorReasonLabel(): string {
+  if (displayMarketOpen() === false) {
+    const preflight = robot.lastSessionPreflight;
+    return reasonLabel(
+      (preflight?.market_open === false ? preflight.reason_code : null) ??
+        market.dataShadowStatus.reason_code ??
+        "market_closed_expected",
+    );
+  }
+  return reasonLabel(market.dataShadowStatus.reason_code);
+}
+
+function collectorNextSessionAt(): string | null | undefined {
+  if (displayMarketOpen() === false) {
+    return nextSessionAt();
+  }
+  return market.dataShadowStatus.next_session_at ?? nextSessionAt();
 }
 
 function hasRealOrderBook(instrument: MarketInstrumentOverview | null): boolean {
@@ -749,12 +866,12 @@ function degradedFlagLabel(flag: string): string {
     <section class="session-ribbon" data-testid="session-ribbon">
       <div>
         <span class="eyebrow">session</span>
-        <strong>{{ sessionLabel(market.dashboardFeedStatus.session_type ?? robot.status.session_type) }}</strong>
+        <strong>{{ sessionLabel(displaySessionType()) }}</strong>
         <small>{{ sessionDetail() }}</small>
       </div>
       <div>
         <span class="eyebrow">phase</span>
-        <strong>{{ phaseLabel(market.dashboardFeedStatus.session_phase ?? robot.status.session_phase) }}</strong>
+        <strong>{{ phaseLabel(displaySessionPhase()) }}</strong>
         <small>{{ brokerStatusValue() }}</small>
       </div>
       <div>
@@ -795,7 +912,7 @@ function degradedFlagLabel(flag: string): string {
       </section>
 
       <MetricTile label="Площадка" :value="venueStatusValue()" />
-      <MetricTile label="Фаза рынка" :value="phaseLabel(market.dashboardFeedStatus.session_phase ?? robot.status.session_phase)" :detail="phaseDetail()" />
+      <MetricTile label="Фаза рынка" :value="phaseLabel(displaySessionPhase())" :detail="phaseDetail()" />
       <MetricTile label="Торговля" :value="tradingModeValue()" :detail="tradingModeDetail()" tone="info" />
     </div>
 
@@ -909,7 +1026,7 @@ function degradedFlagLabel(flag: string): string {
               <EmptyState
                 v-else
                 title="Лента сделок недоступна"
-                :detail="`Причина: ${selectedInstrument?.market_trades_source ?? 'no_market_trades_samples'} (${tradeTapeReason()}). Появится после market trades feed; отсутствие ленты не скрывается.`"
+                :detail="`Причина: ${tradeTapeSourceLabel()} (${tradeTapeReason()}). Старые сделки не показываем как live-поток.`"
                 tone="warn"
               />
             </section>
@@ -928,11 +1045,11 @@ function degradedFlagLabel(flag: string): string {
             <dt>состояние</dt>
             <dd>{{ collectorLabel(market.dataShadowStatus.collector_state) }}</dd>
             <dt>рынок</dt>
-            <dd>{{ market.dataShadowStatus.market_open === true ? "открыт" : market.dataShadowStatus.market_open === false ? "закрыт" : "уточняется" }}</dd>
+            <dd>{{ collectorMarketLabel() }}</dd>
             <dt>причина</dt>
-            <dd>{{ reasonLabel(market.dataShadowStatus.reason_code) }}</dd>
+            <dd>{{ collectorReasonLabel() }}</dd>
             <dt>следующая сессия</dt>
-            <dd>{{ compactDateTime(market.dataShadowStatus.next_session_at) }}</dd>
+            <dd>{{ compactDateTime(collectorNextSessionAt()) }}</dd>
             <dt>поток</dt>
             <dd>{{ market.dataShadowStatus.stream_alive ? "samples идут" : "samples нет" }}</dd>
             <dt>snapshots</dt>
@@ -961,9 +1078,9 @@ function degradedFlagLabel(flag: string): string {
             <dt>режим</dt>
             <dd>{{ venueStatusValue() }}</dd>
             <dt>фаза</dt>
-            <dd>{{ phaseLabel(robot.status.session_phase) }}</dd>
+            <dd>{{ phaseLabel(displaySessionPhase()) }}</dd>
             <dt>сбор</dt>
-            <dd>{{ robot.lastSessionPreflight?.data_only_collection_allowed ? "разрешен" : "заблокирован" }}</dd>
+            <dd>{{ displayDataOnlyAllowed() === true ? "разрешен" : "заблокирован" }}</dd>
           </dl>
         </DataPanel>
 

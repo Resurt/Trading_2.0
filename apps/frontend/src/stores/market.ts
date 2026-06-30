@@ -94,6 +94,7 @@ const EMPTY_DASHBOARD_FEED_STATUS: DashboardMarketFeedStatus = {
   session_type: "unknown",
   session_phase: "unknown",
   venue_type: "unknown",
+  next_session_at: null,
   last_refresh_at: null,
   selected_instrument: DEFAULT_SELECTED_INSTRUMENT_ID,
   quote_rows_count: CORE_INSTRUMENT_IDS.length,
@@ -276,6 +277,7 @@ export const useMarketStore = defineStore("market", () => {
         include_trades: true,
       });
       if (requestId === selectedDetailsRequestId && selectedInstrumentId.value === instrumentId) {
+        clearWarning("selected_instrument_details_unavailable");
         applyDashboardFeedSnapshot(snapshot, instrumentId);
       } else if (snapshot.selected_details) {
         applyOverview({ generated_at: snapshot.generated_at, instruments: [snapshot.selected_details] });
@@ -309,7 +311,7 @@ export const useMarketStore = defineStore("market", () => {
     const visibleWarnings = boundedUnique([
       ...rawWarnings,
       ...transientErrors.map(() => "dashboard_refresh_retrying"),
-    ]);
+    ]).filter((warning) => shouldShowDashboardWarning(warning, hasUsableData));
     dashboardFeedStatus.value = snapshot.status ?? {
       ...dashboardFeedStatus.value,
       running: true,
@@ -321,12 +323,13 @@ export const useMarketStore = defineStore("market", () => {
     };
     dashboardFeedStatus.value = {
       ...dashboardFeedStatus.value,
+      next_session_at: snapshot.session?.next_session_at ?? dashboardFeedStatus.value.next_session_at,
       errors: blockingErrors,
       warnings: visibleWarnings,
     };
     feedErrors.value = blockingErrors;
     feedWarnings.value = visibleWarnings;
-    feedWarnings.value.forEach(recordWarning);
+    warnings.value = visibleWarnings;
     if (snapshot.market_overview) {
       applyOverview(snapshot.market_overview);
       lastQuoteRefreshAt.value = snapshot.generated_at;
@@ -395,6 +398,7 @@ export const useMarketStore = defineStore("market", () => {
     dataShadowStatusInFlight = true;
     try {
       dataShadowStatus.value = await apiClient.dataShadowStatus();
+      clearWarning("data_shadow_status_unavailable");
     } catch (unknownError) {
       recordWarning("data_shadow_status_unavailable");
       if (overview.value.instruments.length === 0) {
@@ -545,6 +549,10 @@ export const useMarketStore = defineStore("market", () => {
     warnings.value = Array.from(new Set([warning, ...warnings.value])).slice(0, 8);
   }
 
+  function clearWarning(warning: string): void {
+    warnings.value = warnings.value.filter((item) => item !== warning);
+  }
+
   return {
     overview,
     dataShadowStatus,
@@ -690,7 +698,28 @@ function mergeInstrumentOverview(
       ...quoteSnapshotFields(previous),
     };
   }
-  return withPreservedRecentTrades(previous, next);
+  return withPreservedRecentTrades(previous, withPreservedOrderBook(previous, next));
+}
+
+function withPreservedOrderBook(
+  previous: MarketInstrumentOverview,
+  next: MarketInstrumentOverview,
+): MarketInstrumentOverview {
+  if (!isOrderBookStillFresh(previous) || !canPreserveOrderBook(previous, next)) {
+    return next;
+  }
+  const previousLevels = orderBookLevelCount(previous);
+  if (previousLevels === 0) {
+    return next;
+  }
+  const nextLevels = orderBookLevelCount(next);
+  if (!next.order_book_stale && nextLevels >= previousLevels) {
+    return next;
+  }
+  return {
+    ...next,
+    ...orderBookSnapshotFields(previous),
+  };
 }
 
 function withPreservedRecentTrades(
@@ -698,12 +727,6 @@ function withPreservedRecentTrades(
   next: MarketInstrumentOverview,
 ): MarketInstrumentOverview {
   if ((next.recent_market_trades?.length ?? 0) > 0) {
-    return next;
-  }
-  if (next.trade_tape_status && !["live", "fresh"].includes(next.trade_tape_status)) {
-    return next;
-  }
-  if (next.market_trades_source === "no_market_trades_samples") {
     return next;
   }
   if ((previous.recent_market_trades?.length ?? 0) === 0) {
@@ -716,7 +739,7 @@ function withPreservedRecentTrades(
     ...next,
     recent_market_trades: previous.recent_market_trades,
     market_trades_source: previous.market_trades_source,
-    market_trades_age_ms: previous.market_trades_age_ms,
+    market_trades_age_ms: tradeTapeAgeMs(previous) ?? previous.market_trades_age_ms,
     trade_tape_status: previous.trade_tape_status,
     trade_tape_reason: previous.trade_tape_reason,
   };
@@ -726,10 +749,104 @@ function isTradeTapeStillFresh(instrument: MarketInstrumentOverview): boolean {
   if (instrument.trade_tape_status && !["live", "fresh"].includes(instrument.trade_tape_status)) {
     return false;
   }
+  const ageMs = tradeTapeAgeMs(instrument);
+  if (ageMs !== null) {
+    return ageMs <= 15 * 1000;
+  }
   if (instrument.market_trades_age_ms === null || instrument.market_trades_age_ms === undefined) {
     return false;
   }
   return Number(instrument.market_trades_age_ms) <= 15 * 1000;
+}
+
+function tradeTapeAgeMs(instrument: MarketInstrumentOverview): number | null {
+  let newest = Number.NEGATIVE_INFINITY;
+  for (const trade of instrument.recent_market_trades ?? []) {
+    const ts = tradeTimestamp(trade);
+    if (ts !== null && ts > newest) {
+      newest = ts;
+    }
+  }
+  return Number.isFinite(newest) ? Math.max(0, Date.now() - newest) : null;
+}
+
+function tradeTimestamp(trade: JsonPayload): number | null {
+  const raw = trade.exchange_ts ?? trade.ts_utc ?? trade.time ?? trade.ts;
+  if (typeof raw !== "string") {
+    return null;
+  }
+  const parsed = Date.parse(raw);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function isOrderBookStillFresh(instrument: MarketInstrumentOverview): boolean {
+  if (!instrument.order_book_source || instrument.order_book_stale) {
+    return false;
+  }
+  if (instrument.order_book_ts) {
+    const parsed = Date.parse(instrument.order_book_ts);
+    return Number.isFinite(parsed) && Date.now() - parsed <= 30_000;
+  }
+  if (instrument.order_book_age_ms !== null && instrument.order_book_age_ms !== undefined) {
+    return Number(instrument.order_book_age_ms) <= 30_000;
+  }
+  return false;
+}
+
+function canPreserveOrderBook(
+  previous: MarketInstrumentOverview,
+  next: MarketInstrumentOverview,
+): boolean {
+  const previousSource = String(previous.order_book_source ?? previous.quote_source ?? "");
+  if (
+    next.official_exchange_open === false &&
+    (previous.quote_allowed_for_data_collection ||
+      previous.official_exchange_open ||
+      previousSource.startsWith("live"))
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function orderBookLevelCount(instrument: MarketInstrumentOverview): number {
+  const summary = instrument.order_book_summary ?? {};
+  const bids = Array.isArray(summary.bids) ? summary.bids.length : 0;
+  const asks = Array.isArray(summary.asks) ? summary.asks.length : 0;
+  const depthLevels = Number(summary.depth_levels);
+  if (Number.isFinite(depthLevels) && depthLevels > bids + asks) {
+    return depthLevels;
+  }
+  return bids + asks;
+}
+
+function orderBookSnapshotFields(
+  instrument: MarketInstrumentOverview,
+): Partial<MarketInstrumentOverview> {
+  return {
+    spread: instrument.spread,
+    spread_abs: instrument.spread_abs,
+    spread_bps: instrument.spread_bps,
+    spread_abs_rub: instrument.spread_abs_rub,
+    spread_units_validated: instrument.spread_units_validated,
+    mid_price: instrument.mid_price,
+    market_quality: instrument.market_quality,
+    market_quality_score: instrument.market_quality_score,
+    display_market_quality_score: instrument.display_market_quality_score,
+    calibration_market_quality_score: instrument.calibration_market_quality_score,
+    market_quality_label: instrument.market_quality_label,
+    market_quality_components: instrument.market_quality_components,
+    best_bid: instrument.best_bid,
+    best_ask: instrument.best_ask,
+    bid_depth_lots: instrument.bid_depth_lots,
+    ask_depth_lots: instrument.ask_depth_lots,
+    book_imbalance: instrument.book_imbalance,
+    order_book_source: instrument.order_book_source,
+    order_book_ts: instrument.order_book_ts,
+    order_book_age_ms: instrument.order_book_age_ms,
+    order_book_stale: instrument.order_book_stale,
+    order_book_summary: instrument.order_book_summary,
+  };
 }
 
 function quoteSnapshotFields(instrument: MarketInstrumentOverview): Partial<MarketInstrumentOverview> {
@@ -878,6 +995,16 @@ function quoteTimestamp(value: string | null): number {
 
 function isTransientDashboardFeedError(value: string): boolean {
   return TRANSIENT_DASHBOARD_FEED_ERRORS.has(value);
+}
+
+function shouldShowDashboardWarning(warning: string, hasUsableData: boolean): boolean {
+  if (
+    hasUsableData &&
+    ["dashboard_refresh_in_progress", "no_market_trades_samples"].includes(warning)
+  ) {
+    return false;
+  }
+  return true;
 }
 
 function hasUsableInstrumentData(instrument: MarketInstrumentOverview): boolean {
