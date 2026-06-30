@@ -312,6 +312,10 @@ broker response receipt time is distinct from exchange data time:
 `freshness_reason`. A broker response received now does not make old
 `exchange_ts` data live; stale exchange data remains display-only and is not
 calibration eligible.
+The selected order-book feed refreshes below the freshness budget by default
+(`DASHBOARD_SELECTED_BOOK_REFRESH_SECONDS=3`,
+`DASHBOARD_ORDER_BOOK_MAX_EXCHANGE_AGE_SECONDS=5`) and forces a refresh when the
+cached selected ladder is about to become stale.
 
 ## `/market/overview`
 
@@ -321,6 +325,12 @@ Dashboard Live Feed cache first, then stored `order_book_summary`, `market_candl
 and previous-close fallback. It accepts `instruments=SBER,GAZP` for filtered quote
 boards. The default `include_details=false` keeps payloads small: it must not fetch
 heavy order books for all eight instruments.
+
+Stored `order_book_summary` rows can use the broker storage id (`instrument_uid`),
+`figi`, ticker, or canonical `MOEX:*` id depending on the writer path. The BFF must
+resolve these aliases through `instrument_registry` before marking a quote row as
+missing book data. If a fresh stored order-book mid is available, a later stale
+`GetLastPrices` response must not downgrade the quote card to stale last-price data.
 
 Important quote fields:
 
@@ -355,6 +365,11 @@ Price source priority for the dashboard is:
 Stale data must stay visible with `quote_status=stale` and timestamp. A candle from
 an older trading date must not be labeled as current/live.
 
+Trade tape freshness is independent from order-book freshness. `recent_market_trades`
+may be returned with `trade_tape_status=stale` and
+`trade_tape_reason=trade_exchange_ts_too_old`; clients must display that as delayed
+or stale instead of `live`/`market stream`.
+
 `POST /market/quotes/refresh` remains an explicit readonly broker path. It accepts
 `quotes_only=true` and `include_order_book=false` defaults. It may call T-Invest
 `GetLastPrices` and, only when details/order-book refresh is requested, `GetOrderBook`
@@ -365,6 +380,9 @@ When `GetOrderBook` succeeds, BFF receipt time and exchange data time remain
 separate. A broker response received now does not make old exchange data live.
 `exchange_ts` / `exchange_age_ms` decide exchange freshness together with the
 configured dashboard thresholds.
+The selected-instrument order book must refresh faster than its freshness
+threshold; the default is a 3-second selected book refresh with a 5-second
+exchange-age limit.
 The API keeps successful readonly quote refresh rows in a short in-process cache
 (`MARKET_QUOTE_REFRESH_CACHE_TTL_SECONDS`, default 45 seconds). During that TTL,
 `GET /market/overview`, `/dashboard/state`, and `/ws/market` overlay the cached
@@ -445,6 +463,12 @@ microstructure through bounded readonly `GetOrderBook` polling. These rows keep
 `source=data_only_shadow` and include `data_only_polling_fallback=true`,
 `include_in_calibration`, `calibration_allowed`, and `venue_type` in
 `snapshot_payload`. Stop disables both streams and polling.
+
+After a trade-core restart, `started`/`resumed` lifecycle audit events restore only
+the daily collection intent. They are not proof that this new process has live stream
+tasks. Runtime must perform a fresh preflight and resume streams/polling immediately
+when the current window is open. A future `next_resume_at` is honored only for an
+actual `paused_until_next_window` lifecycle event.
 
 ## `/reports/daily/run`
 

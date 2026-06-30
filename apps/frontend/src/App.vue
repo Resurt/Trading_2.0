@@ -46,6 +46,9 @@ function connectionText(label: string, state: string): string {
 }
 
 function brokerConnectionState(): string {
+  if (hasRecentMarketEvidence()) {
+    return "live";
+  }
   if ([robot.liveConnection, market.liveConnection, portfolio.liveConnection].includes("degraded")) {
     return "degraded";
   }
@@ -56,6 +59,34 @@ function brokerConnectionState(): string {
     return "live";
   }
   return "idle";
+}
+
+function hasRecentMarketEvidence(): boolean {
+  const feedRecent = Boolean(
+    market.dashboardFeedStatus.running &&
+      isRecentIsoTimestamp(market.dashboardFeedStatus.last_refresh_at, 45_000),
+  );
+  const quoteRecent = market.quoteRows.some(
+    (instrument) =>
+      instrument.freshness_status === "fresh" ||
+      (instrument.order_book_stale === false && instrument.order_book_source !== null),
+  );
+  const collectorAlive = Boolean(
+    market.dataShadowStatus.collector_state === "collecting" &&
+      market.dataShadowStatus.stream_alive,
+  );
+  return feedRecent || quoteRecent || collectorAlive;
+}
+
+function isRecentIsoTimestamp(value: string | null | undefined, maxAgeMs: number): boolean {
+  if (!value) {
+    return false;
+  }
+  const parsed = Date.parse(value);
+  if (Number.isNaN(parsed)) {
+    return false;
+  }
+  return Date.now() - parsed <= maxAgeMs;
 }
 
 function startButtonLabel(): string {

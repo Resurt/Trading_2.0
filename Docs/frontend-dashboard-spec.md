@@ -101,13 +101,25 @@ display-only and must not be shown as live calibration data.
 Default freshness thresholds are backend-configurable:
 
 - `DASHBOARD_LAST_PRICE_MAX_EXCHANGE_AGE_SECONDS=10`
+- `DASHBOARD_SELECTED_BOOK_REFRESH_SECONDS=3`
 - `DASHBOARD_ORDER_BOOK_MAX_EXCHANGE_AGE_SECONDS=5`
 - `DASHBOARD_TRADES_MAX_EXCHANGE_AGE_SECONDS=15`
 
 ## Order Book
 
-The dashboard loads order book only for the selected instrument. The quote board
-must not request full depth for all eight instruments.
+The dashboard performs live `GetOrderBook` calls only for the selected instrument.
+The quote board must not request full depth for all eight instruments. Quote cards
+may still show bid/ask, spread, depth and freshness from the stored
+`order_book_summary` read-model produced by data-only collection.
+The selected order-book refresh interval must stay below the order-book freshness
+budget so an open-market selected ladder does not oscillate between fresh and
+stale while the readonly broker/API is responsive.
+
+`order_book_summary.instrument_id` may be stored as the broker `instrument_uid`
+or another resolved broker alias. The BFF must resolve `MOEX:*`, ticker,
+`instrument_uid`, and `figi` aliases before deciding that a quote card has no
+fresh book. A stale `GetLastPrices` response must not downgrade an already fresh
+order-book mid/read-model quote.
 
 If no order book is available, the selected panel shows explicit status/reason,
 for example:
@@ -136,6 +148,22 @@ Supported status values include:
 
 Absence of trades must not hide quotes or order-book status. The UI must show the
 status/reason plainly.
+
+If readonly last trades are present but their exchange timestamp is older than the
+configured threshold, the UI must show the tape as delayed/stale, for example
+`trade_tape_status=stale` and `trade_tape_reason=trade_exchange_ts_too_old`. It
+must not label those rows as a live market stream.
+
+The frontend must not preserve old trade rows across refreshes when the current
+selected details mark the tape stale or unknown.
+
+## Connection Indicator
+
+The top `Broker/API` chip is an operator display signal, not a single websocket
+health check. It should stay online when the API is healthy and there is recent
+dashboard feed data, fresh quote rows, or an active data-only stream. A degraded
+secondary socket or a temporary portfolio/balance failure must not by itself turn
+the whole market display into `нет связи`.
 
 ## Data-Only Logging Status
 

@@ -189,9 +189,13 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
             if isinstance(second_snapshot.get("selected_details"), dict)
             else {}
         )
-        if second_selected.get("order_book_ts") == selected.get("order_book_ts"):
-            errors.append("selected order book did not refresh within 10 seconds")
         age_ms = second_selected.get("order_book_age_ms")
+        if (
+            second_selected.get("order_book_ts") == selected.get("order_book_ts")
+            and isinstance(age_ms, int)
+            and age_ms > 5_000
+        ):
+            errors.append("selected order book did not refresh within freshness budget")
         if isinstance(age_ms, int) and age_ms > 5_000:
             errors.append(f"selected order book age too high: {age_ms}ms")
     else:
@@ -217,7 +221,13 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
         table: after_counts.get(table, 0) - before_counts.get(table, 0)
         for table in COUNT_TABLES
     }
-    if deltas.get("market_microstructure_snapshot", 0) != 0:
+    if data_shadow.get("collector_state") == "collecting":
+        if deltas.get("market_microstructure_snapshot", 0) != 0:
+            warnings.append(
+                "market_microstructure_snapshot changed while data-only collector "
+                "was already running"
+            )
+    elif deltas.get("market_microstructure_snapshot", 0) != 0:
         errors.append("dashboard feed wrote market_microstructure_snapshot")
     for table in ("signal_candidate", "order_intent", "broker_order", "order_state_event"):
         if deltas.get(table, 0) != 0:
@@ -237,7 +247,8 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
         "selected_instrument": selected.get("instrument_id"),
         "selected_price_present": bool(selected.get("last_price")),
         "order_book_source": selected.get("order_book_source"),
-        "trade_tape_status": selected.get("market_trades_source"),
+        "trade_tape_status": selected.get("trade_tape_status")
+        or selected.get("market_trades_source"),
         "data_only_collector_state": data_shadow.get("collector_state"),
         "db_deltas": deltas,
         "post_order_calls": 0,

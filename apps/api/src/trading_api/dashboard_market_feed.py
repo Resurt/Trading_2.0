@@ -26,7 +26,7 @@ class DashboardMarketFeedConfig:
 
     enabled: bool = True
     quote_refresh_seconds: float = 5.0
-    selected_book_refresh_seconds: float = 10.0
+    selected_book_refresh_seconds: float = 3.0
     trades_refresh_seconds: float = 15.0
     session_refresh_seconds: float = 30.0
     max_instruments: int = 8
@@ -40,7 +40,7 @@ class DashboardMarketFeedConfig:
             enabled=_env_bool("DASHBOARD_MARKET_FEED_ENABLED", True),
             quote_refresh_seconds=_env_float("DASHBOARD_QUOTE_REFRESH_SECONDS", 5.0),
             selected_book_refresh_seconds=_env_float(
-                "DASHBOARD_SELECTED_BOOK_REFRESH_SECONDS", 10.0
+                "DASHBOARD_SELECTED_BOOK_REFRESH_SECONDS", 3.0
             ),
             trades_refresh_seconds=_env_float("DASHBOARD_TRADES_REFRESH_SECONDS", 15.0),
             session_refresh_seconds=_env_float("DASHBOARD_SESSION_REFRESH_SECONDS", 30.0),
@@ -360,6 +360,26 @@ class DashboardMarketFeedService:
         )
         cached = self._selected_details.get(selected_instrument)
         current = _prefer_selected_details(selected, cached)
+        if include_order_book and not should_refresh_book:
+            max_age_ms = int(self.config.order_book_max_exchange_age_seconds * 1000)
+            refresh_before_ms = max(0, max_age_ms - 1_000)
+            cached_age_ms = (
+                max(
+                    0,
+                    int(
+                        (now - _ensure_utc(current.order_book_ts)).total_seconds()
+                        * 1000
+                    ),
+                )
+                if current.order_book_ts is not None
+                else None
+            )
+            if (
+                current.order_book_stale
+                or cached_age_ms is None
+                or cached_age_ms >= refresh_before_ms
+            ):
+                should_refresh_book = True
         if not should_refresh_book and not should_refresh_trades:
             return current
 
@@ -672,6 +692,15 @@ def _instrument_with_last_price(
     )
     stale_by_exchange = bool(freshness["stale_by_exchange_time"])
     freshness_status = str(freshness["freshness_status"])
+    existing_order_book_fresh = (
+        instrument.order_book_source in {"live_order_book_mid", "live_exchange_order_book"}
+        and instrument.order_book_stale is False
+        and instrument.mid_price is not None
+        and instrument.best_bid is not None
+        and instrument.best_ask is not None
+    )
+    if existing_order_book_fresh and stale_by_exchange:
+        return instrument
     quote_source = (
         "live_exchange_last_price"
         if instrument.official_exchange_open

@@ -151,6 +151,10 @@ function reasonLabel(reason: string | null | undefined): string {
     api_snapshot_unavailable: "snapshot API не получен",
     moex_dsvd_cancelled_platform_update: "биржа закрыта",
     broker_otc_only: "доступны только брокерские внебиржевые котировки",
+    fresh: "свежая",
+    stale: "устарела",
+    trade_exchange_ts_too_old: "последние сделки устарели",
+    missing_trade_exchange_ts: "нет времени сделок",
     no_market_trades_samples: "лента сделок не пришла",
     instrument_unavailable: "инструмент недоступен",
     not_for_calibration: "не для калибровки",
@@ -485,7 +489,23 @@ function dashboardFeedDetail(): string {
 }
 
 function tradeTapeReason(): string {
-  return reasonLabel(selectedInstrument.value?.market_trades_source ?? "no_market_trades_samples");
+  return reasonLabel(
+    selectedInstrument.value?.trade_tape_reason ??
+      selectedInstrument.value?.trade_tape_status ??
+      selectedInstrument.value?.market_trades_source ??
+      "no_market_trades_samples",
+  );
+}
+
+function tradeTapeStatusLabel(): string {
+  const status = selectedInstrument.value?.trade_tape_status;
+  if (market.recentTrades.length && status === "live") {
+    return "рыночный поток";
+  }
+  if (market.recentTrades.length && status === "stale") {
+    return "лента задержана";
+  }
+  return tradeTapeReason();
 }
 
 function nextSessionLabel(): string {
@@ -804,7 +824,7 @@ function degradedFlagLabel(flag: string): string {
                   <h3>ЛЕНТА СДЕЛОК</h3>
                   <span>{{ selectedInstrument?.ticker ?? selectedInstrument?.instrument_id ?? "инструмент не выбран" }}</span>
                 </div>
-                <strong>{{ market.recentTrades.length ? "рыночный поток" : reasonLabel(selectedInstrument?.market_trades_source ?? "no_market_trades_samples") }}</strong>
+                <strong>{{ tradeTapeStatusLabel() }}</strong>
               </header>
               <div v-if="market.recentTrades.length" class="market-tape-table">
                 <div class="market-tape-row market-tape-row--head">

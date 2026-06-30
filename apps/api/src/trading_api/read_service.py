@@ -418,8 +418,9 @@ class BffReadService:
         include_details: bool = False,
     ) -> JsonPayload:
         now = datetime.now(tz=UTC)
+        order_book_max_age_seconds = _dashboard_order_book_max_age_seconds()
         registry = self._instrument_registry_row(instrument_id)
-        summary = self._latest_order_book_summary(instrument_id)
+        summary = self._latest_order_book_summary(instrument_id, registry=registry)
         candle = self._latest_market_candle(instrument_id)
         previous_close = self._previous_close(instrument_id, current_session.trading_date)
         official_exchange_closed = official_decision.official_exchange_closed
@@ -434,7 +435,9 @@ class BffReadService:
         order_book_age = None
         if summary is not None:
             order_book_age = _age_seconds(summary.ts_utc, now=now)
-            order_book_stale = order_book_age is None or order_book_age > 30
+            order_book_stale = (
+                order_book_age is None or order_book_age > order_book_max_age_seconds
+            )
             if summary.mid_price is not None:
                 book_price_source = (
                     "live_exchange_order_book"
@@ -492,6 +495,22 @@ class BffReadService:
             official_exchange_open and venue_type == "official_exchange"
         )
         quote_allowed_for_display = last_price is not None
+        order_book_exchange_ts = (
+            summary.exchange_ts if summary is not None and summary.exchange_ts is not None
+            else summary.ts_utc if summary is not None
+            else None
+        )
+        order_book_received_ts = (
+            summary.received_ts if summary is not None and summary.received_ts is not None
+            else summary.ts_utc if summary is not None
+            else None
+        )
+        order_book_freshness = _read_model_freshness_payload(
+            exchange_ts=order_book_exchange_ts,
+            received_ts=order_book_received_ts,
+            max_age_seconds=order_book_max_age_seconds,
+            now=now,
+        )
         change_abs = (
             last_price - previous_close
             if last_price is not None and previous_close is not None
@@ -571,9 +590,15 @@ class BffReadService:
                 "exchange_ts": summary.exchange_ts.isoformat()
                 if summary.exchange_ts is not None
                 else summary.ts_utc.isoformat(),
+                "received_ts": (
+                    summary.received_ts.isoformat()
+                    if summary.received_ts is not None
+                    else summary.ts_utc.isoformat()
+                ),
                 "age_seconds": order_book_age,
                 "age_ms": int(order_book_age * 1000) if order_book_age is not None else None,
                 "is_stale": order_book_stale,
+                **order_book_freshness,
                 "market_quality_components": market_quality_components,
             }
         elif candle is not None:
@@ -616,6 +641,7 @@ class BffReadService:
             "last_price_source": last_price_source,
             "is_price_stale": is_price_stale,
             "price_staleness_seconds": price_staleness_seconds,
+            **order_book_freshness,
             "previous_close": previous_close,
             "change_abs": change_abs,
             "change_bps": change_bps,
@@ -692,6 +718,7 @@ class BffReadService:
                 "reason_code": "no_price_source_available" if last_price is None else None,
                 "price_staleness_seconds": price_staleness_seconds,
                 "order_book_stale": order_book_stale,
+                **order_book_freshness,
                 "market_quality_components": market_quality_components,
             },
         }
@@ -707,10 +734,16 @@ class BffReadService:
             .limit(1)
         ).scalars().first()
 
-    def _latest_order_book_summary(self, instrument_id: str) -> OrderBookSummary | None:
+    def _latest_order_book_summary(
+        self,
+        instrument_id: str,
+        *,
+        registry: InstrumentRegistry | None = None,
+    ) -> OrderBookSummary | None:
+        aliases = _instrument_storage_aliases(instrument_id, registry)
         return self._session.execute(
             select(OrderBookSummary)
-            .where(OrderBookSummary.instrument_id == instrument_id)
+            .where(OrderBookSummary.instrument_id.in_(aliases))
             .order_by(OrderBookSummary.ts_utc.desc())
             .limit(1)
         ).scalars().first()
@@ -2360,6 +2393,86 @@ def _ticker_from_instrument_id(instrument_id: str) -> str:
     return value.split(":", 1)[1] if ":" in value else value
 
 
+def _instrument_storage_aliases(
+    instrument_id: str,
+    registry: InstrumentRegistry | None,
+) -> tuple[str, ...]:
+    aliases = [instrument_id]
+    if registry is not None:
+        aliases.extend(
+            value
+            for value in (
+                registry.instrument_id,
+                registry.instrument_uid,
+                registry.figi,
+                registry.ticker,
+                _canonical_moex_instrument(registry.ticker),
+            )
+            if value
+        )
+    ticker = _ticker_from_instrument_id(instrument_id)
+    aliases.extend([ticker, _canonical_moex_instrument(ticker)])
+    seen: set[str] = set()
+    result: list[str] = []
+    for alias in aliases:
+        if alias in seen:
+            continue
+        seen.add(alias)
+        result.append(alias)
+    return tuple(result)
+
+
+def _read_model_freshness_payload(
+    *,
+    exchange_ts: datetime | None,
+    received_ts: datetime | None,
+    max_age_seconds: float,
+    now: datetime,
+) -> JsonPayload:
+    received_age_ms: int | None = None
+    exchange_age_ms: int | None = None
+    if received_ts is not None:
+        received_ts = _ensure_utc_datetime(received_ts)
+        received_age_ms = max(0, int((now - received_ts).total_seconds() * 1000))
+    if exchange_ts is not None:
+        exchange_ts = _ensure_utc_datetime(exchange_ts)
+        exchange_age_ms = max(0, int((now - exchange_ts).total_seconds() * 1000))
+    stale_by_received_time = (
+        received_age_ms is None or received_age_ms > max_age_seconds * 1000
+    )
+    stale_by_exchange_time = (
+        exchange_age_ms is None or exchange_age_ms > max_age_seconds * 1000
+    )
+    if exchange_ts is None:
+        freshness_status = "unknown"
+        freshness_reason = "missing_exchange_ts"
+    elif stale_by_exchange_time:
+        freshness_status = "stale"
+        freshness_reason = "exchange_ts_too_old"
+    elif stale_by_received_time:
+        freshness_status = "stale"
+        freshness_reason = "received_ts_too_old"
+    else:
+        freshness_status = "fresh"
+        freshness_reason = "fresh"
+    return {
+        "received_ts": received_ts,
+        "exchange_ts": exchange_ts,
+        "received_age_ms": received_age_ms,
+        "exchange_age_ms": exchange_age_ms,
+        "stale_by_received_time": stale_by_received_time,
+        "stale_by_exchange_time": stale_by_exchange_time,
+        "freshness_status": freshness_status,
+        "freshness_reason": freshness_reason,
+    }
+
+
+def _ensure_utc_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
 def _no_order_book_quality_components() -> JsonPayload:
     return {
         "display_market_quality_score": None,
@@ -2420,12 +2533,13 @@ def _is_price_stale(
     if source in {
         "live_order_book_mid",
         "live_exchange_order_book",
-        "live_exchange_last_price",
         "broker_quote_exchange_closed",
         "broker_otc_order_book",
         "broker_indicative_quote",
     }:
-        return age > 30
+        return age > _dashboard_order_book_max_age_seconds()
+    if source == "live_exchange_last_price":
+        return age > _dashboard_last_price_max_age_seconds()
     if source == "previous_close":
         return True
     if current_session.trading_date is not None and timestamp.date() < current_session.trading_date:
@@ -2433,6 +2547,24 @@ def _is_price_stale(
     if current_session.session_phase == "continuous_trading":
         return age > 180
     return age > 86_400
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _dashboard_order_book_max_age_seconds() -> float:
+    return _env_float("DASHBOARD_ORDER_BOOK_MAX_EXCHANGE_AGE_SECONDS", 5.0)
+
+
+def _dashboard_last_price_max_age_seconds() -> float:
+    return _env_float("DASHBOARD_LAST_PRICE_MAX_EXCHANGE_AGE_SECONDS", 10.0)
 
 
 def _quote_status(

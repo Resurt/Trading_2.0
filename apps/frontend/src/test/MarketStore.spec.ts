@@ -456,6 +456,38 @@ describe("market store", () => {
     expect(market.currentInstrument?.recent_market_trades).toEqual([]);
   });
 
+  it("drops preserved trade tape when backend marks it stale", () => {
+    const market = useMarketStore();
+    const now = new Date().toISOString();
+    market.applyOverview({
+      generated_at: now,
+      instruments: [
+        instrument({
+          recent_market_trades: [{ price: "75.66", exchange_ts: "2026-06-30T10:56:59Z" }],
+          market_trades_source: "tbank_get_last_trades",
+          market_trades_age_ms: 30_000,
+          trade_tape_status: "stale",
+          trade_tape_reason: "trade_exchange_ts_too_old",
+        }),
+      ],
+    });
+
+    market.applyOverview({
+      generated_at: now,
+      instruments: [
+        instrument({
+          market_trades_source: "tbank_get_last_trades",
+          market_trades_age_ms: null,
+          trade_tape_status: "stale",
+          trade_tape_reason: "trade_exchange_ts_too_old",
+        }),
+      ],
+    });
+
+    expect(market.currentInstrument?.recent_market_trades).toEqual([]);
+    expect(market.currentInstrument?.trade_tape_reason).toBe("trade_exchange_ts_too_old");
+  });
+
   it("keeps broker order book metrics when weaker snapshots arrive later", () => {
     const market = useMarketStore();
     const now = new Date().toISOString();

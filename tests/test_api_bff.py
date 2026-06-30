@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from starlette.websockets import WebSocketDisconnect
 
 from trade_core.broker_gateway import BrokerUnaryResponse
@@ -1197,6 +1198,65 @@ def test_market_overview_uses_latest_candle_when_order_book_missing(tmp_path: Pa
     assert market["instruments"][0]["is_price_stale"] is True
     assert market["instruments"][0]["display_market_quality_score"] is None
     assert market["instruments"][0]["market_quality_label"] == "no_order_book_samples"
+
+
+def test_market_overview_resolves_order_book_summary_by_broker_alias(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    force_exchange_open(monkeypatch)
+    database = DatabaseService(f"sqlite+pysqlite:///{tmp_path / 'quotes-alias.db'}")
+    Base.metadata.create_all(database.engine)
+    seed_database(database)
+    now = datetime.now(tz=UTC)
+    with database.session_scope() as session:
+        summary = session.execute(select(OrderBookSummary).limit(1)).scalars().one()
+        summary.instrument_id = "uid-sber"
+        summary.ts_utc = now
+        summary.exchange_ts = now
+        summary.received_ts = now
+
+    with database.session_scope() as session:
+        service = BffReadService(session)
+        overview = service.market_overview(
+            preflight=preflight_response(market_open=True, reason_code="market_open"),
+        )
+
+    sber = next(row for row in overview.instruments if row.instrument_id == "MOEX:SBER")
+    assert sber.order_book_source == "live_exchange_order_book"
+    assert sber.best_bid == Decimal("100.0000")
+    assert sber.best_ask == Decimal("100.1000")
+    assert sber.mid_price == Decimal("100.0500")
+    assert sber.freshness_status == "fresh"
+
+
+def test_market_overview_uses_dashboard_order_book_freshness_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    force_exchange_open(monkeypatch)
+    monkeypatch.setenv("DASHBOARD_ORDER_BOOK_MAX_EXCHANGE_AGE_SECONDS", "5")
+    database = DatabaseService(f"sqlite+pysqlite:///{tmp_path / 'quotes-stale.db'}")
+    Base.metadata.create_all(database.engine)
+    seed_database(database)
+    stale_ts = datetime.now(tz=UTC) - timedelta(seconds=6)
+    with database.session_scope() as session:
+        summary = session.execute(select(OrderBookSummary).limit(1)).scalars().one()
+        summary.ts_utc = stale_ts
+        summary.exchange_ts = stale_ts
+        summary.received_ts = stale_ts
+
+    with database.session_scope() as session:
+        service = BffReadService(session)
+        overview = service.market_overview(
+            preflight=preflight_response(market_open=True, reason_code="market_open"),
+        )
+
+    sber = next(row for row in overview.instruments if row.instrument_id == "MOEX:SBER")
+    assert sber.order_book_stale is True
+    assert sber.freshness_status == "stale"
+    assert sber.freshness_reason == "exchange_ts_too_old"
+    assert sber.quote_status == "stale"
 
 
 def test_market_overview_falls_back_when_dashboard_feed_gateway_unavailable(

@@ -682,10 +682,13 @@ function withPreservedRecentTrades(
 }
 
 function isTradeTapeStillFresh(instrument: MarketInstrumentOverview): boolean {
+  if (instrument.trade_tape_status && !["live", "fresh"].includes(instrument.trade_tape_status)) {
+    return false;
+  }
   if (instrument.market_trades_age_ms === null || instrument.market_trades_age_ms === undefined) {
     return false;
   }
-  return Number(instrument.market_trades_age_ms) <= 30 * 60 * 1000;
+  return Number(instrument.market_trades_age_ms) <= 15 * 1000;
 }
 
 function quoteSnapshotFields(instrument: MarketInstrumentOverview): Partial<MarketInstrumentOverview> {

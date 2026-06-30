@@ -267,8 +267,9 @@ def data_only_preflight_payload(
     session_type: str,
     start_at: datetime,
     end_at: datetime,
+    next_collection_at: datetime | None = None,
 ) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "now_msk": now.isoformat(),
         "trading_date": now.date().isoformat(),
         "calendar_date": now.date().isoformat(),
@@ -287,6 +288,10 @@ def data_only_preflight_payload(
         "current_window_end_at": end_at.isoformat(),
         "reason_code": "market_open",
     }
+    if next_collection_at is not None:
+        payload["next_collection_window_at"] = next_collection_at.isoformat()
+        payload["next_resume_at"] = next_collection_at.isoformat()
+    return payload
 
 
 def create_data_only_start_command(runtime: TradeCoreRuntime, preflight: dict[str, object]) -> None:
@@ -947,6 +952,85 @@ def test_data_only_daily_intent_restores_and_resumes_after_runtime_restart(
             ).scalars().first()
             assert latest is not None
             assert latest.session_type == "weekday_evening"
+        assert second_gateway.post_order_calls == []
+        assert second_gateway.cancel_order_calls == []
+        await second_runtime.shutdown()
+
+    asyncio.run(second_run())
+
+
+def test_data_only_daily_intent_restarts_active_window_after_runtime_restart(
+    tmp_path: Path,
+) -> None:
+    database_url = runtime_config(tmp_path).database_url or ""
+    config = replace(
+        runtime_config(tmp_path),
+        database_url=database_url,
+        data_only_shadow_enabled=True,
+        data_only_order_book_poll_interval_seconds=1,
+    )
+    first_gateway = PollingOrderBookGateway(now=msk(2026, 6, 29, 10, 10))
+    first_runtime = TradeCoreRuntime(
+        config=config,
+        launch_policy=LaunchModePolicy.from_mode(RuntimeMode.SHADOW),
+        database=DatabaseService(database_url),
+        broker_gateway=cast(BrokerGateway, first_gateway),
+        report_job_dispatcher=noop_report_job_dispatcher(),
+    )
+
+    async def first_run() -> int:
+        await first_runtime.start()
+        create_data_only_start_command(
+            first_runtime,
+            data_only_preflight_payload(
+                now=msk(2026, 6, 29, 10, 10),
+                session_type="weekday_main",
+                start_at=msk(2026, 6, 29, 10),
+                end_at=msk(2026, 6, 29, 18, 59),
+                next_collection_at=msk(2026, 6, 29, 19),
+            ),
+        )
+        assert await first_runtime.process_robot_commands_async() == 1
+        await first_runtime.run_cycle(now=msk(2026, 6, 29, 10, 10))
+        assert first_runtime.stats.collector_state == "collecting"
+        with first_runtime.database.session_factory() as session:
+            snapshot_count = session.scalar(
+                select(func.count()).select_from(MarketMicrostructureSnapshot)
+            )
+        await first_runtime.shutdown()
+        return int(snapshot_count or 0)
+
+    first_snapshot_count = asyncio.run(first_run())
+
+    second_gateway = PollingOrderBookGateway(now=msk(2026, 6, 29, 10, 30))
+    second_runtime = TradeCoreRuntime(
+        config=config,
+        launch_policy=LaunchModePolicy.from_mode(RuntimeMode.SHADOW),
+        database=DatabaseService(database_url),
+        broker_gateway=cast(BrokerGateway, second_gateway),
+        report_job_dispatcher=noop_report_job_dispatcher(),
+    )
+
+    async def second_run() -> None:
+        await second_runtime.start()
+        assert second_runtime.stats.daily_collection_active is True
+        assert second_runtime.stats.collector_state == "paused_until_next_window"
+        assert second_runtime.stats.next_resume_at is None
+        await second_runtime.run_cycle(now=msk(2026, 6, 29, 10, 30))
+        assert second_runtime.stats.collector_state == "collecting"
+        assert second_gateway.order_book_requests
+        with second_runtime.database.session_factory() as session:
+            snapshot_count = session.scalar(
+                select(func.count()).select_from(MarketMicrostructureSnapshot)
+            )
+            latest = session.execute(
+                select(MarketMicrostructureSnapshot).order_by(
+                    MarketMicrostructureSnapshot.ts_utc.desc()
+                )
+            ).scalars().first()
+        assert int(snapshot_count or 0) > first_snapshot_count
+        assert latest is not None
+        assert latest.session_type == "weekday_main"
         assert second_gateway.post_order_calls == []
         assert second_gateway.cancel_order_calls == []
         await second_runtime.shutdown()

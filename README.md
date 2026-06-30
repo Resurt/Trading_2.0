@@ -338,6 +338,13 @@ API status distinguish `robot_control_state`, `data_shadow_collector_state`,
 `daily_collection_active`, and `effective_logging_state` so a stopped or paused
 collector is not reported as simply running.
 
+If the trade-core process or container restarts during an active collection window,
+the latest durable `data_only_shadow_collection_started`/`resumed` audit event is
+treated as an active daily intent, not as a live in-process stream. The restarted
+runtime must run fresh preflight and resume collection immediately when the current
+window is open; it must wait for `next_resume_at` only when the durable state is an
+actual `paused_until_next_window` event.
+
 Data-only Start is market-data-only. Runtime micro-session position snapshots are
 skipped, so account-level `GetPositions`/`GetPortfolio` calls happen only through
 explicit balance diagnostics such as `/portfolio/refresh`.
@@ -387,6 +394,14 @@ and previous-close fallbacks. It always returns one row per core instrument and
 avoids heavy all-instrument order-book calls. Selected-instrument bid/ask ladder
 and trade tape come through the selected snapshot/details fields; the frontend
 sends `market.select` over the WebSocket when the operator switches instruments.
+Stored `order_book_summary` rows may use broker `instrument_uid`/`figi` while the
+operator UI requests canonical `MOEX:*`; the BFF resolves these aliases so fresh
+collector books can populate quote cards. Stale `GetLastPrices` responses must not
+downgrade a fresh order-book mid. Trade tape has its own freshness status: old
+`GetLastTrades` rows must show as stale/delayed, not as a live market stream.
+Selected order-book refresh is intentionally faster than the freshness budget:
+`DASHBOARD_SELECTED_BOOK_REFRESH_SECONDS=3` with
+`DASHBOARD_ORDER_BOOK_MAX_EXCHANGE_AGE_SECONDS=5` by default.
 
 Explicit readonly broker quote refresh remains `POST /market/quotes/refresh`.
 Temporary request failures must not clear already displayed quotes; if the readonly

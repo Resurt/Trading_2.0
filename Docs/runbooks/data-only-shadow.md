@@ -260,7 +260,11 @@ and must not auto-resume at the next window.
 Process restart recovery uses the latest data-only lifecycle audit event. If the
 last durable state is `paused_until_next_window` and the operator did not stop the
 run, fresh preflight decides whether to resume immediately, stay paused, or mark
-the day complete.
+the day complete. If the last durable state is `data_only_shadow_collection_started`
+or `data_only_shadow_collection_resumed`, the restarted process must not assume the
+old stream tasks are still alive and must not wait for a future evening
+`next_resume_at`. It should run a fresh preflight on the next cycle and immediately
+restart streams/polling when the current collection window is open.
 
 ## Broker balance visibility
 
@@ -299,6 +303,13 @@ by that feed cache first, then stored `order_book_summary`, `market_candle` and
 previous-close fallbacks. It must return one row per core universe instrument and
 expose `last_price_source`, `quote_status`, `is_price_stale` and timestamp.
 
+When data-only collection is running, quote cards should prefer fresh
+`order_book_summary` top-of-book data written by the collector. These rows may be
+stored under broker `instrument_uid`/`figi` while the operator UI requests `MOEX:*`;
+the BFF resolves aliases through `instrument_registry`. Do not start a second
+collector just because a card shows stale last-price data; first check whether the
+dashboard/read-model alias path is finding the stored order-book summary.
+
 The dashboard feed distinguishes broker response receipt time from exchange data
 time. `received_ts`/`received_age_ms` only say when the BFF received a readonly
 response. `exchange_ts`/`exchange_age_ms`,
@@ -316,6 +327,15 @@ Trade tape is explicit: selected details include either `recent_market_trades` o
 `trade_tape_status`/`trade_tape_reason` such as `no_market_trades_samples`,
 `get_last_trades_timeout`, `market_closed`, `stale`, or `unavailable`. Missing
 trade tape must not block quotes or order-book display.
+If broker `GetLastTrades` returns rows whose `exchange_ts` is older than
+`DASHBOARD_TRADES_MAX_EXCHANGE_AGE_SECONDS`, the tape must be displayed as
+stale/delayed (`trade_exchange_ts_too_old`), not as a live market stream. A fresh
+order book with a stale trade tape is a display limitation, not a data-only logging
+failure by itself.
+Selected order-book refresh must remain below the freshness threshold. The current
+defaults are `DASHBOARD_SELECTED_BOOK_REFRESH_SECONDS=3` and
+`DASHBOARD_ORDER_BOOK_MAX_EXCHANGE_AGE_SECONDS=5`; if operators see an open-market
+selected ladder flip to stale while broker health is OK, check these settings first.
 
 Readonly broker quote refresh remains explicit for diagnostics:
 `POST /market/quotes/refresh` may call T-Invest `GetLastPrices`/`GetOrderBook` with

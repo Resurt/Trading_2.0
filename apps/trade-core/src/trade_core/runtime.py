@@ -1304,7 +1304,7 @@ class TradeCoreRuntime:
             return
         if not self.stats.daily_collection_active or self.stats.cancelled_by_operator:
             return
-        next_resume_at = self.stats.next_resume_at or self.stats.next_collection_window_at
+        next_resume_at = self.stats.next_resume_at
         now_msk = _ensure_msk(now)
         if next_resume_at is not None and now_msk < _ensure_msk(next_resume_at):
             return
@@ -1347,6 +1347,19 @@ class TradeCoreRuntime:
             self._data_only_preflight_payload = self._annotate_data_only_preflight_payload(
                 preflight,
                 now=now_msk,
+            )
+            next_window = _preflight_datetime_msk(
+                self._data_only_preflight_payload,
+                "next_collection_window_at",
+            ) or _preflight_datetime_msk(
+                self._data_only_preflight_payload,
+                "next_session_at",
+            )
+            self.stats.next_collection_window_at = next_window
+            self.stats.next_resume_at = next_window
+            self.stats.remaining_windows_today = _int_payload(
+                self._data_only_preflight_payload.get("remaining_windows_today"),
+                default=self.stats.remaining_windows_today,
             )
             self._write_audit_event(
                 action="data_only_shadow_collection_resume_failed",
@@ -1723,8 +1736,14 @@ class TradeCoreRuntime:
         self.stats.next_collection_window_at = _coerce_datetime_payload(
             payload.get("next_collection_window_at")
         )
-        self.stats.next_resume_at = _coerce_datetime_payload(payload.get("next_resume_at"))
-        if self.stats.next_resume_at is None:
+        if action == "data_only_shadow_collection_paused_until_next_window":
+            self.stats.next_resume_at = _coerce_datetime_payload(payload.get("next_resume_at"))
+        else:
+            self.stats.next_resume_at = None
+        if (
+            action == "data_only_shadow_collection_paused_until_next_window"
+            and self.stats.next_resume_at is None
+        ):
             self.stats.next_resume_at = self.stats.next_collection_window_at
         self.stats.remaining_windows_today = _int_payload(
             payload.get("remaining_windows_today"),
