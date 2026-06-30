@@ -44,6 +44,14 @@ The first WebSocket snapshot must include:
 If WebSocket fails, REST polling continues. If REST also fails, the UI keeps the
 last good data and shows a degraded/stale warning instead of clearing the board.
 
+## Session Ribbon
+
+The top session ribbon should show operator-ready state, not raw diagnostics. In
+normal open-market state it displays the session name and a single `рынок открыт`
+detail. It must not render raw trading dates or duplicate equivalent reason codes
+such as `рынок открыт · рынок открыт`. Dates are reserved for fallback states where
+the market/session state is not known.
+
 ## Core Universe
 
 The quote board expects the core universe:

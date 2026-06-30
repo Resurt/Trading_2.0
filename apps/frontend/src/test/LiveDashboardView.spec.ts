@@ -105,6 +105,16 @@ function mountWithStores() {
     warnings: [],
     warning: "Strategy trading disabled: data-only shadow mode",
   };
+  market.dashboardFeedStatus = {
+    ...market.dashboardFeedStatus,
+    running: true,
+    market_open: true,
+    session_type: "weekday_evening",
+    session_phase: "continuous_trading",
+    venue_type: "official_exchange",
+    last_refresh_at: "2026-06-13T07:10:00Z",
+    warnings: [],
+  };
   portfolio.positions = [];
   portfolio.openOrders = [];
   reports.hourlyReports = [];
@@ -131,7 +141,7 @@ describe("LiveDashboardView", () => {
     expect(wrapper.text()).toContain("100,10");
     expect(wrapper.text()).toContain("Покупка");
     expect(wrapper.text()).toContain("Площадка");
-    expect(wrapper.text()).toContain("Биржевая торговля");
+    expect(wrapper.text()).toContain("биржевая");
     expect(wrapper.text()).toContain("Data-only сбор");
     expect(wrapper.text()).toContain("заявок, pseudo-orders");
     expect(wrapper.text()).toMatch(/250\s000,00/);
@@ -141,6 +151,16 @@ describe("LiveDashboardView", () => {
     expect(wrapper.text()).toContain("spread_too_wide");
     expect(wrapper.text()).toContain("spread above configured threshold");
     expect(wrapper.text()).not.toContain("request-1");
+  });
+
+  it("does not duplicate open-market text in the session ribbon", () => {
+    const wrapper = mountWithStores();
+    const sessionRibbon = wrapper.find('[data-testid="session-ribbon"]').text();
+
+    expect(sessionRibbon).toContain("Вечерняя сессия");
+    expect(sessionRibbon).toContain("рынок открыт");
+    expect(sessionRibbon).not.toContain("рынок открыт · рынок открыт");
+    expect(sessionRibbon).not.toContain("2026-06-13");
   });
 
   it("renders degraded balance state with refresh guidance", async () => {

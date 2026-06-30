@@ -277,15 +277,42 @@ function blockedCash(): string {
 }
 
 function sessionDetail(): string {
-  const date = robot.session.trading_date ?? robot.session.calendar_date ?? "нет даты";
   const marketOpen = market.dashboardFeedStatus.market_open;
-  const openLabel = marketOpen ? "рынок открыт" : "рынок закрыт или уточняется";
   const reason =
     selectedInstrument.value?.reason_code ??
     market.dashboardFeedStatus.warnings[0] ??
     market.dataShadowStatus.reason_code ??
     robot.lastCommandReasonCode;
-  return `${date} · ${openLabel}${reason ? ` · ${reasonLabel(reason)}` : ""}`;
+  const parts: string[] = [];
+  if (marketOpen === true) {
+    parts.push("рынок открыт");
+  } else if (marketOpen === false) {
+    parts.push("рынок закрыт или уточняется");
+  }
+  if (reason && !isDuplicateSessionReason(reason, marketOpen)) {
+    const label = reasonLabel(reason);
+    if (!parts.includes(label)) {
+      parts.push(label);
+    }
+  }
+  if (parts.length > 0) {
+    return parts.join(" · ");
+  }
+  return robot.session.trading_date ?? robot.session.calendar_date ?? "нет даты";
+}
+
+function isDuplicateSessionReason(reason: string, marketOpen: boolean | null | undefined): boolean {
+  if (marketOpen === true) {
+    return reason === "market_open" || reason === "data_only_collection_allowed";
+  }
+  if (marketOpen === false) {
+    return (
+      reason === "market_closed_expected" ||
+      reason === "official_exchange_closed" ||
+      reason === "weekend_session_closed"
+    );
+  }
+  return false;
 }
 
 function venueStatusValue(): string {
