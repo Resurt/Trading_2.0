@@ -30,8 +30,8 @@ class DashboardMarketFeedConfig:
     trades_refresh_seconds: float = 15.0
     session_refresh_seconds: float = 30.0
     max_instruments: int = 8
-    last_price_max_exchange_age_seconds: float = 10.0
-    order_book_max_exchange_age_seconds: float = 5.0
+    last_price_max_exchange_age_seconds: float = 30.0
+    order_book_max_exchange_age_seconds: float = 30.0
     trades_max_exchange_age_seconds: float = 15.0
 
     @classmethod
@@ -46,10 +46,10 @@ class DashboardMarketFeedConfig:
             session_refresh_seconds=_env_float("DASHBOARD_SESSION_REFRESH_SECONDS", 30.0),
             max_instruments=max(1, _env_int("DASHBOARD_FEED_MAX_INSTRUMENTS", 8)),
             last_price_max_exchange_age_seconds=_env_float(
-                "DASHBOARD_LAST_PRICE_MAX_EXCHANGE_AGE_SECONDS", 10.0
+                "DASHBOARD_LAST_PRICE_MAX_EXCHANGE_AGE_SECONDS", 30.0
             ),
             order_book_max_exchange_age_seconds=_env_float(
-                "DASHBOARD_ORDER_BOOK_MAX_EXCHANGE_AGE_SECONDS", 5.0
+                "DASHBOARD_ORDER_BOOK_MAX_EXCHANGE_AGE_SECONDS", 30.0
             ),
             trades_max_exchange_age_seconds=_env_float(
                 "DASHBOARD_TRADES_MAX_EXCHANGE_AGE_SECONDS", 15.0
@@ -467,7 +467,8 @@ class DashboardMarketFeedService:
                 0,
                 int((now - current.order_book_ts.astimezone(UTC)).total_seconds() * 1000),
             )
-            if current.official_exchange_open and age_ms > 5_000:
+            max_age_ms = int(self.config.order_book_max_exchange_age_seconds * 1000)
+            if current.official_exchange_open and age_ms > max_age_ms:
                 current = current.model_copy(
                     update={
                         "order_book_age_ms": age_ms,
@@ -702,6 +703,7 @@ def _instrument_with_last_price(
         exchange_ts=exchange_ts,
         received_ts=now,
         max_exchange_age_seconds=max_exchange_age_seconds,
+        received_snapshot_is_authoritative=False,
     )
     stale_by_exchange = bool(freshness["stale_by_exchange_time"])
     freshness_status = str(freshness["freshness_status"])
@@ -813,6 +815,7 @@ def _order_book_overview_payload(
         exchange_ts=exchange_ts,
         received_ts=now,
         max_exchange_age_seconds=max_exchange_age_seconds,
+        received_snapshot_is_authoritative=True,
     )
     stale_by_exchange = bool(freshness["stale_by_exchange_time"])
     order_book_age_ms = cast(int | None, freshness["exchange_age_ms"])
@@ -1032,7 +1035,13 @@ def _prefer_live_row(
         return base
     cached_priority = _source_priority(cached.last_price_source)
     base_priority = _source_priority(base.last_price_source)
-    if cached.last_price is not None and cached_priority >= base_priority:
+    if cached.last_price is None or cached_priority < base_priority:
+        return base
+    if not _row_display_fresh(cached) and base.last_price is not None:
+        return base
+    if cached_priority == base_priority and _row_data_timestamp(base) > _row_data_timestamp(cached):
+        return base
+    if cached_priority >= base_priority:
         return base.model_copy(
             update=cached.model_dump(
                 exclude={
@@ -1048,6 +1057,27 @@ def _prefer_live_row(
             )
         )
     return base
+
+
+def _row_display_fresh(row: MarketInstrumentOverview) -> bool:
+    if row.quote_status != "live":
+        return False
+    return not (row.is_price_stale or row.stale_by_received_time)
+
+
+def _row_data_timestamp(row: MarketInstrumentOverview) -> datetime:
+    candidates = [
+        value
+        for value in (
+            row.received_ts,
+            row.order_book_ts,
+            row.last_price_at,
+            row.exchange_ts,
+        )
+        if value is not None
+    ]
+    ensured = [_ensure_utc(value) for value in candidates if value is not None]
+    return max(ensured, default=datetime.min.replace(tzinfo=UTC))
 
 
 def _cached_row_safe_for_base_session(
@@ -1267,6 +1297,7 @@ def _freshness_payload(
     exchange_ts: datetime | None,
     received_ts: datetime,
     max_exchange_age_seconds: float,
+    received_snapshot_is_authoritative: bool = False,
 ) -> dict[str, object]:
     received_ts = received_ts.astimezone(UTC)
     now = datetime.now(tz=UTC)
@@ -1275,21 +1306,26 @@ def _freshness_payload(
     if exchange_ts is not None:
         exchange_ts = exchange_ts.astimezone(UTC)
         exchange_age_ms = max(0, int((now - exchange_ts).total_seconds() * 1000))
-    stale_by_received_time = received_age_ms > max_exchange_age_seconds * 1000
+    max_age_ms = max_exchange_age_seconds * 1000
+    stale_by_received_time = received_age_ms > max_age_ms
     stale_by_exchange_time = (
         exchange_ts is None
         or exchange_age_ms is None
-        or exchange_age_ms > max_exchange_age_seconds * 1000
+        or exchange_age_ms > max_age_ms
     )
-    if exchange_ts is None:
+    if received_snapshot_is_authoritative and not stale_by_received_time:
+        stale_by_exchange_time = False
+        status = "fresh"
+        reason = "fresh"
+    elif exchange_ts is None:
         status = "unknown"
         reason = "missing_exchange_ts"
-    elif stale_by_exchange_time:
-        status = "stale"
-        reason = "exchange_ts_too_old"
     elif stale_by_received_time:
         status = "stale"
         reason = "received_ts_too_old"
+    elif stale_by_exchange_time:
+        status = "stale"
+        reason = "exchange_ts_too_old"
     else:
         status = "fresh"
         reason = "fresh"

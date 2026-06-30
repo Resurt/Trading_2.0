@@ -94,15 +94,17 @@ Dashboard freshness is dual:
 - `freshness_status`;
 - `freshness_reason`.
 
-Broker response receipt time does not make old exchange data live. Old candles,
-previous closes, stale local history, broker OTC and broker indicative quotes are
-display-only and must not be shown as live calibration data.
+For live order-book snapshots, receipt time is authoritative for operator display:
+`exchange_ts` may represent the last exchange-side book change and can remain older
+while a fresh broker/read-model snapshot is still current. Last-price-only,
+candle, previous-close, broker OTC and broker indicative data remain
+exchange-time gated and must not be shown as live calibration data.
 
 Default freshness thresholds are backend-configurable:
 
-- `DASHBOARD_LAST_PRICE_MAX_EXCHANGE_AGE_SECONDS=10`
+- `DASHBOARD_LAST_PRICE_MAX_EXCHANGE_AGE_SECONDS=30`
 - `DASHBOARD_SELECTED_BOOK_REFRESH_SECONDS=3`
-- `DASHBOARD_ORDER_BOOK_MAX_EXCHANGE_AGE_SECONDS=5`
+- `DASHBOARD_ORDER_BOOK_MAX_EXCHANGE_AGE_SECONDS=30`
 - `DASHBOARD_TRADES_MAX_EXCHANGE_AGE_SECONDS=15`
 
 ## Order Book

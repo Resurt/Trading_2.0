@@ -510,6 +510,7 @@ class BffReadService:
             received_ts=order_book_received_ts,
             max_age_seconds=order_book_max_age_seconds,
             now=now,
+            received_snapshot_is_authoritative=True,
         )
         change_abs = (
             last_price - previous_close
@@ -2428,6 +2429,7 @@ def _read_model_freshness_payload(
     received_ts: datetime | None,
     max_age_seconds: float,
     now: datetime,
+    received_snapshot_is_authoritative: bool = False,
 ) -> JsonPayload:
     received_age_ms: int | None = None
     exchange_age_ms: int | None = None
@@ -2437,21 +2439,24 @@ def _read_model_freshness_payload(
     if exchange_ts is not None:
         exchange_ts = _ensure_utc_datetime(exchange_ts)
         exchange_age_ms = max(0, int((now - exchange_ts).total_seconds() * 1000))
-    stale_by_received_time = (
-        received_age_ms is None or received_age_ms > max_age_seconds * 1000
-    )
+    max_age_ms = max_age_seconds * 1000
+    stale_by_received_time = received_age_ms is None or received_age_ms > max_age_ms
     stale_by_exchange_time = (
-        exchange_age_ms is None or exchange_age_ms > max_age_seconds * 1000
+        exchange_age_ms is None or exchange_age_ms > max_age_ms
     )
-    if exchange_ts is None:
+    if received_snapshot_is_authoritative and not stale_by_received_time:
+        stale_by_exchange_time = False
+        freshness_status = "fresh"
+        freshness_reason = "fresh"
+    elif exchange_ts is None:
         freshness_status = "unknown"
         freshness_reason = "missing_exchange_ts"
-    elif stale_by_exchange_time:
-        freshness_status = "stale"
-        freshness_reason = "exchange_ts_too_old"
     elif stale_by_received_time:
         freshness_status = "stale"
         freshness_reason = "received_ts_too_old"
+    elif stale_by_exchange_time:
+        freshness_status = "stale"
+        freshness_reason = "exchange_ts_too_old"
     else:
         freshness_status = "fresh"
         freshness_reason = "fresh"
@@ -2560,11 +2565,11 @@ def _env_float(name: str, default: float) -> float:
 
 
 def _dashboard_order_book_max_age_seconds() -> float:
-    return _env_float("DASHBOARD_ORDER_BOOK_MAX_EXCHANGE_AGE_SECONDS", 5.0)
+    return _env_float("DASHBOARD_ORDER_BOOK_MAX_EXCHANGE_AGE_SECONDS", 30.0)
 
 
 def _dashboard_last_price_max_age_seconds() -> float:
-    return _env_float("DASHBOARD_LAST_PRICE_MAX_EXCHANGE_AGE_SECONDS", 10.0)
+    return _env_float("DASHBOARD_LAST_PRICE_MAX_EXCHANGE_AGE_SECONDS", 30.0)
 
 
 def _quote_status(

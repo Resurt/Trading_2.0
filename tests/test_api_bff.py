@@ -18,6 +18,8 @@ from trading_api import create_fastapi_app
 from trading_api.read_service import BffReadService
 from trading_api.schemas import (
     DailyReportRunRequest,
+    MarketInstrumentOverview,
+    MarketOverviewResponse,
     ReportJobResponse,
     ReportJobStatusResponse,
     ReportRebuildRequest,
@@ -1288,8 +1290,88 @@ def test_market_overview_uses_dashboard_order_book_freshness_budget(
     sber = next(row for row in overview.instruments if row.instrument_id == "MOEX:SBER")
     assert sber.order_book_stale is True
     assert sber.freshness_status == "stale"
-    assert sber.freshness_reason == "exchange_ts_too_old"
+    assert sber.freshness_reason == "received_ts_too_old"
     assert sber.quote_status == "stale"
+
+
+def test_market_overview_treats_recently_received_live_book_as_fresh(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    force_exchange_open(monkeypatch)
+    monkeypatch.setenv("DASHBOARD_ORDER_BOOK_MAX_EXCHANGE_AGE_SECONDS", "5")
+    database = DatabaseService(f"sqlite+pysqlite:///{tmp_path / 'quotes-received-fresh.db'}")
+    Base.metadata.create_all(database.engine)
+    seed_database(database)
+    now = datetime.now().astimezone().replace(tzinfo=None)
+    with database.session_scope() as session:
+        summary = session.execute(select(OrderBookSummary).limit(1)).scalars().one()
+        summary.ts_utc = now
+        summary.exchange_ts = now - timedelta(seconds=30)
+        summary.received_ts = now
+
+    with database.session_scope() as session:
+        service = BffReadService(session)
+        overview = service.market_overview(
+            preflight=preflight_response(market_open=True, reason_code="market_open"),
+        )
+
+    sber = next(row for row in overview.instruments if row.instrument_id == "MOEX:SBER")
+    assert sber.order_book_stale is False
+    assert sber.quote_status == "live"
+    assert sber.freshness_status == "fresh"
+    assert sber.freshness_reason == "fresh"
+
+
+def test_dashboard_market_feed_merge_does_not_let_stale_cache_override_fresh_base() -> None:
+    feed_module = importlib.import_module("trading_api.dashboard_market_feed")
+    now = datetime.now(tz=UTC)
+    fresh_row = MarketInstrumentOverview(
+        instrument_id="MOEX:SBER",
+        ticker="SBER",
+        official_exchange_open=True,
+        quote_source="live_exchange_order_book",
+        last_price_source="live_exchange_order_book",
+        last_price=Decimal("307.00"),
+        last_price_at=now,
+        received_ts=now,
+        exchange_ts=now,
+        stale_by_received_time=False,
+        stale_by_exchange_time=False,
+        is_price_stale=False,
+        freshness_status="fresh",
+        quote_status="live",
+        order_book_source="live_exchange_order_book",
+        order_book_ts=now,
+        order_book_stale=False,
+    )
+    stale_cached_row = fresh_row.model_copy(
+        update={
+            "last_price": Decimal("306.50"),
+            "last_price_at": now - timedelta(seconds=45),
+            "received_ts": now - timedelta(seconds=45),
+            "exchange_ts": now - timedelta(seconds=45),
+            "stale_by_received_time": True,
+            "stale_by_exchange_time": True,
+            "is_price_stale": True,
+            "freshness_status": "stale",
+            "freshness_reason": "received_ts_too_old",
+            "quote_status": "stale",
+            "order_book_ts": now - timedelta(seconds=45),
+            "order_book_stale": True,
+        }
+    )
+
+    merged = feed_module._merge_overviews(
+        MarketOverviewResponse(generated_at=now, instruments=[fresh_row]),
+        MarketOverviewResponse(
+            generated_at=now - timedelta(seconds=45),
+            instruments=[stale_cached_row],
+        ),
+    )
+
+    assert merged.instruments[0].last_price == Decimal("307.00")
+    assert merged.instruments[0].quote_status == "live"
 
 
 def test_market_overview_falls_back_when_dashboard_feed_gateway_unavailable(

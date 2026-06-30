@@ -309,12 +309,14 @@ Every quote/order-book/trade-tape row carries dual freshness metadata where the
 broker response receipt time is distinct from exchange data time:
 `received_ts`, `exchange_ts`, `received_age_ms`, `exchange_age_ms`,
 `stale_by_received_time`, `stale_by_exchange_time`, `freshness_status`, and
-`freshness_reason`. A broker response received now does not make old
-`exchange_ts` data live; stale exchange data remains display-only and is not
-calibration eligible.
+`freshness_reason`. For live order-book snapshots, `received_ts` is authoritative
+for operator-display freshness because `exchange_ts` may represent the last
+exchange-side book change. Last-price-only, candle, previous-close, OTC/indicative
+and trade-tape fallbacks remain exchange-time gated; stale exchange data remains
+display-only and is not calibration eligible.
 The selected order-book feed refreshes below the freshness budget by default
 (`DASHBOARD_SELECTED_BOOK_REFRESH_SECONDS=3`,
-`DASHBOARD_ORDER_BOOK_MAX_EXCHANGE_AGE_SECONDS=5`) and forces a refresh when the
+`DASHBOARD_ORDER_BOOK_MAX_EXCHANGE_AGE_SECONDS=30`) and forces a refresh when the
 cached selected ladder is about to become stale.
 
 ## `/market/overview`
@@ -378,12 +380,12 @@ with bounded timeouts. It must not call `PostOrder` or `CancelOrder`. If the rea
 gateway cannot be constructed, the endpoint returns the local `/market/overview`
 payload quickly so the frontend does not get stuck on 500/504.
 When `GetOrderBook` succeeds, BFF receipt time and exchange data time remain
-separate. A broker response received now does not make old exchange data live.
-`exchange_ts` / `exchange_age_ms` decide exchange freshness together with the
-configured dashboard thresholds.
+separate. For order books, a newly received broker snapshot is display-fresh even
+when `exchange_ts` is older because the book may simply not have changed; the
+exchange age is still returned as diagnostics.
 The selected-instrument order book must refresh faster than its freshness
-threshold; the default is a 3-second selected book refresh with a 5-second
-exchange-age limit.
+threshold; the default is a 3-second selected book refresh with a 30-second
+display freshness budget.
 The API keeps successful readonly quote refresh rows in a short in-process cache
 (`MARKET_QUOTE_REFRESH_CACHE_TTL_SECONDS`, default 45 seconds). During that TTL,
 `GET /market/overview`, `/dashboard/state`, and `/ws/market` overlay the cached

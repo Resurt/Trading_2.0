@@ -403,7 +403,7 @@ table; the table shows fresh market-trades stream rows or an explicit
 `trade_tape_status`/`trade_tape_reason`.
 Selected order-book refresh is intentionally faster than the freshness budget:
 `DASHBOARD_SELECTED_BOOK_REFRESH_SECONDS=3` with
-`DASHBOARD_ORDER_BOOK_MAX_EXCHANGE_AGE_SECONDS=5` by default.
+`DASHBOARD_ORDER_BOOK_MAX_EXCHANGE_AGE_SECONDS=30` by default.
 
 Explicit readonly broker quote refresh remains `POST /market/quotes/refresh`.
 Temporary request failures must not clear already displayed quotes; if the readonly
@@ -419,12 +419,14 @@ ribbon, data-only status every 2-5 seconds, and broker balance refresh every
 on timeout. Empty or partial `/ws/market` snapshots are merged into the existing board
 and never delete missing core-universe rows.
 
-Dashboard freshness uses both BFF receipt time and exchange data time:
-`received_ts`/`received_age_ms` are not enough to mark data live. Old
-`exchange_ts` data must show as stale/display-only, and stale candles must not be
-labeled live. Trade tape either contains fresh stream/recent trades or exposes an
-explicit `trade_tape_status`/`trade_tape_reason`; stale diagnostic trades are not
-rendered as table rows.
+Dashboard freshness uses both BFF receipt time and exchange data time. For live
+order-book snapshots, `received_ts` is the operator-display freshness signal:
+`exchange_ts` can remain unchanged when the book itself has not changed, so it is
+kept as diagnostics and must not by itself flip a recently received book to
+`stale`. Last-price-only, candle, previous-close, OTC/indicative and trade-tape
+fallbacks remain exchange-time gated: stale candles must not be labeled live, and
+old `GetLastTrades` diagnostics are rendered as `trade_tape_status`/
+`trade_tape_reason` instead of table rows.
 
 Runbook: `Docs/runbooks/data-only-shadow.md`.
 

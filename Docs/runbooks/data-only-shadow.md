@@ -338,8 +338,11 @@ dashboard can only report `no_market_trades_samples`/stale diagnostics and canno
 show a true live tape.
 Selected order-book refresh must remain below the freshness threshold. The current
 defaults are `DASHBOARD_SELECTED_BOOK_REFRESH_SECONDS=3` and
-`DASHBOARD_ORDER_BOOK_MAX_EXCHANGE_AGE_SECONDS=5`; if operators see an open-market
-selected ladder flip to stale while broker health is OK, check these settings first.
+`DASHBOARD_ORDER_BOOK_MAX_EXCHANGE_AGE_SECONDS=30`; if operators see an open-market
+selected ladder flip to stale while broker health is OK, check whether the
+dashboard is receiving fresh snapshots or serving an old cache. For order books,
+`received_ts` drives operator-display freshness; `exchange_ts` is diagnostic and
+can stay older when the book has not changed.
 
 Readonly broker quote refresh remains explicit for diagnostics:
 `POST /market/quotes/refresh` may call T-Invest `GetLastPrices`/`GetOrderBook` with
