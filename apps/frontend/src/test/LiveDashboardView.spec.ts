@@ -333,7 +333,7 @@ describe("LiveDashboardView", () => {
       venue_type: "broker_indicative",
       next_session_at: "2026-07-01T07:00:00+03:00",
       last_refresh_at: new Date().toISOString(),
-      warnings: [],
+      warnings: ["dashboard_trading_status_unavailable", "no_order_book_samples"],
     };
     market.dataShadowStatus = {
       ...market.dataShadowStatus,
@@ -349,6 +349,9 @@ describe("LiveDashboardView", () => {
     expect(sessionRibbon).toContain("Торги закрыты");
     expect(sessionRibbon).toContain("индикативная");
     expect(sessionRibbon).toContain("заблокирован");
+    expect(sessionRibbon).not.toContain("dashboard_trading_status_unavailable");
+    expect(sessionRibbon).not.toContain("стакан пока не пришёл");
+    expect(sessionRibbon).not.toContain("security trading status normal");
     expect(sessionRibbon).not.toContain("Вечерняя сессия");
     expect(sessionRibbon).not.toContain("рынок открыт");
     expect(wrapper.text()).toContain("День завершён");

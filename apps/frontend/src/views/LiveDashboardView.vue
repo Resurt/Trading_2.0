@@ -386,41 +386,12 @@ function displayDataOnlyAllowed(): boolean | null {
 
 function sessionDetail(): string {
   const marketOpen = displayMarketOpen();
-  const reason =
-    marketOpen === false
-      ? (market.dashboardFeedStatus.warnings[0] ??
-        (robot.lastSessionPreflight?.market_open === false ? robot.lastSessionPreflight.reason_code : null))
-      : null;
-  const parts: string[] = [];
   if (marketOpen === true) {
-    parts.push("рынок открыт");
+    return "рынок открыт";
   } else if (marketOpen === false) {
-    parts.push("рынок закрыт");
-  }
-  if (reason && !isDuplicateSessionReason(reason, marketOpen)) {
-    const label = reasonLabel(reason);
-    if (!parts.includes(label)) {
-      parts.push(label);
-    }
-  }
-  if (parts.length > 0) {
-    return parts.join(" · ");
+    return "";
   }
   return robot.session.trading_date ?? robot.session.calendar_date ?? "нет даты";
-}
-
-function isDuplicateSessionReason(reason: string, marketOpen: boolean | null | undefined): boolean {
-  if (marketOpen === true) {
-    return reason === "market_open" || reason === "data_only_collection_allowed";
-  }
-  if (marketOpen === false) {
-    return (
-      reason === "market_closed_expected" ||
-      reason === "official_exchange_closed" ||
-      reason === "weekend_session_closed"
-    );
-  }
-  return false;
 }
 
 function venueStatusValue(): string {
@@ -490,6 +461,9 @@ function phaseDetail(): string {
 }
 
 function brokerStatusValue(): string {
+  if (displayMarketOpen() === false) {
+    return "рынок закрыт";
+  }
   const raw = robot.status.broker_trading_status;
   if (raw === "normal_trading") {
     return "Брокер доступен";
@@ -588,12 +562,7 @@ function collectionAllowedLabel(): string {
 
 function collectionReason(): string {
   if (displayMarketOpen() === false) {
-    return reasonLabel(
-      market.dashboardFeedStatus.warnings[0] ??
-        market.dataShadowStatus.reason_code ??
-        robot.lastSessionPreflight?.reason_code ??
-        "market_closed_expected",
-    );
+    return "рынок закрыт";
   }
   const reason =
     robot.lastSessionPreflight?.reason_code ??
@@ -603,6 +572,9 @@ function collectionReason(): string {
 }
 
 function dashboardFeedValue(): string {
+  if (displayMarketOpen() === false) {
+    return "рынок закрыт";
+  }
   if (dashboardBlockingErrors().length) {
     return "ошибка";
   }
@@ -613,6 +585,11 @@ function dashboardFeedValue(): string {
 }
 
 function dashboardFeedDetail(): string {
+  if (displayMarketOpen() === false) {
+    return market.dashboardFeedStatus.last_refresh_at
+      ? `обновлено ${compactDateTime(market.dashboardFeedStatus.last_refresh_at)}`
+      : "рынок закрыт";
+  }
   const blockingErrors = dashboardBlockingErrors();
   if (blockingErrors.length) {
     return reasonLabel(blockingErrors[0]);

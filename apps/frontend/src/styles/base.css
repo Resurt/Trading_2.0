@@ -333,13 +333,19 @@ code {
   min-width: 0;
   color: var(--color-text-primary);
   font-size: 15px;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .session-ribbon small {
   color: var(--color-text-muted);
   font-size: 12px;
-  overflow-wrap: anywhere;
+  line-height: 1.35;
+  min-height: 16px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .operator-note {
