@@ -492,3 +492,12 @@ The frontend uses `/ws/market-feed` as the primary live market update path
 (`/ws/market` remains an alias) and REST polling as a fallback. Failed refreshes
 must not clear the last good quotes; stale/local candle fallbacks must show source
 and timestamp.
+## Calibration Risk Invariants
+
+Before any future strategy shadow, risk/execution fail closed on unresolved
+instrument metadata. Broker/SDK resolution and `instrument_registry` are the
+source of truth for `lot_size` and `min_price_increment`; env instruments are
+identifiers only. Notional is `price_per_share * lot_qty * lot_size`, limit
+prices are normalized to tick before broker boundary, EXIT reduces projected
+position, short permission unknown blocks short entry, and core risk freshness
+uses both received and exchange timestamps.

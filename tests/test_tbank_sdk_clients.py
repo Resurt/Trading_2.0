@@ -969,7 +969,8 @@ def test_sdk_unary_maps_portfolio_positions_and_accounts_payload_shapes() -> Non
     assert portfolio.data["total_amount_portfolio"] == "30000"
     assert portfolio.data["positions"][0]["instrument_id"] == "uid-sber"
     assert portfolio.data["positions"][0]["position_side"] == "long"
-    assert portfolio.data["positions"][0]["exposure"] == "3000"
+    assert portfolio.data["positions"][0]["exposure"] is None
+    assert portfolio.data["positions"][0]["exposure_source"] == "requires_lot_size_fallback"
     assert positions.data["positions"][0]["qty_lots"] == "10"
     assert positions.data["positions"][0]["short_available"] is True
     assert accounts.data["accounts"][0]["account_id"] == "account-1"

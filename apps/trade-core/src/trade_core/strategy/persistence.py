@@ -435,6 +435,10 @@ def _blocker_family(blocker_code: str) -> str:
         "risk_budget_exceeded",
         "max_drawdown_reached",
         "position_limit_reached",
+        "exit_without_position",
+        "exit_quantity_exceeds_position",
+        "instrument_lot_size_unknown",
+        "price_tick_invalid",
         "insufficient_margin",
         "max_short_exposure_reached",
         "max_long_exposure_reached",
@@ -444,6 +448,7 @@ def _blocker_family(blocker_code: str) -> str:
     if blocker_code in {
         "short_not_allowed_by_config",
         "short_not_allowed_by_broker",
+        "short_permission_unknown",
     }:
         return "short_selling_policy"
     if blocker_code in {"open_order_conflict"}:

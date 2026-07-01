@@ -1350,3 +1350,35 @@ analytics facts: `supervisor_enabled`, `supervisor_state`,
 `stream_restart_count`, `last_restart_at`, `last_restart_reason`,
 `stream_stale_count`, `last_stream_error`, and `per_stream_status`. These fields
 are status/read-model diagnostics and do not create trading entities.
+## Forward Return Horizon Alignment
+
+Forward-return and daily trend research must expose horizon alignment explicitly.
+For every retrospective candidate window the report payload includes:
+
+- `requested_horizon_minutes`;
+- `entry_ts`;
+- `target_exit_ts`;
+- `actual_exit_ts`;
+- `actual_horizon_minutes`;
+- `exit_alignment_seconds`;
+- `horizon_valid`.
+
+Reports must not use the next closed bucket beyond the requested horizon. If the
+target exit sample is absent outside the documented tolerance, the candidate is
+excluded with `horizon_mismatch`; it must not appear in top/worst windows. This
+rule applies to 1m/5m/10m/15m pseudo-bars and to mirrored long/short cases.
+
+Execution/risk payloads must preserve money semantics:
+
+- `price_per_share`;
+- `lot_qty`;
+- `lot_size`;
+- `estimated_notional_rub`;
+- `original_intended_price`;
+- `normalized_price`;
+- `min_price_increment`;
+- `reject_reason_code=price_tick_invalid` when the tick is unknown or invalid.
+
+Unknown lot size or tick size is a blocker, not a silent default. Historical
+diagnostics may label unknown metadata, but real/shadow risk and execution paths
+must fail closed.

@@ -1214,7 +1214,8 @@ def _portfolio_position_payload(item: Any) -> JsonPayload:
         "market_price": str(current_price),
         "unrealized_pnl": str(_decimal_from_quotation(_attr(item, "expected_yield"))),
         "realised_pnl": None,
-        "exposure": str(abs(quantity_lots) * current_price),
+        "exposure": None,
+        "exposure_source": "requires_lot_size_fallback",
         "blocked_lots": str(_decimal_from_quotation(_attr(item, "blocked_lots"))),
         "short_available": _bool_attr(item, "short_enabled_flag", default=True),
     }

@@ -17,6 +17,11 @@ TEN_THOUSAND = Decimal("10000")
 class FeedFreshness:
     age_ms: int
     is_stale: bool
+    received_age_ms: int | None = None
+    exchange_age_ms: int | None = None
+    stale_by_received_time: bool = False
+    stale_by_exchange_time: bool = False
+    freshness_reason: str = "fresh"
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,7 +59,12 @@ class MarketState:
             ),
             "feed_freshness": {
                 "age_ms": self.feed_freshness.age_ms,
+                "received_age_ms": self.feed_freshness.received_age_ms,
+                "exchange_age_ms": self.feed_freshness.exchange_age_ms,
+                "stale_by_received_time": self.feed_freshness.stale_by_received_time,
+                "stale_by_exchange_time": self.feed_freshness.stale_by_exchange_time,
                 "is_stale": self.feed_freshness.is_stale,
+                "freshness_reason": self.feed_freshness.freshness_reason,
             },
         }
 
@@ -63,12 +73,41 @@ class FeedFreshnessCalculator:
     def __init__(self, *, stale_after_ms: int = 5000) -> None:
         self._stale_after_ms = stale_after_ms
 
-    def calculate(self, *, last_event_at: datetime, now: datetime) -> FeedFreshness:
-        age_ms = max(
-            0,
-            int((ensure_utc(now) - ensure_utc(last_event_at)).total_seconds() * 1000),
+    def calculate(
+        self,
+        *,
+        last_event_at: datetime,
+        now: datetime,
+        exchange_event_at: datetime | None = None,
+    ) -> FeedFreshness:
+        received_age_ms = _age_ms(now=now, event_at=last_event_at)
+        exchange_age_ms = (
+            _age_ms(now=now, event_at=exchange_event_at)
+            if exchange_event_at is not None
+            else None
         )
-        return FeedFreshness(age_ms=age_ms, is_stale=age_ms > self._stale_after_ms)
+        stale_by_received_time = received_age_ms > self._stale_after_ms
+        stale_by_exchange_time = (
+            exchange_age_ms is None or exchange_age_ms > self._stale_after_ms
+        )
+        reason = _freshness_reason(
+            stale_by_received_time=stale_by_received_time,
+            stale_by_exchange_time=stale_by_exchange_time,
+            exchange_age_ms=exchange_age_ms,
+        )
+        age_ms = max(
+            received_age_ms,
+            exchange_age_ms if exchange_age_ms is not None else received_age_ms,
+        )
+        return FeedFreshness(
+            age_ms=age_ms,
+            received_age_ms=received_age_ms,
+            exchange_age_ms=exchange_age_ms,
+            stale_by_received_time=stale_by_received_time,
+            stale_by_exchange_time=stale_by_exchange_time,
+            is_stale=stale_by_received_time or stale_by_exchange_time,
+            freshness_reason=reason,
+        )
 
 
 class MarketStateCalculator:
@@ -97,7 +136,11 @@ class MarketStateCalculator:
 
         depth_total = bid_depth + ask_depth
         imbalance = None if depth_total == ZERO else (bid_depth - ask_depth) / depth_total
-        freshness = self._freshness.calculate(last_event_at=order_book.received_ts, now=now)
+        freshness = self._freshness.calculate(
+            last_event_at=order_book.received_ts,
+            exchange_event_at=order_book.exchange_ts,
+            now=now,
+        )
         quality = _quality_score(spread_bps=spread_bps, imbalance=imbalance, freshness=freshness)
 
         return MarketState(
@@ -131,3 +174,25 @@ def _quality_score(
     freshness_penalty = Decimal("0.25") if freshness.is_stale else ZERO
     score = ONE - spread_penalty - imbalance_penalty - freshness_penalty
     return max(ZERO, min(ONE, score)).quantize(Decimal("0.0001"))
+
+
+def _age_ms(*, now: datetime, event_at: datetime) -> int:
+    return max(
+        0,
+        int((ensure_utc(now) - ensure_utc(event_at)).total_seconds() * 1000),
+    )
+
+
+def _freshness_reason(
+    *,
+    stale_by_received_time: bool,
+    stale_by_exchange_time: bool,
+    exchange_age_ms: int | None,
+) -> str:
+    if exchange_age_ms is None:
+        return "missing_exchange_ts"
+    if stale_by_received_time:
+        return "received_ts_too_old"
+    if stale_by_exchange_time:
+        return "exchange_ts_too_old"
+    return "fresh"

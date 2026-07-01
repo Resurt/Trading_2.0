@@ -363,3 +363,75 @@ If an enabled instrument remains `source=seed` / `resolution_status=unresolved`
 in sandbox/shadow/production, startup/readiness must fail before strategy/risk can
 approve an entry. This avoids treating `MOEX:*` as a broker id and prevents
 misleading `NOT_FOUND` broker errors during calibration.
+## Calibration Risk Hardening Invariants
+
+These invariants are mandatory before any future strategy shadow or production
+path:
+
+- Market data price and `SignalCandidateDecision.intended_price` are price per
+  one share/security, not price per lot.
+- `lot_qty` is quantity in lots.
+- `lot_size` is quantity of shares/securities in one lot.
+- `estimated_notional_rub = price_per_share * lot_qty * lot_size`.
+- Broker/SDK resolution and `instrument_registry` are the source of truth for
+  `lot_size` and `min_price_increment`. Env/default instruments are legacy/dev
+  identifiers only and must not silently supply lot/tick for real/shadow risk or
+  execution.
+- If `lot_size` is unknown for an entry, risk blocks with
+  `instrument_lot_size_unknown`.
+- If `min_price_increment` is unknown for a limit entry, risk blocks with
+  `price_tick_invalid`.
+- Position/exposure fallback may use `market_price * qty_lots * lot_size` only
+  when broker exposure is absent and lot size is known. Broker-provided exposure
+  remains authoritative when present.
+
+Execution normalizes limit prices to the instrument tick before broker boundary:
+
+- BUY limit: floor to tick, so the robot does not overpay.
+- SELL limit: ceil to tick, so the robot does not undersell.
+- MARKET orders are unaffected by price normalization.
+- The original intended price and normalized price are written to the intent /
+  broker request payload.
+- If tick size is missing, execution marks the intent rejected with
+  `reject_reason_code=price_tick_invalid` and does not call `PostOrder`.
+
+Position limit semantics distinguish entry and exit:
+
+- ENTRY increases projected exposure/position and is checked against configured
+  long/short/max-position limits.
+- EXIT reduces an existing position and must not be blocked by
+  `position_limit_reached` when projected position decreases.
+- EXIT at zero position blocks with `exit_without_position`.
+- EXIT quantity greater than current position blocks with
+  `exit_quantity_exceeds_position` unless a prior candidate-creation layer has
+  explicitly capped quantity.
+
+Core market freshness is dual:
+
+- `received_age_ms` measures how old the local/API received sample is.
+- `exchange_age_ms` measures how old the exchange-side data is.
+- Entry risk treats stale received time, stale exchange time, and missing
+  exchange timestamp as `stale_market_data`.
+- `freshness_reason` must identify `fresh`, `received_ts_too_old`,
+  `exchange_ts_too_old`, or `missing_exchange_ts`.
+
+Short permission is fail-closed:
+
+- Missing account short permission is `unknown`, not `true`.
+- Missing instrument short availability is `unknown`, not `true`.
+- Short entry blocks with `short_permission_unknown` when either required
+  permission is unknown.
+- `short_allowed_by_account=false` or `short_allowed_by_instrument=false` blocks
+  with `short_not_allowed_by_broker`.
+- Short exits / forced covers that reduce an existing short are not blocked by
+  unknown short-entry permission.
+
+Session/calendar authority:
+
+- Local weekday calendar defaults are advisory and cannot independently allow
+  real/shadow entry.
+- Broker schedule/status and official exchange overrides are authoritative when
+  available.
+- Data-only logging may use market-data probe fallback for collection visibility,
+  but that fallback keeps trading permission false.
+- Full MOEX holiday-calendar synchronization remains a documented follow-up.

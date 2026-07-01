@@ -128,6 +128,8 @@ class InstrumentResolverService:
                         figi=existing.figi,
                         ticker=existing.ticker,
                         class_code=existing.class_code,
+                        lot_size=existing.lot_size,
+                        min_price_increment=existing.min_price_increment,
                     )
                 )
                 continue
@@ -161,6 +163,8 @@ class InstrumentResolverService:
                     figi=registry.figi,
                     ticker=registry.ticker,
                     class_code=registry.class_code,
+                    lot_size=registry.lot_size,
+                    min_price_increment=registry.min_price_increment,
                 )
             )
         self.session.flush()
@@ -185,6 +189,8 @@ class InstrumentResolverService:
                     figi=row.figi,
                     ticker=row.ticker,
                     class_code=row.class_code,
+                    lot_size=row.lot_size,
+                    min_price_increment=row.min_price_increment,
                 )
             )
         return tuple(resolved)
@@ -209,11 +215,10 @@ class InstrumentResolverService:
             existing_by_ticker.figi = _optional_str(payload, "figi")
             existing_by_ticker.instrument_uid = instrument_uid
             existing_by_ticker.name = _optional_str(payload, "name") or ticker
-            existing_by_ticker.lot_size = _int_payload(payload, "lot_size", default=1)
-            existing_by_ticker.min_price_increment = _decimal_payload(
+            existing_by_ticker.lot_size = _required_int_payload(payload, "lot_size")
+            existing_by_ticker.min_price_increment = _required_decimal_payload(
                 payload,
                 "min_price_increment",
-                default=Decimal("0.01"),
             )
             existing_by_ticker.currency = _optional_str(payload, "currency") or "RUB"
             existing_by_ticker.is_enabled = True
@@ -236,11 +241,10 @@ class InstrumentResolverService:
                 figi=_optional_str(payload, "figi"),
                 instrument_uid=instrument_uid,
                 name=_optional_str(payload, "name") or ticker,
-                lot_size=_int_payload(payload, "lot_size", default=1),
-                min_price_increment=_decimal_payload(
+                lot_size=_required_int_payload(payload, "lot_size"),
+                min_price_increment=_required_decimal_payload(
                     payload,
                     "min_price_increment",
-                    default=Decimal("0.01"),
                 ),
                 currency=_optional_str(payload, "currency") or "RUB",
                 is_enabled=True,
@@ -263,6 +267,8 @@ class InstrumentResolverService:
             figi=registry.figi,
             ticker=registry.ticker,
             class_code=registry.class_code,
+            lot_size=registry.lot_size,
+            min_price_increment=registry.min_price_increment,
         )
 
     def _mark_failed_tickers(
@@ -317,15 +323,16 @@ def is_broker_resolved_instrument(value: InstrumentRef | InstrumentRegistry) -> 
     source = str(getattr(value, "source", "") or "")
     resolution_status = str(getattr(value, "resolution_status", "") or "")
     has_broker_identity = bool(instrument_uid or figi)
+    has_required_metadata = _has_required_market_metadata(value)
     if _looks_internal_moex_id(instrument_uid) or _looks_internal_moex_id(figi):
         return False
     if _has_placeholder_value(instrument_id) or _has_placeholder_value(instrument_uid):
         return False
     if isinstance(value, InstrumentRegistry):
-        return has_broker_identity and (
+        return has_broker_identity and has_required_metadata and (
             source == "tbank_resolved" or resolution_status == "resolved"
         )
-    return has_broker_identity and not _has_placeholder_uid(value)
+    return has_broker_identity and has_required_metadata and not _has_placeholder_uid(value)
 
 
 def assert_resolved_for_broker_call(
@@ -407,23 +414,39 @@ def _optional_str(payload: Mapping[str, object], key: str) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _int_payload(payload: Mapping[str, object], key: str, *, default: int) -> int:
-    value = payload.get(key)
-    if value is None:
-        return default
-    return int(str(value))
+def _has_required_market_metadata(value: InstrumentRef | InstrumentRegistry) -> bool:
+    lot_size = getattr(value, "lot_size", None)
+    tick = getattr(value, "min_price_increment", None)
+    try:
+        lot_size_value = int(lot_size) if lot_size is not None else 0
+        tick_value = Decimal(str(tick)) if tick is not None else Decimal("0")
+    except (ValueError, ArithmeticError):
+        return False
+    return lot_size_value > 0 and tick_value > Decimal("0")
 
 
-def _decimal_payload(
-    payload: Mapping[str, object],
-    key: str,
-    *,
-    default: Decimal,
-) -> Decimal:
+def _required_int_payload(payload: Mapping[str, object], key: str) -> int:
     value = payload.get(key)
     if value is None:
-        return default
-    return Decimal(str(value))
+        msg = f"resolved instrument payload is missing {key}"
+        raise RuntimeError(msg)
+    parsed = int(str(value))
+    if parsed <= 0:
+        msg = f"resolved instrument payload has invalid {key}"
+        raise RuntimeError(msg)
+    return parsed
+
+
+def _required_decimal_payload(payload: Mapping[str, object], key: str) -> Decimal:
+    value = payload.get(key)
+    if value is None:
+        msg = f"resolved instrument payload is missing {key}"
+        raise RuntimeError(msg)
+    parsed = Decimal(str(value))
+    if parsed <= Decimal("0"):
+        msg = f"resolved instrument payload has invalid {key}"
+        raise RuntimeError(msg)
+    return parsed
 
 
 def _bool_payload(payload: Mapping[str, object], key: str) -> bool:

@@ -13,13 +13,14 @@ from scripts.run_candle_feature_research import (
     compute_feature_rows,
     evaluate_configs,
     normalize_instruments,
+    outcome_for_horizon,
     split_trading_dates,
     total_cost_bps,
 )
 
 
 def test_feature_computation_does_not_use_future_close_in_returns() -> None:
-    candles = _candles([100.0] * 13 + [110.0, 111.0])
+    candles = _candles([100.0] * 13 + [110.0, 111.0, 112.0, 113.0])
 
     features = compute_feature_rows(candles, selected_timeframes={"5m"})
 
@@ -27,6 +28,36 @@ def test_feature_computation_does_not_use_future_close_in_returns() -> None:
     assert first.return_1_bar_bps == 0
     assert first.outcomes.future_return_5m_bps is not None
     assert first.outcomes.future_return_5m_bps > 900
+
+
+def test_horizon_outcome_requires_exact_target_timestamp() -> None:
+    candle = _candle_at(datetime(2026, 1, 1, 7, 50, tzinfo=UTC), close_price=100.0)
+    target = _candle_at(datetime(2026, 1, 1, 8, 5, tzinfo=UTC), close_price=101.0)
+
+    outcome = outcome_for_horizon(candle, [target], [target.close_ts_utc], 15)
+
+    assert outcome.horizon_valid is True
+    assert outcome.requested_horizon_minutes == 15
+    assert outcome.actual_horizon_minutes == 15
+    assert outcome.exit_alignment_seconds == 0
+    assert outcome.future_return_bps == 100.0
+
+
+def test_horizon_outcome_does_not_use_next_bucket_beyond_requested_horizon() -> None:
+    candle = _candle_at(datetime(2026, 1, 1, 7, 50, tzinfo=UTC), close_price=100.0)
+    twenty_minute_exit = _candle_at(datetime(2026, 1, 1, 8, 10, tzinfo=UTC), close_price=102.0)
+
+    outcome = outcome_for_horizon(
+        candle,
+        [twenty_minute_exit],
+        [twenty_minute_exit.close_ts_utc],
+        15,
+    )
+
+    assert outcome.horizon_valid is False
+    assert outcome.future_return_bps is None
+    assert outcome.actual_exit_ts_utc is None
+    assert outcome.exit_alignment == "missing_exact_target"
 
 
 def test_train_validation_split_uses_trading_date_order() -> None:
@@ -269,3 +300,20 @@ def _candles(prices: list[float], *, special_index: int | None = None) -> list[C
             )
         )
     return candles
+
+
+def _candle_at(close_ts: datetime, *, close_price: float) -> CandlePoint:
+    open_ts = close_ts - timedelta(minutes=5)
+    return CandlePoint(
+        instrument_id="MOEX:SBER",
+        timeframe="5m",
+        trading_date=close_ts.date(),
+        session_type="weekday_main",
+        open_ts_utc=open_ts,
+        close_ts_utc=close_ts,
+        open_price=close_price,
+        high_price=close_price,
+        low_price=close_price,
+        close_price=close_price,
+        volume_lots=1000,
+    )

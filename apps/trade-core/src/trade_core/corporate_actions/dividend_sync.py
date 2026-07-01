@@ -511,6 +511,8 @@ class DividendSyncService:
                 figi=row.figi,
                 ticker=row.ticker,
                 class_code=row.class_code,
+                lot_size=row.lot_size,
+                min_price_increment=row.min_price_increment,
             )
             if not config.dry_run and config.require_resolved_instruments:
                 try:

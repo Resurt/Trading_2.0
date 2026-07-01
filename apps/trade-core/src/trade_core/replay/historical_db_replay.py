@@ -574,6 +574,8 @@ class HistoricalDbReplayService:
             figi=row.figi,
             ticker=row.ticker,
             class_code=row.class_code,
+            lot_size=row.lot_size,
+            min_price_increment=row.min_price_increment,
         )
 
     def _load_strategy_config(

@@ -719,3 +719,17 @@ order-book levels.
 
 Spread units are fixed: `spread_abs`/`spread_abs_rub` are RUB, and
 `spread_bps = (best_ask - best_bid) / mid_price * 10000`.
+## Instrument Metadata Contract
+
+Broker/SDK resolution and `instrument_registry` are authoritative for
+`instrument_uid`, `figi`, `lot_size`, and `min_price_increment`. API/runtime env
+instrument lists are identifiers only. They must not silently provide trading
+lot/tick defaults for the core universe.
+
+All core universe instruments (`SBER`, `GAZP`, `LKOH`, `YDEX`, `TATN`, `GMKN`,
+`OZON`, `VTBR`) must be resolved before any real/shadow risk or execution path
+can treat lot/tick metadata as known.
+
+Unknown `lot_size` blocks entry risk with `instrument_lot_size_unknown`.
+Unknown or invalid `min_price_increment` blocks limit entry risk and rejects
+execution before any broker call with `price_tick_invalid`.

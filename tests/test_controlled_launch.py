@@ -106,6 +106,8 @@ def candidate() -> SignalCandidateDecision:
             instrument_uid="uid-sber",
             class_code="TQBR",
             ticker="SBER",
+            lot_size=10,
+            min_price_increment=Decimal("0.01"),
         ),
         timeframe=Timeframe.M5,
         action=SignalAction.ENTRY,
@@ -117,7 +119,9 @@ def candidate() -> SignalCandidateDecision:
         expected_edge_bps=Decimal("25"),
         expected_holding_minutes=5,
         signal_fingerprint="controlled-launch-candidate",
-        condition_payload={"test": True},
+        condition_payload={"test": True, "lot_size": 10, "min_price_increment": "0.01"},
+        lot_size=10,
+        min_price_increment=Decimal("0.01"),
         candidate_id=uuid4(),
     )
 
@@ -355,6 +359,137 @@ def test_instrument_resolver_uses_cached_registry_when_broker_resolver_times_out
     assert fake_gateway.requests[0].tickers == ("SBER", "GAZP")
     assert [instrument.instrument_uid for instrument in resolved] == ["uid-sber", "uid-gazp"]
     assert [instrument.instrument_id for instrument in resolved] == ["MOEX:SBER", "MOEX:GAZP"]
+    engine.dispose()
+
+
+def test_instrument_resolver_returns_lot_and_tick_for_core_universe_from_sdk() -> None:
+    class CoreUniverseResolveGateway:
+        def __init__(self) -> None:
+            self.requests: list[InstrumentResolveRequest] = []
+
+        async def resolve_instruments(
+            self,
+            request: InstrumentResolveRequest,
+            metadata: object | None = None,
+        ) -> BrokerUnaryResponse:
+            del metadata
+            self.requests.append(request)
+            lot_by_ticker = {
+                "SBER": (10, "0.01"),
+                "GAZP": (10, "0.01"),
+                "LKOH": (1, "0.5"),
+                "YDEX": (1, "0.2"),
+                "TATN": (1, "0.1"),
+                "GMKN": (1, "0.1"),
+                "OZON": (1, "0.5"),
+                "VTBR": (10000, "0.00001"),
+            }
+            return BrokerUnaryResponse(
+                method_name="ResolveInstruments",
+                data={
+                    "instruments": [
+                        {
+                            "instrument_id": f"uid-{ticker.lower()}",
+                            "instrument_uid": f"uid-{ticker.lower()}",
+                            "ticker": ticker,
+                            "class_code": request.class_code,
+                            "figi": f"figi-{ticker.lower()}",
+                            "name": ticker,
+                            "lot_size": lot_by_ticker[ticker][0],
+                            "min_price_increment": lot_by_ticker[ticker][1],
+                            "currency": "RUB",
+                            "short_available": True,
+                        }
+                        for ticker in request.tickers
+                    ]
+                },
+            )
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    fake_gateway = CoreUniverseResolveGateway()
+    tickers = ("SBER", "GAZP", "LKOH", "YDEX", "TATN", "GMKN", "OZON", "VTBR")
+
+    with Session(engine) as session:
+        service = InstrumentResolverService(
+            broker_gateway=cast(BrokerGateway, fake_gateway),
+            session=session,
+            launch_policy=LaunchModePolicy.from_mode(RuntimeMode.SHADOW),
+        )
+        resolved = asyncio.run(
+            service.resolve_startup_instruments(
+                tuple(
+                    InstrumentRef(instrument_id=f"MOEX:{ticker}", ticker=ticker, class_code="TQBR")
+                    for ticker in tickers
+                )
+            )
+        )
+
+        rows = {
+            row.ticker: row
+            for row in session.execute(select(InstrumentRegistry)).scalars()
+        }
+
+    assert fake_gateway.requests[0].tickers == tickers
+    assert len(resolved) == 8
+    assert {item.ticker for item in resolved} == set(tickers)
+    assert all(item.lot_size is not None and item.lot_size > 0 for item in resolved)
+    assert all(item.min_price_increment is not None for item in resolved)
+    assert rows["VTBR"].lot_size == 10000
+    assert rows["VTBR"].min_price_increment == Decimal("0.00001")
+    assert rows["LKOH"].lot_size == 1
+    assert rows["LKOH"].min_price_increment == Decimal("0.5")
+    engine.dispose()
+
+
+def test_instrument_resolver_refuses_sdk_payload_without_lot_or_tick() -> None:
+    class MissingMetadataResolveGateway:
+        async def resolve_instruments(
+            self,
+            request: InstrumentResolveRequest,
+            metadata: object | None = None,
+        ) -> BrokerUnaryResponse:
+            del metadata
+            return BrokerUnaryResponse(
+                method_name="ResolveInstruments",
+                data={
+                    "instruments": [
+                        {
+                            "instrument_id": "uid-ozon",
+                            "instrument_uid": "uid-ozon",
+                            "ticker": "OZON",
+                            "class_code": request.class_code,
+                            "figi": "figi-ozon",
+                            "name": "OZON",
+                            "currency": "RUB",
+                            "short_available": True,
+                        }
+                    ]
+                },
+            )
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        service = InstrumentResolverService(
+            broker_gateway=cast(BrokerGateway, MissingMetadataResolveGateway()),
+            session=session,
+            launch_policy=LaunchModePolicy.from_mode(RuntimeMode.SHADOW),
+        )
+
+        with pytest.raises(RuntimeError, match="missing lot_size"):
+            asyncio.run(
+                service.resolve_startup_instruments(
+                    (
+                        InstrumentRef(
+                            instrument_id="MOEX:OZON",
+                            ticker="OZON",
+                            class_code="TQBR",
+                        ),
+                    )
+                )
+            )
+
     engine.dispose()
 
 

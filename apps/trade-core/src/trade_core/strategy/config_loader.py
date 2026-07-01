@@ -190,12 +190,12 @@ class StrategyConfigLoader:
                 "max_position_lots",
                 default=base.max_position_lots,
             ),
-            short_allowed_by_account=_bool_value(
+            short_allowed_by_account=_optional_bool_value(
                 payload,
                 "short_allowed_by_account",
                 default=base.short_allowed_by_account,
             ),
-            short_allowed_by_instrument=_bool_value(
+            short_allowed_by_instrument=_optional_bool_value(
                 payload,
                 "short_allowed_by_instrument",
                 default=base.short_allowed_by_instrument,
@@ -333,6 +333,27 @@ def _bool_value(
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _optional_bool_value(
+    payload: Mapping[str, Any],
+    key: str,
+    secondary: Mapping[str, Any] | None = None,
+    default: bool | None = None,
+) -> bool | None:
+    value = payload.get(key)
+    if value is None and secondary is not None:
+        value = secondary.get(key)
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
 
 
 def _int_value(

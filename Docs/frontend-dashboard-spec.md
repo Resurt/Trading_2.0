@@ -357,3 +357,13 @@ The acceptance must verify:
 - dashboard feed DB deltas are zero;
 - `PostOrder=0`;
 - `CancelOrder=0`.
+## Risk Freshness Boundary
+
+Dashboard display freshness and core risk freshness are related but separate.
+For operator visibility, the dashboard may keep displaying a recently received
+selected ladder while it is inside the display freshness budget. That display
+state is not trading permission and is not calibration evidence by itself.
+
+For any future strategy shadow or execution path, stale `received_ts`, stale
+`exchange_ts`, or missing `exchange_ts` blocks entries with
+`stale_market_data`.

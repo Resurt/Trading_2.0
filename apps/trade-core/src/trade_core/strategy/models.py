@@ -65,8 +65,13 @@ class BlockerCode(StrEnum):
     MAX_DRAWDOWN_REACHED = "max_drawdown_reached"
     OPEN_ORDER_CONFLICT = "open_order_conflict"
     POSITION_LIMIT_REACHED = "position_limit_reached"
+    EXIT_WITHOUT_POSITION = "exit_without_position"
+    EXIT_QUANTITY_EXCEEDS_POSITION = "exit_quantity_exceeds_position"
+    INSTRUMENT_LOT_SIZE_UNKNOWN = "instrument_lot_size_unknown"
+    PRICE_TICK_INVALID = "price_tick_invalid"
     SHORT_NOT_ALLOWED_BY_CONFIG = "short_not_allowed_by_config"
     SHORT_NOT_ALLOWED_BY_BROKER = "short_not_allowed_by_broker"
+    SHORT_PERMISSION_UNKNOWN = "short_permission_unknown"
     INSUFFICIENT_MARGIN = "insufficient_margin"
     MAX_SHORT_EXPOSURE_REACHED = "max_short_exposure_reached"
     MAX_LONG_EXPOSURE_REACHED = "max_long_exposure_reached"
@@ -237,6 +242,8 @@ class SignalCandidateDecision:
     expected_holding_minutes: int
     signal_fingerprint: str
     condition_payload: JsonPayload
+    lot_size: int | None = None
+    min_price_increment: Decimal | None = None
     candidate_id: UUID | None = None
 
 
@@ -270,8 +277,8 @@ class RiskLimits:
     max_daily_loss_rub: Decimal = Decimal("10000")
     current_daily_pnl_rub: Decimal = Decimal("0")
     max_position_lots: int = 10
-    short_allowed_by_account: bool = True
-    short_allowed_by_instrument: bool = True
+    short_allowed_by_account: bool | None = None
+    short_allowed_by_instrument: bool | None = None
     margin_or_collateral_available: bool = True
     forced_cover_policy: bool = False
     freeze_new_entries: bool = False

@@ -171,8 +171,16 @@ class ConfigDrivenStrategyEngine:
                 "min_edge_after_total_costs_bps": str(self._config.min_edge_after_total_costs_bps),
                 "allow_long": self._config.allow_long,
                 "allow_short": self._config.allow_short,
+                "lot_size": context.instrument.lot_size,
+                "min_price_increment": (
+                    str(context.instrument.min_price_increment)
+                    if context.instrument.min_price_increment is not None
+                    else None
+                ),
                 "uses_closed_bar": bar.is_closed,
             },
+            lot_size=context.instrument.lot_size,
+            min_price_increment=context.instrument.min_price_increment,
         )
 
 

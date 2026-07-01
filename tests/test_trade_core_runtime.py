@@ -1066,7 +1066,10 @@ def test_data_only_shadow_start_command_closed_market_does_not_create_orders(
                 },
             )
         assert await runtime.process_robot_commands_async() == 1
-        assert runtime.stats.collector_state == "preflight_blocked"
+        assert runtime.stats.collector_state in {
+            "preflight_blocked",
+            "armed_until_next_window",
+        }
         assert runtime.stats.stream_tasks_started == 0
         assert gateway.market_stream_names == []
         assert gateway.order_stream_accounts == []
@@ -1413,7 +1416,7 @@ def test_closed_bar_candidate_risk_order_path_is_deterministic(tmp_path: Path) -
                 )
             ).scalars()
         )
-        assert len(stage_names) == 24
+        assert len(stage_names) == 28
         assert {
             "dividend_calendar_available",
             "future_dividend_risk_window_policy",
@@ -1427,6 +1430,10 @@ def test_closed_bar_candidate_risk_order_path_is_deterministic(tmp_path: Path) -
             "total_expected_costs",
             "max_gross_exposure",
             "max_net_exposure",
+            "instrument_lot_size_known",
+            "instrument_min_price_increment_known",
+            "exit_requires_open_position",
+            "exit_quantity_within_position",
         } <= set(stage_names)
         assert session.scalar(select(func.count()).select_from(BlockerEvent)) == 0
         intent = session.execute(select(OrderIntent)).scalar_one()

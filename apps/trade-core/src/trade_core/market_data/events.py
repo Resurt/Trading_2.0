@@ -139,7 +139,7 @@ class OrderBookSnapshot:
     bids: tuple[PriceLevel, ...]
     asks: tuple[PriceLevel, ...]
     depth: int
-    exchange_ts: datetime
+    exchange_ts: datetime | None
     received_ts: datetime
     payload: JsonPayload = field(default_factory=dict)
 

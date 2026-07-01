@@ -60,6 +60,20 @@ class CandlePoint:
 
 
 @dataclass(frozen=True, slots=True)
+class HorizonOutcome:
+    requested_horizon_minutes: int
+    target_exit_ts_utc: datetime
+    actual_exit_ts_utc: datetime | None
+    actual_horizon_minutes: float | None
+    exit_alignment_seconds: float | None
+    horizon_valid: bool
+    future_return_bps: float | None
+    mfe_bps: float | None
+    mae_bps: float | None
+    exit_alignment: str
+
+
+@dataclass(frozen=True, slots=True)
 class OutcomeSet:
     future_return_5m_bps: float | None
     future_return_10m_bps: float | None
@@ -70,8 +84,14 @@ class OutcomeSet:
     mae_5m_bps: float | None
     mae_10m_bps: float | None
     mae_15m_bps: float | None
+    horizon_5m: HorizonOutcome | None = None
+    horizon_10m: HorizonOutcome | None = None
+    horizon_15m: HorizonOutcome | None = None
 
     def gross_for_horizon(self, horizon_minutes: int) -> float | None:
+        detail = self.detail_for_horizon(horizon_minutes)
+        if detail is not None and not detail.horizon_valid:
+            return None
         return {
             5: self.future_return_5m_bps,
             10: self.future_return_10m_bps,
@@ -83,6 +103,13 @@ class OutcomeSet:
         if gross is None:
             return None
         return -gross if side == "short" else gross
+
+    def detail_for_horizon(self, horizon_minutes: int) -> HorizonOutcome | None:
+        return {
+            5: self.horizon_5m,
+            10: self.horizon_10m,
+            15: self.horizon_15m,
+        }[horizon_minutes]
 
 
 @dataclass(frozen=True, slots=True)
@@ -530,15 +557,18 @@ def compute_outcomes(
     horizon_10m = outcome_for_horizon(candle, future_candles_5m, future_timestamps_5m, 10)
     horizon_15m = outcome_for_horizon(candle, future_candles_5m, future_timestamps_5m, 15)
     return OutcomeSet(
-        future_return_5m_bps=horizon_5m[0],
-        future_return_10m_bps=horizon_10m[0],
-        future_return_15m_bps=horizon_15m[0],
-        mfe_5m_bps=horizon_5m[1],
-        mfe_10m_bps=horizon_10m[1],
-        mfe_15m_bps=horizon_15m[1],
-        mae_5m_bps=horizon_5m[2],
-        mae_10m_bps=horizon_10m[2],
-        mae_15m_bps=horizon_15m[2],
+        future_return_5m_bps=horizon_5m.future_return_bps,
+        future_return_10m_bps=horizon_10m.future_return_bps,
+        future_return_15m_bps=horizon_15m.future_return_bps,
+        mfe_5m_bps=horizon_5m.mfe_bps,
+        mfe_10m_bps=horizon_10m.mfe_bps,
+        mfe_15m_bps=horizon_15m.mfe_bps,
+        mae_5m_bps=horizon_5m.mae_bps,
+        mae_10m_bps=horizon_10m.mae_bps,
+        mae_15m_bps=horizon_15m.mae_bps,
+        horizon_5m=horizon_5m,
+        horizon_10m=horizon_10m,
+        horizon_15m=horizon_15m,
     )
 
 
@@ -547,18 +577,57 @@ def outcome_for_horizon(
     future_candles_5m: Sequence[CandlePoint],
     future_timestamps_5m: Sequence[datetime],
     horizon_minutes: int,
-) -> tuple[float | None, float | None, float | None]:
+) -> HorizonOutcome:
+    target_exit_ts = candle.close_ts_utc + timedelta(minutes=horizon_minutes)
     start = bisect.bisect_right(future_timestamps_5m, candle.close_ts_utc)
-    end_ts = candle.close_ts_utc + timedelta(minutes=horizon_minutes)
-    end = bisect.bisect_right(future_timestamps_5m, end_ts)
+    exact = bisect.bisect_left(future_timestamps_5m, target_exit_ts, lo=start)
+    if exact >= len(future_timestamps_5m) or future_timestamps_5m[exact] != target_exit_ts:
+        return HorizonOutcome(
+            requested_horizon_minutes=horizon_minutes,
+            target_exit_ts_utc=target_exit_ts,
+            actual_exit_ts_utc=None,
+            actual_horizon_minutes=None,
+            exit_alignment_seconds=None,
+            horizon_valid=False,
+            future_return_bps=None,
+            mfe_bps=None,
+            mae_bps=None,
+            exit_alignment="missing_exact_target",
+        )
+    end = exact + 1
     window = future_candles_5m[start:end]
     if not window:
-        return None, None, None
+        return HorizonOutcome(
+            requested_horizon_minutes=horizon_minutes,
+            target_exit_ts_utc=target_exit_ts,
+            actual_exit_ts_utc=None,
+            actual_horizon_minutes=None,
+            exit_alignment_seconds=None,
+            horizon_valid=False,
+            future_return_bps=None,
+            mfe_bps=None,
+            mae_bps=None,
+            exit_alignment="missing_forward_window",
+        )
     entry = candle.close_price
     future_return = return_bps(entry, window[-1].close_price)
     mfe = return_bps(entry, max(item.high_price for item in window))
     mae = return_bps(entry, min(item.low_price for item in window))
-    return future_return, mfe, mae
+    actual_exit_ts = window[-1].close_ts_utc
+    actual_horizon = (actual_exit_ts - candle.close_ts_utc).total_seconds() / 60.0
+    alignment = (actual_exit_ts - target_exit_ts).total_seconds()
+    return HorizonOutcome(
+        requested_horizon_minutes=horizon_minutes,
+        target_exit_ts_utc=target_exit_ts,
+        actual_exit_ts_utc=actual_exit_ts,
+        actual_horizon_minutes=actual_horizon,
+        exit_alignment_seconds=alignment,
+        horizon_valid=alignment == 0 and actual_horizon == horizon_minutes,
+        future_return_bps=future_return,
+        mfe_bps=mfe,
+        mae_bps=mae,
+        exit_alignment="exact",
+    )
 
 
 def generate_research_configs(
@@ -1137,6 +1206,7 @@ def build_report_payload(
         "dry_run": dry_run,
         "dataset_summary": dataset_summary(features, from_date, to_date, instruments, timeframes),
         "features_summary": features_summary(features),
+        "horizon_mismatch_count": horizon_mismatch_count(features),
         "train_period": period_payload(train_dates),
         "validation_period": period_payload(validation_dates),
         "cost_model": {
@@ -1228,7 +1298,18 @@ def features_summary(features: Sequence[FeatureRow]) -> dict[str, Any]:
         ],
         "abnormal_range_rows": sum(1 for feature in features if feature.abnormal_range_flag),
         "low_volume_rows": sum(1 for feature in features if feature.low_volume_flag),
+        "horizon_mismatch_count": horizon_mismatch_count(features),
     }
+
+
+def horizon_mismatch_count(features: Sequence[FeatureRow]) -> int:
+    count = 0
+    for feature in features:
+        for horizon in (5, 10, 15):
+            detail = feature.outcomes.detail_for_horizon(horizon)
+            if detail is not None and not detail.horizon_valid:
+                count += 1
+    return count
 
 
 def period_payload(values: set[date]) -> dict[str, Any]:
@@ -1352,6 +1433,7 @@ Configs tested: `{payload["configs_tested"]}`.
 Passing configs: `{len(payload["passing_configs"])}`.
 Best validation net bps proxy: `{best_validation.get("net_pnl_bps_proxy")}`.
 Best validation candidates: `{best_validation.get("candidates")}`.
+Horizon mismatches rejected: `{payload["horizon_mismatch_count"]}`.
 
 ## 2. Dataset summary
 

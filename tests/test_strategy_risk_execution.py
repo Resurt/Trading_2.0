@@ -41,6 +41,7 @@ from trade_core.strategy import (
     StrategyState,
     TradeSide,
 )
+from trade_core.strategy.execution_engine import normalize_price, validate_price_tick
 from trading_common import LaunchModePolicy, RuntimeMode
 from trading_common.db.base import Base
 from trading_common.db.models import (
@@ -135,36 +136,55 @@ def market_state(*, spread_bps: Decimal = Decimal("5")) -> MarketState:
     )
 
 
-def instrument() -> InstrumentRef:
+def instrument(
+    *,
+    lot_size: int | None = 10,
+    min_price_increment: Decimal | None = Decimal("0.01"),
+) -> InstrumentRef:
     return InstrumentRef(
         instrument_id="MOEX:SBER",
         instrument_uid="uid-sber",
         class_code="TQBR",
         ticker="SBER",
+        lot_size=lot_size,
+        min_price_increment=min_price_increment,
     )
 
 
 def candidate(
     *,
     side: TradeSide = TradeSide.BUY,
+    action: SignalAction = SignalAction.ENTRY,
     expected_edge_bps: Decimal = Decimal("25"),
     lot_qty: int = 1,
+    intended_price: Decimal | None = Decimal("100.00"),
+    lot_size: int | None = 10,
+    min_price_increment: Decimal | None = Decimal("0.01"),
 ) -> SignalCandidateDecision:
+    ref = instrument(lot_size=lot_size, min_price_increment=min_price_increment)
     return SignalCandidateDecision(
         strategy_id="baseline_config_stub",
         strategy_version=1,
-        instrument=instrument(),
+        instrument=ref,
         timeframe=Timeframe.M5,
-        action=SignalAction.ENTRY,
+        action=action,
         side=side,
         order_type="limit",
         lot_qty=lot_qty,
-        intended_price=Decimal("100.00"),
+        intended_price=intended_price,
         time_in_force="day",
         expected_edge_bps=expected_edge_bps,
         expected_holding_minutes=5,
         signal_fingerprint="candidate-fingerprint",
-        condition_payload={"test": True},
+        condition_payload={
+            "test": True,
+            "lot_size": lot_size,
+            "min_price_increment": str(min_price_increment)
+            if min_price_increment is not None
+            else None,
+        },
+        lot_size=lot_size,
+        min_price_increment=min_price_increment,
         candidate_id=uuid4(),
     )
 
@@ -295,6 +315,7 @@ def test_short_candidate_is_blocked_when_broker_or_account_disallows_short() -> 
                 allow_short=True,
                 max_short_lots=5,
                 short_allowed_by_account=False,
+                short_allowed_by_instrument=True,
             ),
             portfolio=PortfolioSnapshot(),
         )
@@ -304,6 +325,133 @@ def test_short_candidate_is_blocked_when_broker_or_account_disallows_short() -> 
     assert decision.final_blocker is not None
     assert decision.final_blocker.code is BlockerCode.SHORT_NOT_ALLOWED_BY_BROKER
     assert decision.final_blocker.gate_name == "short_allowed_by_account"
+
+
+def test_short_entry_fails_closed_when_permission_is_unknown() -> None:
+    decision = DefaultRiskEngine().evaluate(
+        RiskAssessmentInput(
+            candidate=candidate(side=TradeSide.SELL),
+            session_snapshot=snapshot(),
+            market_state=market_state(spread_bps=Decimal("5")),
+            limits=RiskLimits(allow_short=True, max_short_lots=5),
+            portfolio=PortfolioSnapshot(),
+        )
+    )
+
+    assert not decision.allowed
+    assert decision.final_blocker is not None
+    assert decision.final_blocker.code is BlockerCode.SHORT_PERMISSION_UNKNOWN
+    assert decision.final_blocker.gate_name == "short_permission_account_known"
+
+
+def test_unknown_lot_size_blocks_entry_before_notional_defaults() -> None:
+    decision = DefaultRiskEngine().evaluate(
+        RiskAssessmentInput(
+            candidate=candidate(lot_size=None),
+            session_snapshot=snapshot(),
+            market_state=market_state(spread_bps=Decimal("5")),
+            limits=RiskLimits(),
+            portfolio=PortfolioSnapshot(),
+        )
+    )
+
+    assert not decision.allowed
+    assert decision.final_blocker is not None
+    assert decision.final_blocker.code is BlockerCode.INSTRUMENT_LOT_SIZE_UNKNOWN
+    assert decision.final_blocker.reason_payload["lot_size"] is None
+
+
+def test_unknown_tick_size_blocks_entry_before_execution_defaults() -> None:
+    decision = DefaultRiskEngine().evaluate(
+        RiskAssessmentInput(
+            candidate=candidate(min_price_increment=None),
+            session_snapshot=snapshot(),
+            market_state=market_state(spread_bps=Decimal("5")),
+            limits=RiskLimits(),
+            portfolio=PortfolioSnapshot(),
+        )
+    )
+
+    assert not decision.allowed
+    assert decision.final_blocker is not None
+    assert decision.final_blocker.code is BlockerCode.PRICE_TICK_INVALID
+    assert decision.final_blocker.reason_payload["reason_code"] == "price_tick_invalid"
+
+
+def test_lot_size_notional_uses_price_times_lots_times_lot_size() -> None:
+    decision = DefaultRiskEngine().evaluate(
+        RiskAssessmentInput(
+            candidate=candidate(lot_qty=5, intended_price=Decimal("300"), lot_size=10),
+            session_snapshot=snapshot(),
+            market_state=market_state(spread_bps=Decimal("5")),
+            limits=RiskLimits(risk_budget_remaining_rub=Decimal("14999")),
+            portfolio=PortfolioSnapshot(),
+        )
+    )
+
+    blocker = next(item for item in decision.blockers if item.gate_name == "risk_budget")
+    assert not blocker.passed
+    assert blocker.reason_payload["estimated_notional_rub"] == "15000"
+
+
+def test_exit_reduces_position_and_position_limit_does_not_block() -> None:
+    decision = DefaultRiskEngine().evaluate(
+        RiskAssessmentInput(
+            candidate=candidate(
+                action=SignalAction.EXIT,
+                side=TradeSide.SELL,
+                lot_qty=1,
+            ),
+            session_snapshot=snapshot(),
+            market_state=market_state(spread_bps=Decimal("5")),
+            limits=RiskLimits(max_position_lots=5),
+            portfolio=PortfolioSnapshot(open_position_lots=5, long_position_lots=5),
+        )
+    )
+
+    position_limit = next(item for item in decision.blockers if item.gate_name == "position_limit")
+    assert position_limit.passed
+    assert position_limit.reason_payload["projected_position_lots"] == 4
+
+
+def test_exit_without_position_is_blocked_explicitly() -> None:
+    decision = DefaultRiskEngine().evaluate(
+        RiskAssessmentInput(
+            candidate=candidate(action=SignalAction.EXIT, side=TradeSide.SELL, lot_qty=1),
+            session_snapshot=snapshot(),
+            market_state=market_state(spread_bps=Decimal("5")),
+            limits=RiskLimits(max_position_lots=5),
+            portfolio=PortfolioSnapshot(),
+        )
+    )
+
+    assert not decision.allowed
+    assert decision.final_blocker is not None
+    assert decision.final_blocker.code is BlockerCode.EXIT_WITHOUT_POSITION
+
+
+def test_short_exit_allows_unknown_short_permission_when_reducing_position() -> None:
+    decision = DefaultRiskEngine().evaluate(
+        RiskAssessmentInput(
+            candidate=candidate(action=SignalAction.EXIT, side=TradeSide.BUY, lot_qty=2),
+            session_snapshot=snapshot(),
+            market_state=market_state(spread_bps=Decimal("5")),
+            limits=RiskLimits(allow_short=True, max_position_lots=5),
+            portfolio=PortfolioSnapshot(open_position_lots=-5, short_position_lots=5),
+        )
+    )
+
+    assert all(
+        item.passed
+        for item in decision.blockers
+        if item.code
+        in {
+            BlockerCode.SHORT_PERMISSION_UNKNOWN,
+            BlockerCode.SHORT_NOT_ALLOWED_BY_BROKER,
+        }
+    )
+    position_limit = next(item for item in decision.blockers if item.gate_name == "position_limit")
+    assert position_limit.reason_payload["projected_position_lots"] == 3
 
 
 def test_special_day_risk_blockers_are_machine_readable() -> None:
@@ -335,7 +483,13 @@ def test_special_day_risk_blockers_are_machine_readable() -> None:
             candidate=candidate(side=TradeSide.SELL),
             session_snapshot=snapshot(),
             market_state=market_state(spread_bps=Decimal("5")),
-            limits=RiskLimits(allow_short=True, max_short_lots=5, max_position_lots=5),
+            limits=RiskLimits(
+                allow_short=True,
+                max_short_lots=5,
+                max_position_lots=5,
+                short_allowed_by_account=True,
+                short_allowed_by_instrument=True,
+            ),
             special_day_type="abnormal_gap_day",
             special_day_trade_policy="shadow_only",
         )
@@ -365,7 +519,13 @@ def test_special_day_risk_blockers_are_machine_readable() -> None:
             candidate=candidate(side=TradeSide.SELL),
             session_snapshot=snapshot(),
             market_state=market_state(spread_bps=Decimal("5")),
-            limits=RiskLimits(allow_short=True, max_short_lots=5, max_position_lots=5),
+            limits=RiskLimits(
+                allow_short=True,
+                max_short_lots=5,
+                max_position_lots=5,
+                short_allowed_by_account=True,
+                short_allowed_by_instrument=True,
+            ),
             special_day_type="dividend_gap_day",
             special_day_trade_policy="allow",
         )
@@ -414,6 +574,45 @@ def test_entry_is_blocked_when_position_state_is_stale() -> None:
     assert decision.final_blocker.reason_payload["position_reason_code"] == "position_state_stale"
 
 
+def test_risk_blocks_fresh_received_but_stale_exchange_market_data() -> None:
+    stale_market = MarketState(
+        instrument_id="MOEX:SBER",
+        best_bid=PriceLevel(price=Decimal("99.99"), quantity_lots=Decimal("10")),
+        best_ask=PriceLevel(price=Decimal("100.01"), quantity_lots=Decimal("10")),
+        mid_price=Decimal("100"),
+        spread_abs=Decimal("0.02"),
+        spread_bps=Decimal("2"),
+        bid_depth_lots=Decimal("100"),
+        ask_depth_lots=Decimal("100"),
+        book_imbalance=Decimal("0"),
+        market_quality_score=Decimal("0.95"),
+        feed_freshness=FeedFreshness(
+            age_ms=30_000,
+            received_age_ms=0,
+            exchange_age_ms=30_000,
+            stale_by_received_time=False,
+            stale_by_exchange_time=True,
+            is_stale=True,
+            freshness_reason="exchange_ts_too_old",
+        ),
+    )
+
+    decision = DefaultRiskEngine().evaluate(
+        RiskAssessmentInput(
+            candidate=candidate(side=TradeSide.BUY),
+            session_snapshot=snapshot(),
+            market_state=stale_market,
+            limits=RiskLimits(max_data_age_ms=5_000),
+            portfolio=PortfolioSnapshot(),
+        )
+    )
+
+    assert not decision.allowed
+    assert decision.final_blocker is not None
+    assert decision.final_blocker.code is BlockerCode.STALE_MARKET_DATA
+    assert decision.final_blocker.reason_payload["freshness_reason"] == "exchange_ts_too_old"
+
+
 def test_short_candidate_is_blocked_when_short_exposure_limit_is_reached() -> None:
     decision = DefaultRiskEngine().evaluate(
         RiskAssessmentInput(
@@ -424,6 +623,8 @@ def test_short_candidate_is_blocked_when_short_exposure_limit_is_reached() -> No
                 allow_short=True,
                 max_short_lots=10,
                 max_position_lots=10,
+                short_allowed_by_account=True,
+                short_allowed_by_instrument=True,
                 max_gross_exposure_rub=Decimal("1000"),
                 max_net_exposure_rub=Decimal("2000"),
             ),
@@ -612,6 +813,86 @@ def test_execution_engine_posts_and_cancels_with_explicit_reason_code() -> None:
         assert state_events[0].tracking_id == "tracking-post"
         assert state_events[1].cancel_reason_code == CancelReasonCode.STALE_ORDER.value
         assert state_events[0].latency_ms is not None
+
+    engine.dispose()
+
+
+def test_price_tick_helpers_normalize_limit_prices_by_side() -> None:
+    assert validate_price_tick(Decimal("100.02"), Decimal("0.01"))
+    assert not validate_price_tick(Decimal("100.023"), Decimal("0.01"))
+    assert normalize_price(Decimal("100.023"), Decimal("0.01"), "buy", "limit") == Decimal(
+        "100.02"
+    )
+    assert normalize_price(Decimal("100.023"), Decimal("0.01"), "sell", "limit") == Decimal(
+        "100.03"
+    )
+    assert normalize_price(Decimal("100.07"), Decimal("0.05"), "buy", "limit") == Decimal(
+        "100.05"
+    )
+    assert normalize_price(Decimal("100.07"), Decimal("0.05"), "sell", "limit") == Decimal(
+        "100.10"
+    )
+
+
+def test_execution_uses_normalized_price_in_order_placement_request() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    fake_gateway = FakeBrokerGateway()
+
+    with Session(engine) as session:
+        execution = DefaultExecutionEngine(
+            broker_gateway=cast(BrokerGateway, fake_gateway),
+            orders=OrderRepository(session),
+            launch_policy=LaunchModePolicy.from_mode(
+                RuntimeMode.SANDBOX,
+                sandbox_orders_confirmed=True,
+            ),
+        )
+        intent = execution.create_order_intent(
+            OrderIntentRequest(
+                candidate=candidate(intended_price=Decimal("100.023")),
+                session_snapshot=snapshot(),
+                account_id="account-1",
+            )
+        )
+
+        asyncio.run(execution.post_order(intent))
+
+        assert fake_gateway.posted[0].price == Decimal("100.02")
+        assert fake_gateway.posted[0].payload["original_intended_price"] == "100.023"
+        assert fake_gateway.posted[0].payload["normalized_price"] == "100.02"
+
+    engine.dispose()
+
+
+def test_execution_blocks_limit_order_when_tick_size_unknown_before_broker_call() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    fake_gateway = FakeBrokerGateway()
+
+    with Session(engine) as session:
+        execution = DefaultExecutionEngine(
+            broker_gateway=cast(BrokerGateway, fake_gateway),
+            orders=OrderRepository(session),
+            launch_policy=LaunchModePolicy.from_mode(
+                RuntimeMode.SANDBOX,
+                sandbox_orders_confirmed=True,
+            ),
+        )
+        intent = execution.create_order_intent(
+            OrderIntentRequest(
+                candidate=candidate(min_price_increment=None),
+                session_snapshot=snapshot(),
+                account_id="account-1",
+            )
+        )
+
+        with pytest.raises(ValueError, match="price_tick_invalid"):
+            asyncio.run(execution.post_order(intent))
+
+        assert intent.status == "rejected"
+        assert intent.reject_reason_code == "price_tick_invalid"
+        assert fake_gateway.posted == []
 
     engine.dispose()
 

@@ -21,6 +21,8 @@ class InstrumentRef:
     figi: str | None = None
     class_code: str | None = None
     ticker: str | None = None
+    lot_size: int | None = None
+    min_price_increment: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)

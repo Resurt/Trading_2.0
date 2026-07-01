@@ -567,3 +567,35 @@ non-calibration display sources are rejected before
 `market_microstructure_snapshot`/`order_book_summary` persistence. Rejected
 microstructure emits rate-limited `data_only_microstructure_row_rejected`
 audit_event records with the rejection reason.
+## Calibration/Risk Hardening Rules
+
+Before any future strategy shadow:
+
+- Resolve the full core universe through broker/SDK or a previously resolved
+  `instrument_registry` cache: `SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR`.
+- Treat `lot_size` and `min_price_increment` as broker/registry facts, not env
+  defaults. Env instruments identify tickers only.
+- Unknown `lot_size` blocks entry risk with `instrument_lot_size_unknown`.
+- Unknown `min_price_increment` blocks limit entry risk and rejects execution
+  before broker boundary with `price_tick_invalid`.
+- Notional/exposure uses `price_per_share * lot_qty * lot_size`.
+- Limit order prices are normalized to tick before broker boundary: BUY floors,
+  SELL ceils.
+- EXIT candidates reduce existing positions and must not be blocked by position
+  limit when projected lots decrease. Exit without position or oversized exit is
+  blocked explicitly.
+- Short entry permission is fail-closed when account or instrument permission is
+  unknown. Short exits that reduce risk remain allowed by the short-permission
+  gate.
+- Core market-state freshness uses both `received_ts` and `exchange_ts`; stale or
+  missing exchange time blocks entries.
+- Local weekday calendar defaults are advisory. Broker `TradingSchedules` /
+  trading status and official exchange overrides are authoritative for
+  real/shadow trading gates. Data-only may use market-data probe fallback for
+  logging visibility, but that fallback must keep `trading_allowed=false`.
+- TODO: add a full MOEX holiday-calendar source/sync job before relying on local
+  calendar defaults beyond advisory diagnostics.
+
+Daily trend / forward-return research is retrospective only. It must expose
+requested vs actual horizon and exclude `horizon_mismatch` windows from top/worst
+candidate lists.

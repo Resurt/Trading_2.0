@@ -25,7 +25,11 @@ class LiveOrderBookReadModel:
     def as_read_model(self) -> dict[str, object]:
         return {
             "instrument_id": self.instrument_id,
-            "exchange_ts": self.order_book.exchange_ts.isoformat(),
+            "exchange_ts": (
+                self.order_book.exchange_ts.isoformat()
+                if self.order_book.exchange_ts is not None
+                else None
+            ),
             "received_ts": self.order_book.received_ts.isoformat(),
             "depth": self.order_book.depth,
             "bids": [level.as_read_model() for level in self.order_book.bids],

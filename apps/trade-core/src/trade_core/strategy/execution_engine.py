@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal, InvalidOperation
 from time import perf_counter
 from uuid import uuid4
 
@@ -99,6 +99,19 @@ class DefaultExecutionEngine:
                 "timeframe": request.candidate.timeframe.value,
                 "signal_fingerprint": request.candidate.signal_fingerprint,
                 "condition_payload": request.candidate.condition_payload,
+                "price_per_share": (
+                    str(request.candidate.intended_price)
+                    if request.candidate.intended_price is not None
+                    else None
+                ),
+                "lot_qty": request.candidate.lot_qty,
+                "lot_size": _candidate_lot_size(request.candidate),
+                "min_price_increment": (
+                    str(_candidate_min_price_increment(request.candidate))
+                    if _candidate_min_price_increment(request.candidate) is not None
+                    else None
+                ),
+                "estimated_notional_rub": _estimated_notional_payload(request.candidate),
                 "launch_mode": self._launch_policy.mode.value,
                 "order_submission_mode": self._launch_policy.order_submission_mode,
             },
@@ -117,19 +130,46 @@ class DefaultExecutionEngine:
             return self._post_pseudo_order(intent)
 
         account_id = _required_payload_str(intent.intent_payload, "account_id")
+        try:
+            normalized_price = _normalized_intent_price(intent)
+        except ValueError as exc:
+            observed_at = self._clock()
+            self._orders.update_intent_status(
+                intent,
+                status="rejected",
+                terminal_ts=observed_at,
+                reject_reason_code="price_tick_invalid",
+                payload_patch={
+                    "reason_code": "price_tick_invalid",
+                    "error_message": str(exc),
+                    "real_broker_call": False,
+                    "last_broker_method": None,
+                },
+            )
+            raise
         request = OrderPlacementRequest(
             account_id=account_id,
             instrument=_instrument_from_intent(intent),
             side=intent.side,
             order_type=intent.order_type,
             lot_qty=intent.lot_qty,
-            price=intent.intended_price,
+            price=normalized_price,
             time_in_force=intent.time_in_force,
             client_order_key=intent.idempotency_key,
             request_order_id=intent.request_order_id,
             payload={
                 "order_intent_id": str(intent.order_intent_id),
                 "execution_policy_version": intent.execution_policy_version,
+                "original_intended_price": (
+                    str(intent.intended_price) if intent.intended_price is not None else None
+                ),
+                "normalized_price": (
+                    str(normalized_price) if normalized_price is not None else None
+                ),
+                "min_price_increment": _optional_payload_str(
+                    intent.intent_payload,
+                    "min_price_increment",
+                ),
             },
         )
         started_at_monotonic = perf_counter()
@@ -156,6 +196,12 @@ class DefaultExecutionEngine:
                 "last_broker_method": response.method_name,
                 "broker_status": broker_status,
                 "broker_latency_ms": str(latency_ms),
+                "original_intended_price": (
+                    str(intent.intended_price) if intent.intended_price is not None else None
+                ),
+                "normalized_price": (
+                    str(normalized_price) if normalized_price is not None else None
+                ),
                 "tracking_id": _tracking_id(response.headers),
                 "rate_limit": _rate_limit_payload(response.headers),
             },
@@ -530,12 +576,116 @@ def _instrument_from_intent(intent: OrderIntent) -> InstrumentRef:
         instrument_uid=_optional_payload_str(intent.intent_payload, "instrument_uid"),
         class_code=_optional_payload_str(intent.intent_payload, "class_code"),
         ticker=_optional_payload_str(intent.intent_payload, "ticker"),
+        lot_size=_optional_payload_int(intent.intent_payload, "lot_size"),
+        min_price_increment=_optional_payload_decimal(
+            intent.intent_payload,
+            "min_price_increment",
+        ),
     )
 
 
 def _optional_payload_str(payload: Mapping[str, object], key: str) -> str | None:
     value = payload.get(key)
     return value if isinstance(value, str) and value else None
+
+
+def _optional_payload_int(payload: Mapping[str, object], key: str) -> int | None:
+    value = payload.get(key)
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        parsed = int(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _optional_payload_decimal(payload: Mapping[str, object], key: str) -> Decimal | None:
+    value = payload.get(key)
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    return parsed if parsed > Decimal("0") else None
+
+
+def _candidate_lot_size(candidate: object) -> int | None:
+    value = getattr(candidate, "lot_size", None)
+    if value is None:
+        value = getattr(getattr(candidate, "instrument", None), "lot_size", None)
+    if value is None:
+        payload = getattr(candidate, "condition_payload", {})
+        if isinstance(payload, Mapping):
+            value = payload.get("lot_size")
+    if value is None:
+        return None
+    try:
+        parsed = int(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _candidate_min_price_increment(candidate: object) -> Decimal | None:
+    value = getattr(candidate, "min_price_increment", None)
+    if value is None:
+        value = getattr(getattr(candidate, "instrument", None), "min_price_increment", None)
+    if value is None:
+        payload = getattr(candidate, "condition_payload", {})
+        if isinstance(payload, Mapping):
+            value = payload.get("min_price_increment")
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    return parsed if parsed > Decimal("0") else None
+
+
+def _estimated_notional_payload(candidate: object) -> str | None:
+    price = getattr(candidate, "intended_price", None)
+    lot_qty = getattr(candidate, "lot_qty", None)
+    lot_size = _candidate_lot_size(candidate)
+    if price is None or lot_qty is None or lot_size is None:
+        return None
+    return str(Decimal(str(price)) * Decimal(int(lot_qty)) * Decimal(lot_size))
+
+
+def validate_price_tick(price: Decimal, min_price_increment: Decimal) -> bool:
+    if min_price_increment <= Decimal("0"):
+        return False
+    steps = price / min_price_increment
+    return steps == steps.to_integral_value()
+
+
+def normalize_price(
+    price: Decimal,
+    min_price_increment: Decimal,
+    side: str,
+    mode: str,
+) -> Decimal:
+    if mode.lower() == "market":
+        return price
+    if min_price_increment <= Decimal("0"):
+        msg = "price_tick_invalid: min_price_increment must be positive"
+        raise ValueError(msg)
+    rounding = ROUND_FLOOR if side.lower() == "buy" else ROUND_CEILING
+    steps = (price / min_price_increment).to_integral_value(rounding=rounding)
+    normalized = steps * min_price_increment
+    return normalized.quantize(min_price_increment)
+
+
+def _normalized_intent_price(intent: OrderIntent) -> Decimal | None:
+    if intent.intended_price is None or intent.order_type.lower() == "market":
+        return intent.intended_price
+    tick = _optional_payload_decimal(intent.intent_payload, "min_price_increment")
+    if tick is None:
+        msg = "price_tick_invalid: min_price_increment missing for limit order"
+        raise ValueError(msg)
+    return normalize_price(intent.intended_price, tick, intent.side, intent.order_type)
 
 
 def _response_str(payload: Mapping[str, object], key: str) -> str | None:

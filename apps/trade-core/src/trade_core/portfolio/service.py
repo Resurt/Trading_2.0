@@ -41,7 +41,8 @@ class PositionRecord:
     unrealized_pnl: Decimal | None = None
     realised_pnl: Decimal | None = None
     exposure: Decimal | None = None
-    short_available: bool = True
+    lot_size: int | None = None
+    short_available: bool | None = None
     payload: JsonPayload | None = None
 
     @property
@@ -62,8 +63,8 @@ class PositionRefreshResult:
     positions: tuple[PositionRecord, ...]
     snapshots: tuple[PositionSnapshot, ...]
     portfolio: PortfolioSnapshot
-    short_allowed_by_account: bool
-    short_allowed_by_instrument: Mapping[str, bool]
+    short_allowed_by_account: bool | None
+    short_allowed_by_instrument: Mapping[str, bool | None]
 
     def signed_lots_for(self, instrument_id: str) -> int:
         return sum(
@@ -72,7 +73,7 @@ class PositionRefreshResult:
             if item.instrument_id == instrument_id
         )
 
-    def short_allowed_for(self, instrument_id: str) -> bool:
+    def short_allowed_for(self, instrument_id: str) -> bool | None:
         return self.short_allowed_by_instrument.get(instrument_id, self.short_allowed_by_account)
 
 
@@ -340,12 +341,13 @@ def _merge_positions(
 ) -> tuple[PositionRecord, ...]:
     by_instrument_side: dict[tuple[str, str], PositionRecord] = {}
     aliases = _instrument_aliases(tracked_instruments)
+    lot_sizes = _instrument_lot_sizes(tracked_instruments)
     for raw in _iter_position_payloads(positions_payload):
-        record = _record_from_payload(raw, aliases=aliases)
+        record = _record_from_payload(raw, aliases=aliases, lot_sizes=lot_sizes)
         if record is not None:
             by_instrument_side[(record.instrument_id, record.position_side)] = record
     for raw in _iter_position_payloads(portfolio_payload):
-        record = _record_from_payload(raw, aliases=aliases)
+        record = _record_from_payload(raw, aliases=aliases, lot_sizes=lot_sizes)
         if record is not None:
             by_instrument_side[(record.instrument_id, record.position_side)] = record
     for instrument in tracked_instruments:
@@ -355,6 +357,7 @@ def _merge_positions(
                 instrument_id=instrument.instrument_id,
                 position_side="flat",
                 qty_lots=0,
+                lot_size=instrument.lot_size,
                 exposure=Decimal("0"),
                 payload={"source": "tracked_instrument_flat_fill"},
             )
@@ -379,6 +382,26 @@ def _instrument_aliases(tracked_instruments: tuple[InstrumentRef, ...]) -> dict[
     return aliases
 
 
+def _instrument_lot_sizes(tracked_instruments: tuple[InstrumentRef, ...]) -> dict[str, int]:
+    lot_sizes: dict[str, int] = {}
+    for instrument in tracked_instruments:
+        if instrument.lot_size is None or instrument.lot_size <= 0:
+            continue
+        for value in (
+            instrument.instrument_id,
+            instrument.instrument_uid,
+            instrument.ticker,
+            (
+                f"{instrument.class_code}:{instrument.ticker}"
+                if instrument.class_code and instrument.ticker
+                else None
+            ),
+        ):
+            if value:
+                lot_sizes[value] = instrument.lot_size
+    return lot_sizes
+
+
 def _iter_position_payloads(payload: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
     positions = payload.get("positions", ())
     if not isinstance(positions, list | tuple):
@@ -390,6 +413,7 @@ def _record_from_payload(
     payload: Mapping[str, Any],
     *,
     aliases: Mapping[str, str],
+    lot_sizes: Mapping[str, int],
 ) -> PositionRecord | None:
     raw_instrument_id = _payload_str(payload, "instrument_id") or _payload_str(
         payload,
@@ -398,13 +422,20 @@ def _record_from_payload(
     if not raw_instrument_id:
         return None
     instrument_id = aliases.get(raw_instrument_id, raw_instrument_id)
+    lot_size = _payload_int_or_none(payload.get("lot_size")) or lot_sizes.get(raw_instrument_id)
+    if lot_size is None:
+        lot_size = lot_sizes.get(instrument_id)
     signed_qty = _decimal_from_payload(payload.get("qty_lots"))
     side = _payload_str(payload, "position_side") or _side_from_quantity(signed_qty)
     qty_lots = int(abs(signed_qty))
     exposure = _decimal_or_none(payload.get("exposure"))
     if exposure is None:
         market_price = _decimal_or_none(payload.get("market_price"))
-        exposure = abs(signed_qty) * market_price if market_price is not None else None
+        exposure = (
+            abs(signed_qty) * market_price * Decimal(lot_size)
+            if market_price is not None and lot_size is not None
+            else None
+        )
     return PositionRecord(
         instrument_id=instrument_id,
         position_side=side,
@@ -414,8 +445,17 @@ def _record_from_payload(
         unrealized_pnl=_decimal_or_none(payload.get("unrealized_pnl")),
         realised_pnl=_decimal_or_none(payload.get("realised_pnl")),
         exposure=exposure,
-        short_available=bool(payload.get("short_available", True)),
-        payload=dict(payload),
+        lot_size=lot_size,
+        short_available=_bool_or_none(payload.get("short_available")),
+        payload={
+            **dict(payload),
+            "lot_size": lot_size,
+            "exposure_fallback_formula": (
+                "abs(qty_lots) * market_price * lot_size"
+                if payload.get("exposure") is None
+                else "broker_payload_exposure"
+            ),
+        },
     )
 
 
@@ -429,6 +469,7 @@ def _record_from_snapshot(snapshot: PositionSnapshot) -> PositionRecord:
         unrealized_pnl=snapshot.unrealized_pnl,
         realised_pnl=snapshot.realised_pnl,
         exposure=snapshot.exposure,
+        lot_size=_payload_int_or_none(snapshot.snapshot_payload.get("lot_size")),
         payload=dict(snapshot.snapshot_payload),
     )
 
@@ -571,11 +612,11 @@ def _with_position_validation(
     )
 
 
-def _short_allowed_by_account(payload: Mapping[str, Any]) -> bool:
+def _short_allowed_by_account(payload: Mapping[str, Any]) -> bool | None:
     value = payload.get("short_allowed_by_account")
     if value is None:
         value = payload.get("margin_trading_enabled")
-    return bool(True if value is None else value)
+    return _bool_or_none(value)
 
 
 def _signed_lots_from_snapshot(snapshot: PositionSnapshot | None) -> int | None:
@@ -623,6 +664,26 @@ def _decimal_or_none(value: object) -> Decimal | None:
         return value
     text = str(value)
     return None if text.lower() == "none" else Decimal(text)
+
+
+def _payload_int_or_none(value: object) -> int | None:
+    if value is None or str(value).strip() == "":
+        return None
+    parsed = int(str(value))
+    return parsed if parsed > 0 else None
+
+
+def _bool_or_none(value: object) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return None
 
 
 def _side_from_quantity(quantity: Decimal) -> str:

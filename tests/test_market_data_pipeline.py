@@ -171,6 +171,54 @@ def test_market_quality_and_stale_data_detection() -> None:
     assert stale.age_ms == 2000
 
 
+def test_market_state_freshness_uses_received_and_exchange_timestamps() -> None:
+    now = utc(2026, 6, 12, 7)
+    order_book = OrderBookSnapshot(
+        instrument_id="MOEX:SBER",
+        bids=(PriceLevel(Decimal("100.00"), Decimal("10")),),
+        asks=(PriceLevel(Decimal("100.10"), Decimal("8")),),
+        depth=1,
+        exchange_ts=now - timedelta(seconds=30),
+        received_ts=now,
+    )
+
+    state = MarketStateCalculator(stale_after_ms=1000, depth_levels=1).from_order_book(
+        order_book,
+        now=now,
+    )
+
+    assert state.feed_freshness.received_age_ms == 0
+    assert state.feed_freshness.exchange_age_ms == 30_000
+    assert state.feed_freshness.stale_by_exchange_time is True
+    assert state.feed_freshness.is_stale is True
+    assert state.feed_freshness.freshness_reason == "exchange_ts_too_old"
+    feed_freshness = cast(dict[str, object], state.as_read_model()["feed_freshness"])
+    assert feed_freshness["exchange_age_ms"] == 30_000
+
+
+def test_market_state_missing_exchange_timestamp_is_stale_for_entries() -> None:
+    now = utc(2026, 6, 12, 7)
+    order_book = OrderBookSnapshot(
+        instrument_id="MOEX:SBER",
+        bids=(PriceLevel(Decimal("100.00"), Decimal("10")),),
+        asks=(PriceLevel(Decimal("100.10"), Decimal("8")),),
+        depth=1,
+        exchange_ts=None,
+        received_ts=now,
+    )
+
+    state = MarketStateCalculator(stale_after_ms=1000, depth_levels=1).from_order_book(
+        order_book,
+        now=now,
+    )
+
+    assert state.feed_freshness.received_age_ms == 0
+    assert state.feed_freshness.exchange_age_ms is None
+    assert state.feed_freshness.stale_by_exchange_time is True
+    assert state.feed_freshness.is_stale is True
+    assert state.feed_freshness.freshness_reason == "missing_exchange_ts"
+
+
 class FakeRecoveryGateway:
     def __init__(
         self,

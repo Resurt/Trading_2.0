@@ -27,12 +27,14 @@ def utc(year: int, month: int, day: int, hour: int, minute: int = 0) -> datetime
     return datetime(year, month, day, hour, minute, tzinfo=UTC)
 
 
-def instrument() -> InstrumentRef:
+def instrument(*, lot_size: int | None = 10) -> InstrumentRef:
     return InstrumentRef(
         instrument_id="MOEX:SBER",
         instrument_uid="uid-sber",
         class_code="TQBR",
         ticker="SBER",
+        lot_size=lot_size,
+        min_price_increment=Decimal("0.01") if lot_size is not None else None,
     )
 
 
@@ -134,6 +136,95 @@ def test_position_service_refresh_writes_snapshot_and_portfolio_totals() -> None
         assert snapshot.position_side == "long"
         assert snapshot.qty_lots == 5
         assert snapshot.snapshot_payload["instrument_uid"] == "uid-sber"
+
+    engine.dispose()
+
+
+def test_position_service_exposure_fallback_uses_lot_size() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    gateway = FakePositionGateway(
+        positions_payloads=(
+            {
+                "positions": [
+                    {
+                        "instrument_uid": "uid-sber",
+                        "qty_lots": "5",
+                        "position_side": "long",
+                        "market_price": "300",
+                        "short_available": True,
+                    }
+                ]
+            },
+        ),
+        portfolio_payloads=({"positions": [], "short_allowed_by_account": True},),
+    )
+
+    with Session(engine) as session:
+        service = PositionService(
+            broker_gateway=cast(BrokerGateway, gateway),
+            session=session,
+            session_context_provider=context_for,
+            tracked_instruments=(instrument(lot_size=10),),
+        )
+        result = asyncio.run(
+            service.refresh_positions(
+                "account-1",
+                reason="unit_test_refresh",
+                now=utc(2026, 6, 12, 7),
+            )
+        )
+        session.commit()
+
+        snapshot = session.execute(select(PositionSnapshot)).scalar_one()
+        assert result.portfolio.gross_exposure_rub == Decimal("15000")
+        assert snapshot.exposure == Decimal("15000.00000000")
+        assert snapshot.snapshot_payload["exposure_fallback_formula"] == (
+            "abs(qty_lots) * market_price * lot_size"
+        )
+
+    engine.dispose()
+
+
+def test_position_service_unknown_lot_size_does_not_silently_assume_one() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    gateway = FakePositionGateway(
+        positions_payloads=(
+            {
+                "positions": [
+                    {
+                        "instrument_uid": "uid-sber",
+                        "qty_lots": "5",
+                        "position_side": "long",
+                        "market_price": "300",
+                    }
+                ]
+            },
+        ),
+        portfolio_payloads=({"positions": [], "short_allowed_by_account": True},),
+    )
+
+    with Session(engine) as session:
+        service = PositionService(
+            broker_gateway=cast(BrokerGateway, gateway),
+            session=session,
+            session_context_provider=context_for,
+            tracked_instruments=(instrument(lot_size=None),),
+        )
+        result = asyncio.run(
+            service.refresh_positions(
+                "account-1",
+                reason="unit_test_refresh",
+                now=utc(2026, 6, 12, 7),
+            )
+        )
+        session.commit()
+
+        snapshot = session.execute(select(PositionSnapshot)).scalar_one()
+        assert result.portfolio.gross_exposure_rub == Decimal("0")
+        assert snapshot.exposure is None
+        assert snapshot.snapshot_payload["lot_size"] is None
 
     engine.dispose()
 

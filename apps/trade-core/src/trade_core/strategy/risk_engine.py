@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from trade_core.session import OrderSessionPolicy
 from trade_core.session.reason_codes import ORDER_TYPE_FORBIDDEN
@@ -54,8 +54,11 @@ class DefaultRiskEngine:
         )
 
         is_entry = request.candidate.action == SignalAction.ENTRY
+        is_exit = request.candidate.action == SignalAction.EXIT
         is_long_entry = is_entry and request.candidate.side == TradeSide.BUY
         is_short_entry = is_entry and request.candidate.side == TradeSide.SELL
+        is_long_exit = is_exit and request.candidate.side == TradeSide.SELL
+        is_short_exit = is_exit and request.candidate.side == TradeSide.BUY
 
         self._append_gate(
             gates,
@@ -259,18 +262,38 @@ class DefaultRiskEngine:
             )
             self._append_gate(
                 gates,
+                code=BlockerCode.SHORT_PERMISSION_UNKNOWN,
+                gate_name="short_permission_account_known",
+                passed=request.limits.short_allowed_by_account is not None,
+                reason_payload={
+                    "short_allowed_by_account": request.limits.short_allowed_by_account,
+                    "reason_code": "short_permission_unknown",
+                },
+            )
+            self._append_gate(
+                gates,
                 code=BlockerCode.SHORT_NOT_ALLOWED_BY_BROKER,
                 gate_name="short_allowed_by_account",
-                passed=request.limits.short_allowed_by_account,
+                passed=request.limits.short_allowed_by_account is True,
                 reason_payload={
                     "short_allowed_by_account": request.limits.short_allowed_by_account
                 },
             )
             self._append_gate(
                 gates,
+                code=BlockerCode.SHORT_PERMISSION_UNKNOWN,
+                gate_name="short_permission_instrument_known",
+                passed=request.limits.short_allowed_by_instrument is not None,
+                reason_payload={
+                    "short_allowed_by_instrument": request.limits.short_allowed_by_instrument,
+                    "reason_code": "short_permission_unknown",
+                },
+            )
+            self._append_gate(
+                gates,
                 code=BlockerCode.SHORT_NOT_ALLOWED_BY_BROKER,
                 gate_name="short_allowed_by_instrument",
-                passed=request.limits.short_allowed_by_instrument,
+                passed=request.limits.short_allowed_by_instrument is True,
                 reason_payload={
                     "short_allowed_by_instrument": request.limits.short_allowed_by_instrument
                 },
@@ -348,6 +371,9 @@ class DefaultRiskEngine:
         )
 
         data_age_ms = market_state.feed_freshness.age_ms if market_state is not None else None
+        exchange_age_ms = (
+            market_state.feed_freshness.exchange_age_ms if market_state is not None else None
+        )
         feed_is_stale = market_state.feed_freshness.is_stale if market_state is not None else True
         self._append_gate(
             gates,
@@ -362,6 +388,27 @@ class DefaultRiskEngine:
             observed_value=Decimal(data_age_ms) if data_age_ms is not None else None,
             reason_payload={
                 "data_age_ms": data_age_ms,
+                "received_age_ms": (
+                    market_state.feed_freshness.received_age_ms
+                    if market_state is not None
+                    else None
+                ),
+                "exchange_age_ms": exchange_age_ms,
+                "stale_by_received_time": (
+                    market_state.feed_freshness.stale_by_received_time
+                    if market_state is not None
+                    else True
+                ),
+                "stale_by_exchange_time": (
+                    market_state.feed_freshness.stale_by_exchange_time
+                    if market_state is not None
+                    else True
+                ),
+                "freshness_reason": (
+                    market_state.feed_freshness.freshness_reason
+                    if market_state is not None
+                    else "missing_market_state"
+                ),
                 "max_data_age_ms": request.limits.max_data_age_ms,
             },
         )
@@ -422,6 +469,38 @@ class DefaultRiskEngine:
         estimated_notional = _estimated_notional(
             price=request.candidate.intended_price,
             lot_qty=request.candidate.lot_qty,
+            lot_size=_candidate_lot_size(request.candidate),
+        )
+        lot_size_known = _candidate_lot_size(request.candidate) is not None
+        tick_known = (
+            request.candidate.order_type.lower() == "market"
+            or request.candidate.intended_price is None
+            or _candidate_min_price_increment(request.candidate) is not None
+        )
+        self._append_gate(
+            gates,
+            code=BlockerCode.INSTRUMENT_LOT_SIZE_UNKNOWN,
+            gate_name="instrument_lot_size_known",
+            passed=not is_entry or lot_size_known,
+            reason_payload={
+                "lot_size": _candidate_lot_size(request.candidate),
+                "candidate_action": request.candidate.action.value,
+                "reason_code": "instrument_lot_size_unknown",
+            },
+        )
+        self._append_gate(
+            gates,
+            code=BlockerCode.PRICE_TICK_INVALID,
+            gate_name="instrument_min_price_increment_known",
+            passed=not is_entry or tick_known,
+            reason_payload={
+                "min_price_increment": _optional_str(
+                    _candidate_min_price_increment(request.candidate)
+                ),
+                "order_type": request.candidate.order_type,
+                "candidate_action": request.candidate.action.value,
+                "reason_code": "price_tick_invalid",
+            },
         )
         self._append_gate(
             gates,
@@ -437,6 +516,9 @@ class DefaultRiskEngine:
             limit_value=request.limits.risk_budget_remaining_rub,
             observed_value=estimated_notional,
             reason_payload={
+                "price_per_share": _optional_str(request.candidate.intended_price),
+                "lot_qty": request.candidate.lot_qty,
+                "lot_size": _candidate_lot_size(request.candidate),
                 "estimated_notional_rub": _optional_str(estimated_notional),
                 "risk_budget_remaining_rub": str(request.limits.risk_budget_remaining_rub),
             },
@@ -465,11 +547,17 @@ class DefaultRiskEngine:
             reason_payload={"open_order_count": request.portfolio.open_order_count},
         )
 
-        projected_long_lots = _current_long_lots(request.portfolio) + (
-            request.candidate.lot_qty if is_long_entry else 0
+        projected_long_lots = _projected_long_lots(
+            request.portfolio,
+            lot_qty=request.candidate.lot_qty,
+            is_long_entry=is_long_entry,
+            is_long_exit=is_long_exit,
         )
-        projected_short_lots = _current_short_lots(request.portfolio) + (
-            request.candidate.lot_qty if is_short_entry else 0
+        projected_short_lots = _projected_short_lots(
+            request.portfolio,
+            lot_qty=request.candidate.lot_qty,
+            is_short_entry=is_short_entry,
+            is_short_exit=is_short_exit,
         )
         if is_long_entry:
             self._append_gate(
@@ -547,7 +635,41 @@ class DefaultRiskEngine:
             },
         )
 
-        projected_position = abs(request.portfolio.open_position_lots) + request.candidate.lot_qty
+        exit_without_position = (
+            is_long_exit and _current_long_lots(request.portfolio) <= 0
+        ) or (is_short_exit and _current_short_lots(request.portfolio) <= 0)
+        exit_quantity_exceeds_position = (
+            is_long_exit and request.candidate.lot_qty > _current_long_lots(request.portfolio)
+        ) or (
+            is_short_exit and request.candidate.lot_qty > _current_short_lots(request.portfolio)
+        )
+        self._append_gate(
+            gates,
+            code=BlockerCode.EXIT_WITHOUT_POSITION,
+            gate_name="exit_requires_open_position",
+            passed=not is_exit or not exit_without_position,
+            reason_payload={
+                "open_position_lots": request.portfolio.open_position_lots,
+                "long_position_lots": _current_long_lots(request.portfolio),
+                "short_position_lots": _current_short_lots(request.portfolio),
+                "candidate_lot_qty": request.candidate.lot_qty,
+                "candidate_side": request.candidate.side.value,
+            },
+        )
+        self._append_gate(
+            gates,
+            code=BlockerCode.EXIT_QUANTITY_EXCEEDS_POSITION,
+            gate_name="exit_quantity_within_position",
+            passed=not is_exit or not exit_quantity_exceeds_position,
+            reason_payload={
+                "open_position_lots": request.portfolio.open_position_lots,
+                "long_position_lots": _current_long_lots(request.portfolio),
+                "short_position_lots": _current_short_lots(request.portfolio),
+                "candidate_lot_qty": request.candidate.lot_qty,
+                "candidate_side": request.candidate.side.value,
+            },
+        )
+        projected_position = max(projected_long_lots, projected_short_lots)
         self._append_gate(
             gates,
             code=BlockerCode.POSITION_LIMIT_REACHED,
@@ -606,10 +728,49 @@ class DefaultRiskEngine:
         )
 
 
-def _estimated_notional(*, price: Decimal | None, lot_qty: int) -> Decimal | None:
-    if price is None:
+def _estimated_notional(
+    *,
+    price: Decimal | None,
+    lot_qty: int,
+    lot_size: int | None,
+) -> Decimal | None:
+    if price is None or lot_size is None:
         return None
-    return price * Decimal(lot_qty)
+    return price * Decimal(lot_qty) * Decimal(lot_size)
+
+
+def _candidate_lot_size(candidate: object) -> int | None:
+    value = getattr(candidate, "lot_size", None)
+    if value is None:
+        value = getattr(getattr(candidate, "instrument", None), "lot_size", None)
+    if value is None:
+        payload = getattr(candidate, "condition_payload", {})
+        if isinstance(payload, dict):
+            value = payload.get("lot_size")
+    if value is None:
+        return None
+    try:
+        lot_size = int(value)
+    except (TypeError, ValueError):
+        return None
+    return lot_size if lot_size > 0 else None
+
+
+def _candidate_min_price_increment(candidate: object) -> Decimal | None:
+    value = getattr(candidate, "min_price_increment", None)
+    if value is None:
+        value = getattr(getattr(candidate, "instrument", None), "min_price_increment", None)
+    if value is None:
+        payload = getattr(candidate, "condition_payload", {})
+        if isinstance(payload, dict):
+            value = payload.get("min_price_increment")
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        tick = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    return tick if tick > Decimal("0") else None
 
 
 def _current_long_lots(portfolio: PortfolioSnapshot) -> int:
@@ -624,6 +785,36 @@ def _current_short_lots(portfolio: PortfolioSnapshot) -> int:
     if short_lots:
         return short_lots
     return abs(min(portfolio.open_position_lots, 0))
+
+
+def _projected_long_lots(
+    portfolio: PortfolioSnapshot,
+    *,
+    lot_qty: int,
+    is_long_entry: bool,
+    is_long_exit: bool,
+) -> int:
+    current = _current_long_lots(portfolio)
+    if is_long_entry:
+        return current + lot_qty
+    if is_long_exit:
+        return max(0, current - lot_qty)
+    return current
+
+
+def _projected_short_lots(
+    portfolio: PortfolioSnapshot,
+    *,
+    lot_qty: int,
+    is_short_entry: bool,
+    is_short_exit: bool,
+) -> int:
+    current = _current_short_lots(portfolio)
+    if is_short_entry:
+        return current + lot_qty
+    if is_short_exit:
+        return max(0, current - lot_qty)
+    return current
 
 
 def _total_expected_costs_bps(
