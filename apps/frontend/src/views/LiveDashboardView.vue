@@ -506,26 +506,6 @@ function formatLots(value: string | null | undefined): string {
   return value === null || value === undefined ? "Нет данных" : `${formatDecimal(value, 0)} лотов`;
 }
 
-function formatChangeBps(value: string | null | undefined): string {
-  if (value === null || value === undefined) {
-    return "Нет данных";
-  }
-  const numeric = Number(value);
-  const prefix = numeric > 0 ? "+" : "";
-  return `${prefix}${formatDecimal(value, 1)} bps`;
-}
-
-function changeTone(value: string | null | undefined): string {
-  const numeric = Number(value ?? 0);
-  if (numeric > 0) {
-    return "positive";
-  }
-  if (numeric < 0) {
-    return "negative";
-  }
-  return "flat";
-}
-
 function quoteFreshness(instrument: MarketInstrumentOverview): string {
   if (!instrument.last_price_at) {
     return reasonLabel(String(instrument.quote_payload?.reason_code ?? "no_price_source_available"));
@@ -1075,9 +1055,6 @@ function degradedFlagLabel(flag: string): string {
                 <small>спред {{ formatSpread(instrument) }}</small>
                 <small>качество стакана {{ displayQualityValue(instrument) }}</small>
               </span>
-              <small :class="`quote-change quote-change--${changeTone(instrument.change_bps)}`">
-                {{ formatChangeBps(instrument.change_bps) }}
-              </small>
             </button>
           </div>
           <EmptyState

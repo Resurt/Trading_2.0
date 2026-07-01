@@ -134,6 +134,7 @@ describe("LiveDashboardView", () => {
     expect(wrapper.text()).toContain("Котировки выбранных инструментов");
     expect(wrapper.text()).toContain("8 инструментов");
     expect(wrapper.findAll(".quote-card").length).toBe(8);
+    expect(wrapper.find(".quote-change").exists()).toBe(false);
     expect(wrapper.find(".quote-table").exists()).toBe(false);
     expect(wrapper.text()).toContain("СТАКАН");
     expect(wrapper.text()).toContain("ЛЕНТА СДЕЛОК");

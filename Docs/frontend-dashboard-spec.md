@@ -136,6 +136,8 @@ must show that as `качество стакана N %`. Do not replace an avail
 score with `нет стакана` just because full `bids[]`/`asks[]` ladder levels are
 missing from the overview payload; full ladder levels are required only for the
 selected order-book widget.
+Quote cards should not show raw day-change `change_bps` values; trend/change
+analytics belong in dedicated reports, not in the compact operator quote board.
 The selected order-book refresh interval must stay below the order-book freshness
 budget so an open-market selected ladder does not oscillate between fresh and
 stale while the readonly broker/API is responsive.
