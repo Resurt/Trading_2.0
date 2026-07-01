@@ -282,6 +282,11 @@ sample age as primary UI fields. While collection is active, show:
 If collection is not active or start time is unavailable, show `старт сбора=0` and
 `прошло=00ч 00м 00с`.
 
+Warnings and transient diagnostics in the `Запись логов` panel must render inside
+a fixed-height `сообщения` area with compact text. Messages may scroll inside that
+area, but they must not resize the panel or push neighboring dashboard blocks
+down when runtime warnings appear or disappear.
+
 ## Start/Stop Command UX
 
 Start may call a fast advisory `/session/preflight` for the core universe, but the

@@ -92,6 +92,12 @@ const COLLECTOR_LABELS: Record<string, string> = {
 const quoteRows = computed(() => market.quoteRows);
 
 const selectedInstrument = computed(() => market.currentInstrument);
+const collectorMessages = computed(() => {
+  const items = [...market.dataShadowStatus.warnings, ...market.warnings]
+    .filter((warning): warning is string => Boolean(warning))
+    .map((warning) => reasonLabel(warning));
+  return [...new Set(items)].slice(0, 4);
+});
 const MIN_SELECTED_ORDER_BOOK_SIDE_LEVELS = 5;
 
 function toneFromQuote(instrument: MarketInstrumentOverview): "good" | "warn" | "muted" {
@@ -1138,7 +1144,7 @@ function degradedFlagLabel(flag: string): string {
       </div>
 
       <div class="dashboard-layout__side">
-        <DataPanel>
+        <DataPanel class="collector-panel">
           <template #eyebrow>запись логов</template>
           <template #title>Data-only сбор</template>
           <p class="operator-note">
@@ -1158,15 +1164,18 @@ function degradedFlagLabel(flag: string): string {
             <dt>прошло</dt>
             <dd>{{ collectorElapsedLabel() }}</dd>
           </dl>
-          <div v-if="market.dataShadowStatus.warnings.length" class="operator-list operator-list--compact">
-            <div v-for="warning in market.dataShadowStatus.warnings" :key="warning">
-              <strong>{{ reasonLabel(warning) }}</strong>
+          <div class="collector-messages" aria-live="polite">
+            <span class="collector-messages__label">сообщения</span>
+            <div v-if="collectorMessages.length" class="collector-messages__list">
+              <p
+                v-for="message in collectorMessages"
+                :key="message"
+                class="collector-messages__item"
+              >
+                {{ message }}
+              </p>
             </div>
-          </div>
-          <div v-if="market.warnings.length" class="operator-list operator-list--compact">
-            <div v-for="warning in market.warnings" :key="warning">
-              <strong>{{ reasonLabel(warning) }}</strong>
-            </div>
+            <p v-else class="collector-messages__empty">нет новых сообщений</p>
           </div>
         </DataPanel>
 
