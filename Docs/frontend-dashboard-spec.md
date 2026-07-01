@@ -127,10 +127,19 @@ Default freshness thresholds are backend-configurable:
 
 ## Order Book
 
-The dashboard performs live `GetOrderBook` calls only for the selected instrument.
-The quote board must not request full depth for all eight instruments. Quote cards
-may still show bid/ask, spread, depth and freshness from the stored
-`order_book_summary` read-model produced by data-only collection.
+The dashboard order-book display is independent from data-only collection. The
+quote board may run bounded readonly `GetOrderBook` refreshes for the core
+universe so quote cards stay live when the data-only collector is stopped. This
+is display-only broker I/O: it must not create `market_microstructure_snapshot`,
+`order_book_summary`, `signal_candidate`, `order_intent`, or `broker_order`
+rows. Quote-board refresh stores only a short API cache and compact
+top-of-book/quality fields; it must not start runtime streams or data-only
+collection.
+
+The selected instrument remains the only place that renders the full depth
+ladder. Quote cards may show bid/ask, spread, depth, quality and freshness from
+the readonly feed cache or the stored `order_book_summary` read-model produced
+by data-only collection.
 When `/market/overview` includes `display_market_quality_score`, every quote card
 must show that as `качество стакана N %`. Do not replace an available quality
 score with `нет стакана` just because full `bids[]`/`asks[]` ladder levels are

@@ -26,6 +26,7 @@ class DashboardMarketFeedConfig:
 
     enabled: bool = True
     quote_refresh_seconds: float = 5.0
+    quote_order_book_refresh_seconds: float = 5.0
     selected_book_refresh_seconds: float = 3.0
     trades_refresh_seconds: float = 3.0
     session_refresh_seconds: float = 30.0
@@ -40,6 +41,9 @@ class DashboardMarketFeedConfig:
         return cls(
             enabled=_env_bool("DASHBOARD_MARKET_FEED_ENABLED", True),
             quote_refresh_seconds=_env_float("DASHBOARD_QUOTE_REFRESH_SECONDS", 5.0),
+            quote_order_book_refresh_seconds=_env_float(
+                "DASHBOARD_QUOTE_ORDER_BOOK_REFRESH_SECONDS", 5.0
+            ),
             selected_book_refresh_seconds=_env_float(
                 "DASHBOARD_SELECTED_BOOK_REFRESH_SECONDS", 3.0
             ),
@@ -74,6 +78,7 @@ class DashboardMarketFeedService:
     _overview: MarketOverviewResponse | None = None
     _selected_details: dict[str, MarketInstrumentOverview] = field(default_factory=dict)
     _last_quote_refresh_at: datetime | None = None
+    _last_quote_order_book_refresh_at: dict[str, datetime] = field(default_factory=dict)
     _last_details_refresh_at: dict[str, datetime] = field(default_factory=dict)
     _last_trades_refresh_at: dict[str, datetime] = field(default_factory=dict)
     _last_status_refresh_at: dict[str, datetime] = field(default_factory=dict)
@@ -215,6 +220,7 @@ class DashboardMarketFeedService:
                 refs=refs,
                 gateway_factory=gateway_factory,
                 force=force,
+                exclude_order_book_instruments={selected_id} if include_order_book else set(),
             )
             if include_order_book or include_trades:
                 selected = await self._refresh_selected_if_needed(
@@ -286,6 +292,7 @@ class DashboardMarketFeedService:
         refs: Sequence[Any],
         gateway_factory: GatewayFactory,
         force: bool,
+        exclude_order_book_instruments: set[str],
     ) -> MarketOverviewResponse:
         now = datetime.now(tz=UTC)
         if (
@@ -302,9 +309,15 @@ class DashboardMarketFeedService:
             self._record_warning("dashboard_feed_no_resolved_instruments")
             return _merge_overviews(overview, self._overview)
         try:
+            gateway = gateway_factory()
+        except Exception as exc:
+            self._record_error(_reason_from_exception(exc, "dashboard_gateway_unavailable"))
+            return _merge_overviews(overview, self._overview)
+
+        prices: dict[str, dict[str, object]] = {}
+        try:
             from trade_core.broker_gateway import LastPricesRequest
 
-            gateway = gateway_factory()
             timeout_seconds = _env_float("DASHBOARD_LAST_PRICES_TIMEOUT_SECONDS", 3.0)
             response = await _run_readonly_broker_call(
                 lambda: gateway.get_last_prices(
@@ -312,12 +325,11 @@ class DashboardMarketFeedService:
                 ),
                 timeout_seconds=timeout_seconds,
             )
+            prices = _prices_by_instrument(response.data, resolved_refs)
+            self._clear_error("dashboard_last_prices_unavailable")
         except Exception as exc:
             self._record_error(_reason_from_exception(exc, "dashboard_last_prices_unavailable"))
-            return _merge_overviews(overview, self._overview)
 
-        prices = _prices_by_instrument(response.data, resolved_refs)
-        self._clear_error("dashboard_last_prices_unavailable")
         refreshed: list[MarketInstrumentOverview] = []
         for instrument in overview.instruments:
             price_payload = prices.get(instrument.instrument_id)
@@ -328,8 +340,97 @@ class DashboardMarketFeedService:
                     max_exchange_age_seconds=self.config.last_price_max_exchange_age_seconds,
                 )
             )
+        refreshed_overview = MarketOverviewResponse(generated_at=now, instruments=refreshed)
+        refreshed_overview = await self._refresh_quote_order_books_if_needed(
+            overview=refreshed_overview,
+            refs=resolved_refs,
+            gateway=gateway,
+            force=force,
+            exclude_instruments=exclude_order_book_instruments,
+        )
         self._last_quote_refresh_at = now
-        return MarketOverviewResponse(generated_at=now, instruments=refreshed)
+        return refreshed_overview
+
+    async def _refresh_quote_order_books_if_needed(
+        self,
+        *,
+        overview: MarketOverviewResponse,
+        refs: Sequence[Any],
+        gateway: Any,
+        force: bool,
+        exclude_instruments: set[str],
+    ) -> MarketOverviewResponse:
+        now = datetime.now(tz=UTC)
+        ref_by_instrument = {
+            _canonical_moex_instrument(str(getattr(ref, "instrument_id", ""))): ref
+            for ref in refs
+            if getattr(ref, "instrument_uid", None) or getattr(ref, "figi", None)
+        }
+        due: list[tuple[MarketInstrumentOverview, Any]] = []
+        for instrument in overview.instruments:
+            if instrument.instrument_id in exclude_instruments:
+                continue
+            ref = ref_by_instrument.get(instrument.instrument_id)
+            if ref is None:
+                continue
+            last_refresh = self._last_quote_order_book_refresh_at.get(instrument.instrument_id)
+            if (
+                not force
+                and last_refresh is not None
+                and now - last_refresh
+                < timedelta(seconds=self.config.quote_order_book_refresh_seconds)
+                and instrument.quote_status == "live"
+                and instrument.order_book_stale is False
+            ):
+                continue
+            due.append((instrument, ref))
+        if not due:
+            return overview
+
+        concurrency = max(1, _env_int("DASHBOARD_QUOTE_ORDER_BOOK_CONCURRENCY", 4))
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def _refresh_one(
+            instrument: MarketInstrumentOverview,
+            ref: Any,
+        ) -> tuple[str, dict[str, object] | None]:
+            async with semaphore:
+                payload = await self._get_order_book(
+                    gateway=gateway,
+                    ref=ref,
+                    instrument=instrument,
+                    recent_trades=[],
+                    record_warnings=False,
+                )
+                return instrument.instrument_id, payload
+
+        results = await asyncio.gather(
+            *(_refresh_one(instrument, ref) for instrument, ref in due),
+            return_exceptions=True,
+        )
+        payloads: dict[str, dict[str, object]] = {}
+        failures = 0
+        for result in results:
+            if isinstance(result, BaseException):
+                failures += 1
+                continue
+            instrument_id, payload = result
+            self._last_quote_order_book_refresh_at[instrument_id] = now
+            if payload is None:
+                failures += 1
+                continue
+            payloads[instrument_id] = payload
+        if payloads:
+            self._clear_warning("dashboard_quote_order_books_unavailable")
+        elif failures:
+            self._record_warning("dashboard_quote_order_books_unavailable")
+        rows = [
+            row.model_copy(update=payloads[row.instrument_id])
+            if row.instrument_id in payloads
+            else row
+            for row in overview.instruments
+        ]
+        return MarketOverviewResponse(generated_at=now, instruments=rows)
 
     async def _refresh_selected_if_needed(
         self,
@@ -698,6 +799,7 @@ class DashboardMarketFeedService:
         ref: Any,
         instrument: MarketInstrumentOverview,
         recent_trades: list[dict[str, object]],
+        record_warnings: bool = True,
     ) -> dict[str, object] | None:
         from trade_core.broker_gateway import OrderBookRequest
 
@@ -716,12 +818,13 @@ class DashboardMarketFeedService:
                 if attempt == 0:
                     await asyncio.sleep(0.2)
         if response is None:
-            self._record_warning(
-                _reason_from_exception(
-                    last_error or RuntimeError("selected_order_book_unavailable"),
-                    "selected_order_book_unavailable",
+            if record_warnings:
+                self._record_warning(
+                    _reason_from_exception(
+                        last_error or RuntimeError("selected_order_book_unavailable"),
+                        "selected_order_book_unavailable",
+                    )
                 )
-            )
             return None
         payload = _order_book_overview_payload(
             response.data,
@@ -731,11 +834,13 @@ class DashboardMarketFeedService:
             max_exchange_age_seconds=self.config.order_book_max_exchange_age_seconds,
         )
         if payload is None:
-            self._record_warning("no_order_book_samples")
+            if record_warnings:
+                self._record_warning("no_order_book_samples")
         else:
-            self._clear_warning("selected_order_book_unavailable")
-            self._clear_warning("selected_order_book_stale")
-            self._clear_warning("no_order_book_samples")
+            if record_warnings:
+                self._clear_warning("selected_order_book_unavailable")
+                self._clear_warning("selected_order_book_stale")
+                self._clear_warning("no_order_book_samples")
         return payload
 
     def _record_error(self, value: str) -> None:

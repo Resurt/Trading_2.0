@@ -379,7 +379,8 @@ running. This is not data-only collection. Dashboard display uses
 only for persistent logging.
 
 Dashboard Live Feed may call readonly T-Invest methods (`GetLastPrices`,
-`GetOrderBook`, `GetTradingStatus`, last trades/status display) with bounded timeouts.
+compact quote-board `GetOrderBook`, selected-instrument `GetOrderBook`,
+`GetTradingStatus`, last trades/status display) with bounded timeouts.
 It must not write
 `market_microstructure_snapshot` calibration logs, create trading entities, or call
 `PostOrder`/`CancelOrder`. `GET /market/overview` is the cheap BFF read-model backed
@@ -387,19 +388,24 @@ by that feed cache first, then stored `order_book_summary`, `market_candle` and
 previous-close fallbacks. It must return one row per core universe instrument and
 expose `last_price_source`, `quote_status`, `is_price_stale` and timestamp.
 
-When data-only collection is running, quote cards should prefer fresh
-`order_book_summary` top-of-book data written by the collector. These rows may be
-stored under broker `instrument_uid`/`figi` while the operator UI requests `MOEX:*`;
-the BFF resolves aliases through `instrument_registry`. Do not start a second
-collector just because a card shows stale last-price data; first check whether the
-dashboard/read-model alias path is finding the stored order-book summary.
+Quote cards must stay live when the data-only collector is stopped. The dashboard
+feed therefore refreshes compact readonly top-of-book/quality data for the core
+universe and stores it only in API cache. When data-only collection is running,
+quote cards may also prefer fresh `order_book_summary` top-of-book data written by
+the collector. These rows may be stored under broker `instrument_uid`/`figi` while
+the operator UI requests `MOEX:*`; the BFF resolves aliases through
+`instrument_registry`. Do not start a second collector just because a card shows
+stale last-price data; first check whether the dashboard readonly feed and
+read-model alias path are finding the current broker/book data.
 
 The dashboard feed distinguishes broker response receipt time from exchange data
 time. `received_ts`/`received_age_ms` only say when the BFF received a readonly
-response. `exchange_ts`/`exchange_age_ms`,
-`stale_by_exchange_time`, `freshness_status`, and `freshness_reason` decide
-whether the displayed price/book/tape is fresh. Old candle or old exchange data
-must remain visible as stale/display-only and must not be labeled live.
+response. For live order-book snapshots, receipt freshness is the display signal:
+an unchanged exchange-side book can keep an older `exchange_ts` while the broker
+is still returning a current snapshot. Last-price-only, candle, previous-close,
+OTC/indicative and trade-tape fallbacks remain exchange-time gated. Old candle or
+old exchange-time-only data must remain visible as stale/display-only and must not
+be labeled live.
 
 Selected-instrument switching is latest-wins. The frontend sends
 `{"type":"market.select","selected_instrument":"MOEX:GAZP"}` over the market
@@ -456,6 +462,8 @@ not fall back to stale candle rows immediately after a live broker refresh.
 Operator dashboard polling while open:
 
 - `/dashboard/market-feed/snapshot` quote board: every 2 seconds;
+- compact quote-board `GetOrderBook` refresh: default every 5 seconds, bounded
+  concurrency, API cache only;
 - `/dashboard/market-feed/snapshot` selected instrument details: every 1 second while
   dashboard feed sees `market_open=true`, otherwise every 5 seconds;
 - selected broker trading status inside the dashboard feed: every 5 seconds;

@@ -298,6 +298,71 @@ class FakeDashboardFeedGateway(FakeQuoteGateway):
         )
 
 
+class FakeCoreDashboardFeedGateway(FakeDashboardFeedGateway):
+    def __init__(self) -> None:
+        self.order_book_calls: list[str] = []
+
+    async def get_last_prices(
+        self,
+        request: object,
+        metadata: object = None,
+    ) -> BrokerUnaryResponse:
+        del metadata
+        prices = []
+        now = datetime.now(tz=UTC).isoformat()
+        for ref in getattr(request, "instruments", ()):
+            ticker = str(getattr(ref, "ticker", "") or "").upper()
+            price = _test_price_for_ticker(ticker)
+            prices.append(
+                {
+                    "instrument_uid": getattr(ref, "instrument_uid", None),
+                    "figi": getattr(ref, "figi", None),
+                    "price": str(price),
+                    "exchange_ts": now,
+                }
+            )
+        return BrokerUnaryResponse(method_name="GetLastPrices", data={"prices": prices})
+
+    async def get_order_book(self, request: object, metadata: object = None) -> BrokerUnaryResponse:
+        del metadata
+        ref = request.instrument  # type: ignore[attr-defined]
+        ticker = str(getattr(ref, "ticker", "") or "").upper()
+        self.order_book_calls.append(str(getattr(ref, "instrument_id", "")))
+        mid = _test_price_for_ticker(ticker)
+        bids = [
+            {
+                "price": str((mid - Decimal("0.01") * (index + 1)).quantize(Decimal("0.01"))),
+                "quantity_lots": str(100 + index),
+            }
+            for index in range(10)
+        ]
+        asks = [
+            {
+                "price": str((mid + Decimal("0.01") * (index + 1)).quantize(Decimal("0.01"))),
+                "quantity_lots": str(120 + index),
+            }
+            for index in range(10)
+        ]
+        return BrokerUnaryResponse(
+            method_name="GetOrderBook",
+            data={
+                "instrument_uid": getattr(ref, "instrument_uid", None),
+                "figi": getattr(ref, "figi", None),
+                "exchange_ts": datetime.now(tz=UTC).isoformat(),
+                "bids": bids,
+                "asks": asks,
+            },
+        )
+
+    async def get_last_trades(
+        self,
+        request: object,
+        metadata: object = None,
+    ) -> BrokerUnaryResponse:
+        del request, metadata
+        return BrokerUnaryResponse(method_name="GetLastTrades", data={"trades": []})
+
+
 class FakePartialOrderBookGateway(FakeDashboardFeedGateway):
     def __init__(self) -> None:
         self.order_book_calls = 0
@@ -966,6 +1031,51 @@ def seed_database(database: DatabaseService) -> None:
                 ),
             ]
         )
+
+
+CORE_TEST_TICKERS = ("SBER", "GAZP", "LKOH", "YDEX", "TATN", "GMKN", "OZON", "VTBR")
+
+
+def seed_core_universe_registry(database: DatabaseService) -> None:
+    now = utc(2026, 6, 12, 7)
+    with database.session_scope() as session:
+        for ticker in CORE_TEST_TICKERS:
+            session.merge(
+                InstrumentRegistry(
+                    instrument_id=f"MOEX:{ticker}",
+                    ticker=ticker,
+                    class_code="TQBR",
+                    figi=f"figi-{ticker.lower()}",
+                    instrument_uid=f"uid-{ticker.lower()}",
+                    name=f"{ticker} test instrument",
+                    lot_size=10,
+                    min_price_increment=Decimal("0.01"),
+                    currency="RUB",
+                    is_enabled=True,
+                    supports_morning=True,
+                    supports_evening=True,
+                    supports_weekend=False,
+                    source="tbank_resolved",
+                    resolved_at=now,
+                    resolution_status="resolved",
+                    broker_payload={"source": "test"},
+                    instrument_payload={},
+                )
+            )
+
+
+def _test_price_for_ticker(ticker: str) -> Decimal:
+    prices = {
+        "SBER": Decimal("306.75"),
+        "GAZP": Decimal("101.15"),
+        "LKOH": Decimal("4531.75"),
+        "YDEX": Decimal("3673.00"),
+        "TATN": Decimal("490.05"),
+        "GMKN": Decimal("127.59"),
+        "OZON": Decimal("3427.25"),
+        "VTBR": Decimal("73.49"),
+    }
+    return prices.get(ticker, Decimal("100.00"))
 
 
 def test_current_session_reconciles_stale_runtime_snapshot_with_preflight(
@@ -1785,6 +1895,65 @@ def test_dashboard_market_feed_snapshot_does_not_require_collector_or_write_db(
     assert before == after
 
 
+def test_dashboard_quote_board_refreshes_order_books_without_collector_or_db_writes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app_module = importlib.import_module("trading_api.app")
+    from sqlalchemy import text
+
+    gateway = FakeCoreDashboardFeedGateway()
+    monkeypatch.setenv("DASHBOARD_MARKET_FEED_ENABLED", "true")
+    monkeypatch.setenv("DASHBOARD_QUOTE_ORDER_BOOK_REFRESH_SECONDS", "0.1")
+    force_exchange_open(monkeypatch)
+    monkeypatch.setattr(app_module, "_readonly_tbank_gateway", lambda: gateway)
+    database = DatabaseService(f"sqlite+pysqlite:///{tmp_path / 'dashboard-board-feed.db'}")
+    Base.metadata.create_all(database.engine)
+    seed_database(database)
+    seed_core_universe_registry(database)
+    app = create_fastapi_app(database=database, report_task_client=FakeReportTaskClient())
+    client = TestClient(app)
+
+    tables = (
+        "market_microstructure_snapshot",
+        "order_book_summary",
+        "signal_candidate",
+        "order_intent",
+        "broker_order",
+    )
+    with database.session_scope() as session:
+        before = {
+            table: session.execute(text(f"select count(*) from {table}")).scalar()
+            for table in tables
+        }
+    snapshot = client.get(
+        "/dashboard/market-feed/snapshot",
+        headers={"X-API-Role": "observer"},
+        params={
+            "selected_instrument": "MOEX:SBER",
+            "include_order_book": False,
+            "include_trades": False,
+        },
+    ).json()
+    with database.session_scope() as session:
+        after = {
+            table: session.execute(text(f"select count(*) from {table}")).scalar()
+            for table in tables
+        }
+
+    assert before == after
+    assert snapshot["data_only_collection_required"] is False
+    assert len(snapshot["quote_rows"]) == 8
+    assert set(gateway.order_book_calls) == {f"MOEX:{ticker}" for ticker in CORE_TEST_TICKERS}
+    for row in snapshot["quote_rows"]:
+        assert row["quote_status"] == "live"
+        assert row["order_book_stale"] is False
+        assert row["last_price_source"] == "live_order_book_mid"
+        assert row["order_book_source"] == "live_order_book_mid"
+        assert row["order_book_summary"]["bids"]
+        assert row["order_book_summary"]["asks"]
+
+
 def test_dashboard_market_feed_sorts_last_trades_newest_first(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -2204,7 +2373,7 @@ def test_dashboard_market_feed_normalizes_live_session_label_from_broker_status(
     assert snapshot["selected_details"]["order_book_source"] == "live_order_book_mid"
 
 
-def test_market_overview_uses_dashboard_feed_without_heavy_order_books(
+def test_market_overview_uses_dashboard_feed_with_readonly_quote_board_books(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -2219,9 +2388,9 @@ def test_market_overview_uses_dashboard_feed_without_heavy_order_books(
     sber = next(row for row in market["instruments"] if row["instrument_id"] == "MOEX:SBER")
 
     assert len(market["instruments"]) == 8
-    assert sber["last_price"] == "313.21"
+    assert sber["last_price"] == "313.19"
     assert sber["last_price_source"] == "broker_quote_exchange_closed"
-    assert sber["order_book_summary"].get("bids") is None
+    assert sber["order_book_summary"]["bids"]
     assert sber["quote_payload"]["dashboard_live_feed"] is True
 
 

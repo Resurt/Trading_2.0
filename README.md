@@ -400,9 +400,11 @@ is kept as a compatible alias for the same DashboardMarketFeed snapshot. REST
 and diagnostic endpoints. `GET /market/overview` is the cheap quote-board read-model
 backed by the feed cache first, then stored `order_book_summary`, `market_candle`
 and previous-close fallbacks. It always returns one row per core instrument and
-avoids heavy all-instrument order-book calls. Selected-instrument bid/ask ladder
-and trade tape come through the selected snapshot/details fields; the frontend
-sends `market.select` over the WebSocket when the operator switches instruments.
+may use bounded readonly compact `GetOrderBook` refreshes for quote-card
+bid/ask/spread/depth/quality while the data-only collector is stopped.
+Selected-instrument full bid/ask ladder and trade tape come through the selected
+snapshot/details fields; the frontend sends `market.select` over the WebSocket
+when the operator switches instruments.
 Stored `order_book_summary` rows may use broker `instrument_uid`/`figi` while the
 operator UI requests canonical `MOEX:*`; the BFF resolves these aliases so fresh
 collector books can populate quote cards. Stale `GetLastPrices` responses must not
