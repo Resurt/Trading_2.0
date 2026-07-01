@@ -331,15 +331,21 @@ The operator dashboard requests all-source readonly market trades for display so
 the tape does not disappear when exchange-only samples are unavailable. These
 trade rows are display diagnostics, not primary calibration rows.
 If broker `GetLastTrades` returns rows whose `exchange_ts` is older than
-`DASHBOARD_TRADES_MAX_EXCHANGE_AGE_SECONDS`, those rows are diagnostic only:
-they must not populate the live tape table. The selected details should return an
-empty `recent_market_trades` list with `trade_tape_status=stale` and
-`trade_tape_reason=trade_exchange_ts_too_old` and
-`market_trades_source=tbank_get_last_trades`. A fresh order book with a stale
-trade tape is a display limitation, not a data-only logging failure by itself.
+`DASHBOARD_TRADES_MAX_EXCHANGE_AGE_SECONDS`, those rows are diagnostic only and
+must not be labeled live. Rows newer than
+`DASHBOARD_TRADES_DELAYED_DISPLAY_SECONDS` may remain visible as a delayed tape
+with `trade_tape_status=stale`, `trade_tape_reason=trade_exchange_ts_too_old`,
+and `market_trades_source=tbank_get_last_trades`. Older diagnostic rows are
+hidden behind the same explicit stale status/reason. A fresh order book with a
+stale trade tape is a display limitation, not a data-only logging failure by
+itself.
 Data-only collector stream names must include `market_trades`; otherwise the
 dashboard can only report `no_market_trades_samples`/stale diagnostics and cannot
 show a true live tape.
+If `market_trades` is alive but the selected tape remains empty, verify that
+trade-core maps broker `instrument_uid`/`figi` to canonical `MOEX:*` in stream
+payloads. The dashboard joins selected rows by canonical `instrument_id`; broker
+ids are retained only as `broker_instrument_id`.
 Selected order-book refresh must remain below the freshness threshold. The current
 defaults are `DASHBOARD_SELECTED_BOOK_REFRESH_SECONDS=3` and
 `DASHBOARD_ORDER_BOOK_MAX_EXCHANGE_AGE_SECONDS=30`; if operators see an open-market
@@ -351,6 +357,10 @@ The frontend keeps the last full selected ladder through short intermittent
 partial refreshes while that ladder is still inside the freshness budget. If it
 expires, the UI must show the explicit stale/unavailable reason rather than an old
 ladder as live data.
+A full selected ladder means actual `order_book_summary.bids[]` and `.asks[]`
+arrays with at least five levels per side. `depth_levels` without arrays, or a
+single top-of-book row, is a partial refresh/loading state and must not be called
+fresh/full in the operator UI.
 
 Readonly broker quote refresh remains explicit for diagnostics:
 `POST /market/quotes/refresh` may call T-Invest `GetLastPrices`/`GetOrderBook` with

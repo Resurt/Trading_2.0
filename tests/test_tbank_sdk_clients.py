@@ -1136,6 +1136,35 @@ def test_market_data_stream_maps_non_candle_stream_payloads(
         assert subscription_request.with_open_interest is False
 
 
+def test_market_data_stream_maps_broker_uid_to_canonical_instrument_id() -> None:
+    services = FakeServices()
+    client = TBankSdkStreamClient(
+        config=config(),
+        instruments=("uid-sber",),
+        instrument_id_by_broker_id={"uid-sber": "MOEX:SBER"},
+        sdk_module=fake_sdk(),
+        services_factory=services_factory(services),
+    )
+
+    async def first_event() -> JsonPayload:
+        async for event in client.open_market_data_stream(
+            "market_trades",
+            metadata=auth_metadata("readonly-token-for-tests", "Resurt.Trading_2_0"),
+            ping_interval_seconds=30.0,
+        ):
+            assert event.event_type == "market_trade"
+            return event.payload
+        msg = "stream returned no events"
+        raise AssertionError(msg)
+
+    payload = asyncio.run(first_event())
+
+    assert payload["instrument_id"] == "MOEX:SBER"
+    assert payload["instrument_uid"] == "uid-sber"
+    assert payload["broker_instrument_id"] == "uid-sber"
+    assert payload["source"] == "market_trades_stream"
+
+
 def test_order_state_stream_maps_own_order_state_events() -> None:
     services = FakeServices()
     client = TBankSdkStreamClient(

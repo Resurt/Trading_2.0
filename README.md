@@ -398,12 +398,17 @@ Stored `order_book_summary` rows may use broker `instrument_uid`/`figi` while th
 operator UI requests canonical `MOEX:*`; the BFF resolves these aliases so fresh
 collector books can populate quote cards. Stale `GetLastPrices` responses must not
 downgrade a fresh order-book mid. Trade tape has its own freshness status: old
-`GetLastTrades` rows are diagnostic only and must not populate the live tape
-table; the table shows fresh market-trades stream rows or an explicit
-`trade_tape_status`/`trade_tape_reason`.
+`GetLastTrades` rows are diagnostic only and must not be labeled as live. Short
+delayed rows may stay visible as `trade_tape_status=stale`; rows beyond the
+delayed display budget are hidden behind explicit `trade_tape_status`/
+`trade_tape_reason`.
 Selected order-book refresh is intentionally faster than the freshness budget:
 `DASHBOARD_SELECTED_BOOK_REFRESH_SECONDS=3` with
 `DASHBOARD_ORDER_BOOK_MAX_EXCHANGE_AGE_SECONDS=30` by default.
+The selected ladder is considered complete only from actual `bids[]`/`asks[]`
+arrays with at least five levels per side. `depth_levels` without levels, or a
+single top-of-book row, must show as loading/unavailable and must not be rendered
+as a fresh full стакан.
 
 Explicit readonly broker quote refresh remains `POST /market/quotes/refresh`.
 Temporary request failures must not clear already displayed quotes; if the readonly
@@ -425,14 +430,18 @@ order-book snapshots, `received_ts` is the operator-display freshness signal:
 kept as diagnostics and must not by itself flip a recently received book to
 `stale`. Last-price-only, candle, previous-close, OTC/indicative and trade-tape
 fallbacks remain exchange-time gated: stale candles must not be labeled live, and
-old `GetLastTrades` diagnostics are rendered as `trade_tape_status`/
-`trade_tape_reason` with `market_trades_source=tbank_get_last_trades` instead of
-table rows. Short empty/no-samples selected refreshes must not erase an existing
-fresh trade tape or collapse a fresh full order-book ladder; once the freshness
+old `GetLastTrades` diagnostics are rendered as delayed/stale with
+`market_trades_source=tbank_get_last_trades`, never as live rows. Short
+empty/no-samples selected refreshes must not erase an existing fresh or bounded
+delayed trade tape or collapse a fresh full order-book ladder; once the display
 budget expires, the dashboard shows the explicit stale/unavailable reason.
 Dashboard trade tape is readonly display data: it may use all-source broker
 market trades for visibility, but it does not create calibration rows or trading
 entities.
+
+Trade-core canonicalizes stream payloads from broker `instrument_uid`/`figi` to
+`MOEX:*` and keeps the original id as `broker_instrument_id`; dashboard selected
+books and market trades join by canonical `instrument_id`.
 
 After the official session closes, the dashboard must show `Рынок закрыт` /
 `Торги закрыты` from the dashboard feed snapshot. Broker OTC or indicative

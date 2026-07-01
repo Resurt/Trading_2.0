@@ -1213,6 +1213,9 @@ New structured events/payloads:
   `received_age_ms`, `exchange_age_ms`, `stale_by_exchange_time`,
   `freshness_status`, and `freshness_reason`. This event is display-only and must
   not write `market_microstructure_snapshot` calibration logs.
+  `order_book_available=true` requires actual selected `bids[]` and `asks[]`
+  arrays with at least five levels per side; a one-row top-of-book snapshot or
+  `depth_levels` metadata alone is a partial/loading state.
 - `market_instrument_details_read`: local/BFF selected-instrument read for
   `/market/instruments/{instrument_id}/details`. Payload should include
   `instrument_id`, `quote_source`, `quote_status`, `order_book_source`,
@@ -1328,8 +1331,9 @@ tape absence is logged as `no_market_trades_samples`; it is not hidden. Stale
 readonly `GetLastTrades` diagnostics are not analytics samples and must be
 reported with `trade_tape_status=stale`,
 `trade_tape_reason=trade_exchange_ts_too_old`, and
-`market_trades_source=tbank_get_last_trades` rather than being displayed or
-stored as live trade rows.
+`market_trades_source=tbank_get_last_trades`. Rows newer than
+`DASHBOARD_TRADES_DELAYED_DISPLAY_SECONDS` may be displayed as a delayed tape,
+but they must not be stored or labeled as live trade rows.
 
 Data-shadow runtime status exposes supervisor observability separately from
 analytics facts: `supervisor_enabled`, `supervisor_state`,

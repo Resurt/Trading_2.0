@@ -285,6 +285,35 @@ describe("LiveDashboardView", () => {
     expect(wrapper.text()).toContain("нет стакана");
     expect(wrapper.text()).toContain("display-only");
   });
+
+  it("does not render a single top-of-book row as a full selected order book", async () => {
+    const wrapper = mountWithStores();
+    const market = useMarketStore();
+    market.applyOverview({
+      generated_at: "2026-06-13T07:10:30Z",
+      instruments: [
+        {
+          ...quoteFixture("MOEX:SBER", "SBER", "100.05", "live", "live_exchange_order_book"),
+          order_book_summary: {
+            source: "live_exchange_order_book",
+            venue_type: "official_exchange",
+            quote_allowed_for_data_collection: true,
+            include_in_calibration: true,
+            depth_levels: 20,
+            bids: [{ price: "100.00", quantity_lots: "10" }],
+            asks: [{ price: "100.10", quantity_lots: "12" }],
+            best_bid_qty_lots: "10",
+            best_ask_qty_lots: "12",
+          },
+        },
+      ],
+    });
+    await nextTick();
+
+    expect(wrapper.text()).toContain("Стакан пока не получен");
+    expect(wrapper.text()).toContain("Стакан загружается");
+    expect(wrapper.find(".depth-ladder-row").exists()).toBe(false);
+  });
 });
 
 function quoteFixture(
@@ -358,10 +387,16 @@ function quoteFixture(
           bids: [
             { price: "100.00", quantity_lots: "10" },
             { price: "99.98", quantity_lots: "30" },
+            { price: "99.96", quantity_lots: "22" },
+            { price: "99.94", quantity_lots: "18" },
+            { price: "99.92", quantity_lots: "20" },
           ],
           asks: [
             { price: "100.10", quantity_lots: "12" },
             { price: "100.12", quantity_lots: "26" },
+            { price: "100.14", quantity_lots: "18" },
+            { price: "100.16", quantity_lots: "20" },
+            { price: "100.18", quantity_lots: "24" },
           ],
           best_bid_qty_lots: "10",
           best_ask_qty_lots: "12",

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import os
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from uuid import UUID, uuid4
 
@@ -326,6 +328,24 @@ class FakePartialOrderBookGateway(FakeDashboardFeedGateway):
         )
 
 
+class FakeOneLevelOrderBookGateway(FakeDashboardFeedGateway):
+    async def get_order_book(
+        self,
+        request: object,
+        metadata: object = None,
+    ) -> BrokerUnaryResponse:
+        del request, metadata
+        return BrokerUnaryResponse(
+            method_name="GetOrderBook",
+            data={
+                "instrument_uid": "uid-sber",
+                "exchange_ts": datetime.now(tz=UTC).isoformat(),
+                "bids": [{"price": "100.01", "quantity_lots": "7"}],
+                "asks": [{"price": "100.11", "quantity_lots": "8"}],
+            },
+        )
+
+
 class FakeOldFirstTradesGateway(FakeDashboardFeedGateway):
     async def get_last_trades(
         self,
@@ -357,6 +377,60 @@ class FakeOldFirstTradesGateway(FakeDashboardFeedGateway):
                 ]
             },
         )
+
+
+class FakeDelayedTradesGateway(FakeDashboardFeedGateway):
+    async def get_last_trades(
+        self,
+        request: object,
+        metadata: object = None,
+    ) -> BrokerUnaryResponse:
+        del request, metadata
+        now = datetime.now(tz=UTC)
+        return BrokerUnaryResponse(
+            method_name="GetLastTrades",
+            data={
+                "trades": [
+                    {
+                        "instrument_uid": "uid-sber",
+                        "figi": "figi-sber",
+                        "price": "313.30",
+                        "quantity_lots": "7",
+                        "side": "buy",
+                        "ts_utc": (now - timedelta(seconds=30)).isoformat(),
+                    }
+                ]
+            },
+        )
+
+
+class FakeIntermittentTradesGateway(FakeDashboardFeedGateway):
+    def __init__(self) -> None:
+        self.trade_calls = 0
+
+    async def get_last_trades(
+        self,
+        request: object,
+        metadata: object = None,
+    ) -> BrokerUnaryResponse:
+        del request, metadata
+        self.trade_calls += 1
+        now = datetime.now(tz=UTC)
+        trades: list[dict[str, object]]
+        if self.trade_calls == 1:
+            trades = [
+                {
+                    "instrument_uid": "uid-sber",
+                    "figi": "figi-sber",
+                    "price": "313.40",
+                    "quantity_lots": "9",
+                    "side": "buy",
+                    "ts_utc": (now - timedelta(seconds=2)).isoformat(),
+                }
+            ]
+        else:
+            trades = []
+        return BrokerUnaryResponse(method_name="GetLastTrades", data={"trades": trades})
 
 
 def make_client(tmp_path: Path) -> TestClient:
@@ -1717,6 +1791,149 @@ def test_dashboard_market_feed_sorts_last_trades_newest_first(
     assert selected["trade_tape_reason"] == "fresh"
 
 
+def test_dashboard_market_feed_returns_short_delayed_trades_as_stale_rows(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app_module = importlib.import_module("trading_api.app")
+
+    monkeypatch.setenv("DASHBOARD_MARKET_FEED_ENABLED", "true")
+    force_exchange_open(monkeypatch)
+    monkeypatch.setattr(app_module, "_readonly_tbank_gateway", lambda: FakeDelayedTradesGateway())
+    database = DatabaseService(f"sqlite+pysqlite:///{tmp_path / 'dashboard-feed-delayed.db'}")
+    Base.metadata.create_all(database.engine)
+    seed_database(database)
+    app = create_fastapi_app(database=database, report_task_client=FakeReportTaskClient())
+    client = TestClient(app)
+
+    snapshot = client.get(
+        "/dashboard/market-feed/snapshot",
+        headers={"X-API-Role": "observer"},
+        params={
+            "selected_instrument": "MOEX:SBER",
+            "include_order_book": True,
+            "include_trades": True,
+        },
+    ).json()
+
+    selected = snapshot["selected_details"]
+    assert selected["recent_market_trades"][0]["price"] == "313.30"
+    assert selected["market_trades_source"] == "tbank_get_last_trades"
+    assert selected["trade_tape_status"] == "stale"
+    assert selected["trade_tape_reason"] == "trade_exchange_ts_too_old"
+
+
+def test_dashboard_market_feed_preserves_trade_tape_over_empty_get_last_trades(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app_module = importlib.import_module("trading_api.app")
+
+    monkeypatch.setenv("DASHBOARD_MARKET_FEED_ENABLED", "true")
+    monkeypatch.setenv("DASHBOARD_TRADES_REFRESH_SECONDS", "0")
+    force_exchange_open(monkeypatch)
+    gateway = FakeIntermittentTradesGateway()
+    monkeypatch.setattr(app_module, "_readonly_tbank_gateway", lambda: gateway)
+    database = DatabaseService(
+        f"sqlite+pysqlite:///{tmp_path / 'dashboard-feed-intermittent-trades.db'}"
+    )
+    Base.metadata.create_all(database.engine)
+    seed_database(database)
+    app = create_fastapi_app(database=database, report_task_client=FakeReportTaskClient())
+    client = TestClient(app)
+
+    params = {
+        "selected_instrument": "MOEX:SBER",
+        "include_order_book": False,
+        "include_trades": True,
+    }
+    first = client.get(
+        "/dashboard/market-feed/snapshot",
+        headers={"X-API-Role": "observer"},
+        params=params,
+    ).json()
+    second = client.get(
+        "/dashboard/market-feed/snapshot",
+        headers={"X-API-Role": "observer"},
+        params=params,
+    ).json()
+
+    assert first["selected_details"]["recent_market_trades"][0]["price"] == "313.40"
+    assert second["selected_details"]["recent_market_trades"][0]["price"] == "313.40"
+    assert second["status"]["trade_tape_available"] is True
+    assert "no_market_trades_samples" not in second["warnings"]
+
+
+def test_dashboard_market_feed_waits_for_selected_refresh_when_cache_incomplete() -> None:
+    feed_module = importlib.import_module("trading_api.dashboard_market_feed")
+    now = datetime.now(tz=UTC)
+    base_row = MarketInstrumentOverview(
+        instrument_id="MOEX:SBER",
+        ticker="SBER",
+        official_exchange_open=True,
+        quote_source="live_exchange_order_book",
+        last_price_source="live_exchange_order_book",
+        last_price=Decimal("100.05"),
+        last_price_at=now,
+        received_ts=now,
+        exchange_ts=now,
+        stale_by_received_time=False,
+        stale_by_exchange_time=False,
+        is_price_stale=False,
+        freshness_status="fresh",
+        quote_status="live",
+        order_book_source="live_exchange_order_book",
+        order_book_ts=now,
+        order_book_age_ms=500,
+        order_book_stale=False,
+        order_book_summary={
+            "depth_levels": 10,
+            "best_bid_qty_lots": "10",
+            "best_ask_qty_lots": "10",
+        },
+    )
+    overview = MarketOverviewResponse(generated_at=now, instruments=[base_row])
+    ref = SimpleNamespace(
+        instrument_id="MOEX:SBER",
+        ticker="SBER",
+        figi="figi-sber",
+        instrument_uid="uid-sber",
+    )
+    gateway = FakePartialOrderBookGateway()
+    feed = feed_module.DashboardMarketFeedService(
+        config=feed_module.DashboardMarketFeedConfig(
+            quote_refresh_seconds=999,
+            selected_book_refresh_seconds=0,
+            trades_refresh_seconds=999,
+        )
+    )
+
+    async def run() -> dict[str, object]:
+        await feed._refresh_lock.acquire()
+        task = asyncio.create_task(
+            feed.snapshot(
+                base_overview=overview,
+                refs=[ref],
+                selected_instrument="MOEX:SBER",
+                gateway_factory=lambda: gateway,
+                include_order_book=True,
+                include_trades=False,
+            )
+        )
+        await asyncio.sleep(0)
+        assert not task.done()
+        feed._refresh_lock.release()
+        return await asyncio.wait_for(task, timeout=2)
+
+    snapshot = asyncio.run(run())
+    selected = snapshot["selected_details"]
+
+    assert gateway.order_book_calls == 1
+    assert len(selected["order_book_summary"]["bids"]) == 5
+    assert len(selected["order_book_summary"]["asks"]) == 5
+    assert snapshot["status"]["order_book_available"] is True
+
+
 def test_dashboard_market_feed_keeps_full_selected_ladder_over_partial_refresh(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1756,6 +1973,54 @@ def test_dashboard_market_feed_keeps_full_selected_ladder_over_partial_refresh(
     assert len(second["selected_details"]["order_book_summary"]["bids"]) == 5
     assert len(second["selected_details"]["order_book_summary"]["asks"]) == 5
     assert second["selected_details"]["best_bid"] == first["selected_details"]["best_bid"]
+
+
+def test_dashboard_market_feed_does_not_mark_one_level_book_available(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app_module = importlib.import_module("trading_api.app")
+
+    monkeypatch.setenv("DASHBOARD_MARKET_FEED_ENABLED", "true")
+    force_exchange_open(monkeypatch)
+    monkeypatch.setattr(
+        app_module,
+        "_readonly_tbank_gateway",
+        lambda: FakeOneLevelOrderBookGateway(),
+    )
+    database = DatabaseService(f"sqlite+pysqlite:///{tmp_path / 'dashboard-feed-one-level.db'}")
+    Base.metadata.create_all(database.engine)
+    seed_database(database)
+    app = create_fastapi_app(database=database, report_task_client=FakeReportTaskClient())
+    client = TestClient(app)
+
+    snapshot = client.get(
+        "/dashboard/market-feed/snapshot",
+        headers={"X-API-Role": "observer"},
+        params={
+            "selected_instrument": "MOEX:SBER",
+            "include_order_book": True,
+            "include_trades": False,
+        },
+    ).json()
+
+    selected = snapshot["selected_details"]
+    assert len(selected["order_book_summary"]["bids"]) == 1
+    assert len(selected["order_book_summary"]["asks"]) == 1
+    assert snapshot["status"]["order_book_available"] is False
+    assert snapshot["selected_details"]["trade_tape_status"] in {
+        "stale",
+        "no_market_trades_samples",
+    }
+    assert snapshot["selected_details"]["trade_tape_reason"] is not None
+
+    feed_status = client.get(
+        "/dashboard/market-feed/status",
+        headers={"X-API-Role": "observer"},
+    ).json()
+    assert feed_status["order_book_available"] is False
+    assert feed_status["trade_tape_status"] in {"stale", "no_market_trades_samples"}
+    assert feed_status["trade_tape_reason"] is not None
 
 
 def test_market_websocket_uses_dashboard_feed_and_preserves_selection(

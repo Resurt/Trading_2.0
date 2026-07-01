@@ -78,6 +78,7 @@ const COLLECTOR_LABELS: Record<string, string> = {
 const quoteRows = computed(() => market.quoteRows);
 
 const selectedInstrument = computed(() => market.currentInstrument);
+const MIN_SELECTED_ORDER_BOOK_SIDE_LEVELS = 5;
 
 function toneFromQuote(instrument: MarketInstrumentOverview): "good" | "warn" | "muted" {
   if (instrument.quote_status === "live") {
@@ -696,13 +697,53 @@ function collectorNextSessionAt(): string | null | undefined {
   return market.dataShadowStatus.next_session_at ?? nextSessionAt();
 }
 
+function orderBookSideCounts(instrument: MarketInstrumentOverview | null): { bids: number; asks: number } {
+  const summary = instrument?.order_book_summary ?? {};
+  return {
+    bids: Array.isArray(summary.bids) ? summary.bids.length : 0,
+    asks: Array.isArray(summary.asks) ? summary.asks.length : 0,
+  };
+}
+
+function hasFullSelectedOrderBook(instrument: MarketInstrumentOverview | null): boolean {
+  const counts = orderBookSideCounts(instrument);
+  return counts.bids >= MIN_SELECTED_ORDER_BOOK_SIDE_LEVELS && counts.asks >= MIN_SELECTED_ORDER_BOOK_SIDE_LEVELS;
+}
+
 function hasRealOrderBook(instrument: MarketInstrumentOverview | null): boolean {
   return Boolean(
     instrument?.order_book_source &&
       !instrument.order_book_stale &&
       instrument.best_bid &&
-      instrument.best_ask,
+      instrument.best_ask &&
+      hasFullSelectedOrderBook(instrument),
   );
+}
+
+function selectedBidAskValue(instrument: MarketInstrumentOverview | null): string {
+  if (!hasRealOrderBook(instrument)) {
+    return "Стакан загружается";
+  }
+  return `${formatDecimal(instrument?.best_bid, 2)} / ${formatDecimal(instrument?.best_ask, 2)}`;
+}
+
+function selectedMidValue(instrument: MarketInstrumentOverview | null): string {
+  return hasRealOrderBook(instrument) ? formatDecimal(instrument?.mid_price, 2) : "Нет стакана";
+}
+
+function selectedSpreadValue(instrument: MarketInstrumentOverview | null): string {
+  return hasRealOrderBook(instrument) ? formatSpread(instrument) : "Нет стакана";
+}
+
+function selectedDepthValue(instrument: MarketInstrumentOverview | null): string {
+  if (!hasRealOrderBook(instrument)) {
+    return "Нет полного ladder";
+  }
+  return `${formatLots(instrument?.bid_depth_lots)} / ${formatLots(instrument?.ask_depth_lots)}`;
+}
+
+function selectedImbalanceValue(instrument: MarketInstrumentOverview | null): string {
+  return hasRealOrderBook(instrument) ? formatDecimal(instrument?.book_imbalance, 3) : "Нет стакана";
 }
 
 function displayQualityValue(instrument: MarketInstrumentOverview | null): string {
@@ -755,6 +796,10 @@ function orderBookReason(): string {
   if (!instrument) {
     return "instrument_unavailable";
   }
+  if (instrument.order_book_source && !instrument.order_book_stale && !hasFullSelectedOrderBook(instrument)) {
+    const counts = orderBookSideCounts(instrument);
+    return `Полный стакан ещё загружается: bid ${counts.bids}/${MIN_SELECTED_ORDER_BOOK_SIDE_LEVELS}, ask ${counts.asks}/${MIN_SELECTED_ORDER_BOOK_SIDE_LEVELS}.`;
+  }
   if (instrument.order_book_source && !instrument.order_book_stale) {
     if (instrument.official_exchange_closed) {
       return "Брокерская котировка; не для калибровки.";
@@ -777,6 +822,16 @@ function orderBookReason(): string {
     return "Стакан не обновляется: рынок закрыт или брокер отдаёт только последнюю цену.";
   }
   return "Стакан не получен из readonly GetOrderBook. Экран держит последнюю цену и повторяет запрос.";
+}
+
+function orderBookStatusValue(instrument: MarketInstrumentOverview | null): string {
+  if (!instrument?.order_book_source) {
+    return "нет стакана";
+  }
+  if (instrument.order_book_stale) {
+    return "устарел";
+  }
+  return hasFullSelectedOrderBook(instrument) ? "свежий" : "загружается";
 }
 
 function tradeTime(trade: JsonPayload): string {
@@ -987,15 +1042,15 @@ function degradedFlagLabel(flag: string): string {
               :detail="selectedInstrument ? `${sourceLabel(selectedInstrument.last_price_source)} / ${quoteFreshness(selectedInstrument)}` : 'Нет инструмента'"
               :tone="selectedInstrument?.quote_status === 'live' ? 'good' : 'warn'"
             />
-            <MetricTile label="Bid / Ask" :value="`${formatDecimal(selectedInstrument?.best_bid, 2)} / ${formatDecimal(selectedInstrument?.best_ask, 2)}`" />
-            <MetricTile label="Mid" :value="formatDecimal(selectedInstrument?.mid_price, 2)" :detail="formatBps(selectedInstrument?.spread_bps)" />
-            <MetricTile label="Спред" :value="selectedInstrument ? formatSpread(selectedInstrument) : 'Нет данных'" detail="bps / ₽" tone="info" />
-            <MetricTile label="Глубина" :value="`${formatLots(selectedInstrument?.bid_depth_lots)} / ${formatLots(selectedInstrument?.ask_depth_lots)}`" />
-            <MetricTile label="Имбаланс" :value="formatDecimal(selectedInstrument?.book_imbalance, 3)" />
+            <MetricTile label="Bid / Ask" :value="selectedBidAskValue(selectedInstrument)" />
+            <MetricTile label="Mid" :value="selectedMidValue(selectedInstrument)" :detail="hasRealOrderBook(selectedInstrument) ? formatBps(selectedInstrument?.spread_bps) : 'ожидаю полный стакан'" />
+            <MetricTile label="Спред" :value="selectedSpreadValue(selectedInstrument)" detail="bps / ₽" tone="info" />
+            <MetricTile label="Глубина" :value="selectedDepthValue(selectedInstrument)" />
+            <MetricTile label="Имбаланс" :value="selectedImbalanceValue(selectedInstrument)" />
             <MetricTile label="Качество стакана" :value="displayQualityValue(selectedInstrument)" :detail="displayQualityDetail(selectedInstrument)" :tone="displayQualityTone(selectedInstrument)" />
             <MetricTile label="Калибровка" :value="calibrationQualityLabel(selectedInstrument)" :detail="selectedInstrument?.quote_allowed_for_data_collection ? 'можно использовать' : 'display-only'" tone="warn" />
             <MetricTile label="Источник" :value="venueLabel(selectedInstrument?.venue_type)" :detail="selectedInstrument ? sourceLabel(selectedInstrument.quote_source) : 'Нет данных'" />
-            <MetricTile label="Статус стакана" :value="selectedInstrument?.order_book_stale ? 'устарел' : selectedInstrument?.order_book_source ? 'свежий' : 'нет стакана'" :detail="orderBookReason()" />
+            <MetricTile label="Статус стакана" :value="orderBookStatusValue(selectedInstrument)" :detail="orderBookReason()" />
           </div>
 
           <div class="market-depth-layout">

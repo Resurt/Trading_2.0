@@ -110,12 +110,14 @@ class TBankSdkStreamClient:
         *,
         config: TBankBrokerConfig,
         instruments: tuple[str, ...] | None = None,
+        instrument_id_by_broker_id: Mapping[str, str] | None = None,
         depth: int = 20,
         sdk_module: Any | None = None,
         services_factory: ServicesFactory | None = None,
     ) -> None:
         self._config = config
         self._instruments = instruments or _stream_instruments_from_env()
+        self._instrument_id_by_broker_id = dict(instrument_id_by_broker_id or {})
         self._depth = depth
         self._sdk_module = sdk_module
         self._services_factory = services_factory
@@ -145,7 +147,11 @@ class TBankSdkStreamClient:
                 response = await asyncio.to_thread(_next_or_none, response_iterator)
                 if response is None:
                     return
-                for event in stream_events_from_sdk_response(stream_name, response):
+                for event in stream_events_from_sdk_response(
+                    stream_name,
+                    response,
+                    instrument_id_by_broker_id=self._instrument_id_by_broker_id,
+                ):
                     yield event
 
     async def open_order_state_stream(
@@ -292,9 +298,15 @@ def headers_from_sdk_response(response: Any) -> dict[str, object]:
     return headers
 
 
-def stream_events_from_sdk_response(stream_name: str, response: Any) -> tuple[StreamEvent, ...]:
+def stream_events_from_sdk_response(
+    stream_name: str,
+    response: Any,
+    *,
+    instrument_id_by_broker_id: Mapping[str, str] | None = None,
+) -> tuple[StreamEvent, ...]:
     received_at = datetime.now(tz=UTC)
     events: list[StreamEvent] = []
+    aliases = instrument_id_by_broker_id or {}
     if _is_present(_attr(response, "ping")):
         events.append(
             StreamEvent(
@@ -309,7 +321,10 @@ def stream_events_from_sdk_response(stream_name: str, response: Any) -> tuple[St
             StreamEvent(
                 stream_name=stream_name,
                 event_type="candle",
-                payload=_stream_candle_payload(_attr(response, "candle")),
+                payload=_canonical_stream_payload(
+                    _stream_candle_payload(_attr(response, "candle")),
+                    aliases,
+                ),
                 received_at=received_at,
             )
         )
@@ -318,7 +333,10 @@ def stream_events_from_sdk_response(stream_name: str, response: Any) -> tuple[St
             StreamEvent(
                 stream_name=stream_name,
                 event_type="order_book",
-                payload=_order_book_payload(_attr(response, "orderbook")),
+                payload=_canonical_stream_payload(
+                    _order_book_payload(_attr(response, "orderbook")),
+                    aliases,
+                ),
                 received_at=received_at,
             )
         )
@@ -327,7 +345,10 @@ def stream_events_from_sdk_response(stream_name: str, response: Any) -> tuple[St
             StreamEvent(
                 stream_name=stream_name,
                 event_type="last_price",
-                payload=_last_price_payload(_attr(response, "last_price")),
+                payload=_canonical_stream_payload(
+                    _last_price_payload(_attr(response, "last_price")),
+                    aliases,
+                ),
                 received_at=received_at,
             )
         )
@@ -336,7 +357,10 @@ def stream_events_from_sdk_response(stream_name: str, response: Any) -> tuple[St
             StreamEvent(
                 stream_name=stream_name,
                 event_type="trading_status",
-                payload=_trading_status_stream_payload(_attr(response, "trading_status")),
+                payload=_canonical_stream_payload(
+                    _trading_status_stream_payload(_attr(response, "trading_status")),
+                    aliases,
+                ),
                 received_at=received_at,
             )
         )
@@ -345,7 +369,10 @@ def stream_events_from_sdk_response(stream_name: str, response: Any) -> tuple[St
             StreamEvent(
                 stream_name=stream_name,
                 event_type="market_trade",
-                payload=_market_trade_payload(_attr(response, "trade")),
+                payload=_canonical_stream_payload(
+                    _market_trade_payload(_attr(response, "trade")),
+                    aliases,
+                ),
                 received_at=received_at,
             )
         )
@@ -359,6 +386,28 @@ def stream_events_from_sdk_response(stream_name: str, response: Any) -> tuple[St
             )
         )
     return tuple(events)
+
+
+def _canonical_stream_payload(
+    payload: JsonPayload,
+    instrument_id_by_broker_id: Mapping[str, str],
+) -> JsonPayload:
+    if not instrument_id_by_broker_id:
+        return payload
+    broker_id = str(
+        payload.get("instrument_uid")
+        or payload.get("figi")
+        or payload.get("instrument_id")
+        or ""
+    )
+    canonical_id = instrument_id_by_broker_id.get(broker_id)
+    if not canonical_id:
+        return payload
+    return {
+        **payload,
+        "instrument_id": canonical_id,
+        "broker_instrument_id": broker_id,
+    }
 
 
 def _call_sdk_method(sdk: Any, services: Any, method_name: str, payload: JsonPayload) -> Any:

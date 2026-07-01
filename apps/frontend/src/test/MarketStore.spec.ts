@@ -281,10 +281,19 @@ describe("market store", () => {
 
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(apiClientMock.dashboardMarketFeedSnapshot).toHaveBeenCalledWith(
+    expect(apiClientMock.dashboardMarketFeedSnapshot).toHaveBeenNthCalledWith(
+      1,
       expect.objectContaining({
         selected_instrument: "MOEX:GAZP",
         include_order_book: true,
+        include_trades: false,
+      }),
+    );
+    expect(apiClientMock.dashboardMarketFeedSnapshot).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        selected_instrument: "MOEX:GAZP",
+        include_order_book: false,
         include_trades: true,
       }),
     );
@@ -536,6 +545,42 @@ describe("market store", () => {
     expect(market.currentInstrument?.trade_tape_reason).toBe("trade_exchange_ts_too_old");
   });
 
+  it("keeps short delayed GetLastTrades rows across an intermittent no-samples snapshot", () => {
+    const market = useMarketStore();
+    const now = new Date().toISOString();
+    const delayedTradeTs = new Date(Date.now() - 30_000).toISOString();
+    market.applyOverview({
+      generated_at: now,
+      instruments: [
+        instrument({
+          recent_market_trades: [
+            { price: "75.66", exchange_ts: delayedTradeTs, quantity_lots: "3", side: "buy" },
+          ],
+          market_trades_source: "tbank_get_last_trades",
+          market_trades_age_ms: 30_000,
+          trade_tape_status: "stale",
+          trade_tape_reason: "trade_exchange_ts_too_old",
+        }),
+      ],
+    });
+
+    market.applyOverview({
+      generated_at: now,
+      instruments: [
+        instrument({
+          market_trades_source: "no_market_trades_samples",
+          market_trades_age_ms: null,
+          trade_tape_status: "no_market_trades_samples",
+          trade_tape_reason: "no_market_trades_samples",
+        }),
+      ],
+    });
+
+    expect(market.currentInstrument?.recent_market_trades).toHaveLength(1);
+    expect(market.currentInstrument?.market_trades_source).toBe("tbank_get_last_trades");
+    expect(market.currentInstrument?.trade_tape_status).toBe("stale");
+  });
+
   it("keeps fresh trade tape when an intermittent no-samples snapshot arrives", () => {
     const market = useMarketStore();
     const now = new Date().toISOString();
@@ -571,7 +616,7 @@ describe("market store", () => {
     expect(market.currentInstrument?.trade_tape_status).toBe("live");
   });
 
-  it("keeps a full fresh order book when a weaker one-level snapshot arrives", () => {
+  it("keeps a full fresh order book when a weaker top-of-book snapshot arrives", () => {
     const market = useMarketStore();
     const now = new Date().toISOString();
     market.applyOverview({
@@ -638,9 +683,9 @@ describe("market store", () => {
           order_book_age_ms: 300,
           order_book_stale: false,
           order_book_summary: {
-            depth_levels: 2,
-            bids: [{ price: "307.61", quantity_lots: "355" }],
-            asks: [{ price: "307.62", quantity_lots: "19" }],
+            depth_levels: 20,
+            bids: [],
+            asks: [],
           },
         }),
       ],

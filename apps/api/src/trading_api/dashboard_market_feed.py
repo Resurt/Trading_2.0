@@ -27,12 +27,13 @@ class DashboardMarketFeedConfig:
     enabled: bool = True
     quote_refresh_seconds: float = 5.0
     selected_book_refresh_seconds: float = 3.0
-    trades_refresh_seconds: float = 15.0
+    trades_refresh_seconds: float = 3.0
     session_refresh_seconds: float = 30.0
     max_instruments: int = 8
     last_price_max_exchange_age_seconds: float = 30.0
     order_book_max_exchange_age_seconds: float = 30.0
     trades_max_exchange_age_seconds: float = 15.0
+    trades_delayed_display_seconds: float = 60.0
 
     @classmethod
     def from_env(cls) -> DashboardMarketFeedConfig:
@@ -42,7 +43,7 @@ class DashboardMarketFeedConfig:
             selected_book_refresh_seconds=_env_float(
                 "DASHBOARD_SELECTED_BOOK_REFRESH_SECONDS", 3.0
             ),
-            trades_refresh_seconds=_env_float("DASHBOARD_TRADES_REFRESH_SECONDS", 15.0),
+            trades_refresh_seconds=_env_float("DASHBOARD_TRADES_REFRESH_SECONDS", 3.0),
             session_refresh_seconds=_env_float("DASHBOARD_SESSION_REFRESH_SECONDS", 30.0),
             max_instruments=max(1, _env_int("DASHBOARD_FEED_MAX_INSTRUMENTS", 8)),
             last_price_max_exchange_age_seconds=_env_float(
@@ -53,6 +54,9 @@ class DashboardMarketFeedConfig:
             ),
             trades_max_exchange_age_seconds=_env_float(
                 "DASHBOARD_TRADES_MAX_EXCHANGE_AGE_SECONDS", 15.0
+            ),
+            trades_delayed_display_seconds=_env_float(
+                "DASHBOARD_TRADES_DELAYED_DISPLAY_SECONDS", 60.0
             ),
         )
 
@@ -118,10 +122,10 @@ class DashboardMarketFeedService:
             "last_refresh_at": last_refresh.isoformat() if last_refresh is not None else None,
             "selected_instrument": self._selected_instrument,
             "quote_rows_count": len(overview.instruments) if overview else 0,
-            "order_book_available": bool(
-                selected and selected.order_book_source and not selected.order_book_stale
-            ),
+            "order_book_available": _selected_order_book_available(selected),
             "trade_tape_available": bool(selected and selected.recent_market_trades),
+            "trade_tape_status": selected.trade_tape_status if selected else None,
+            "trade_tape_reason": selected.trade_tape_reason if selected else None,
             "broker_calls_paused_until": (
                 self._broker_calls_paused_until.isoformat()
                 if self._broker_calls_paused_until is not None
@@ -171,7 +175,11 @@ class DashboardMarketFeedService:
         self._selected_instrument = selected_id
         overview = _limit_overview(base_overview, self.config.max_instruments)
 
-        if self._refresh_lock.locked():
+        if self._refresh_lock.locked() and _selected_snapshot_cache_satisfies_request(
+            self._selected_details.get(selected_id),
+            include_order_book=include_order_book,
+            include_trades=include_trades,
+        ):
             overview = _merge_overviews(overview, self._overview)
             return self._snapshot_payload(overview, selected_id)
 
@@ -231,13 +239,30 @@ class DashboardMarketFeedService:
         selected_id: str,
     ) -> dict[str, object]:
         self._overview = overview
-        selected_details = self._selected_details.get(selected_id) or next(
+        cached_selected = self._selected_details.get(selected_id)
+        base_selected = next(
             (row for row in overview.instruments if row.instrument_id == selected_id),
             overview.instruments[0] if overview.instruments else None,
         )
+        selected_details = (
+            _prefer_selected_details(base_selected, cached_selected)
+            if base_selected is not None
+            else cached_selected
+        )
+        selected_details = _with_explicit_trade_tape_status(selected_details)
         session_row = selected_details or (
             overview.instruments[0] if overview.instruments else None
         )
+        warnings = _selected_snapshot_warnings(self._warnings[-8:], selected_details)
+        status = {
+            **self.status(),
+            "selected_instrument": selected_id,
+            "order_book_available": _selected_order_book_available(selected_details),
+            "trade_tape_available": bool(
+                selected_details and selected_details.recent_market_trades
+            ),
+            "warnings": warnings,
+        }
         return {
             "generated_at": datetime.now(tz=UTC).isoformat(),
             "source": "dashboard_market_feed",
@@ -250,8 +275,8 @@ class DashboardMarketFeedService:
                 selected_details.model_dump(mode="json") if selected_details is not None else None
             ),
             "errors": list(self._errors[-5:]),
-            "warnings": list(self._warnings[-8:]),
-            "status": self.status(),
+            "warnings": warnings,
+            "status": status,
         }
 
     async def _refresh_quotes_if_needed(
@@ -410,10 +435,16 @@ class DashboardMarketFeedService:
                 instrument=current,
             )
             self._last_trades_refresh_at[selected_instrument] = now
-            trade_update = _visible_trade_tape_update(
-                fetched_trades,
-                source="tbank_get_last_trades",
-            )
+            if fetched_trades:
+                trade_update = _visible_trade_tape_update(
+                    fetched_trades,
+                    source="tbank_get_last_trades",
+                )
+            else:
+                trade_update = _visible_trade_tape_update(
+                    current.recent_market_trades,
+                    source=current.market_trades_source or "order_book_summary_payload",
+                )
             current = current.model_copy(update=trade_update)
             recent_trades = cast(list[dict[str, object]], trade_update["recent_market_trades"])
 
@@ -616,6 +647,9 @@ class DashboardMarketFeedService:
                 )
         normalized.sort(key=_trade_sort_ts, reverse=True)
         normalized = normalized[:limit]
+        if normalized:
+            self._clear_warning("no_market_trades_samples")
+            self._clear_warning("no_market_trades_feed_implemented")
         return normalized
 
     async def _get_order_book(
@@ -1101,7 +1135,39 @@ def _prefer_selected_details(
     preferred = _prefer_live_row(base, cached)
     if not _cached_row_safe_for_base_session(base, cached):
         return preferred
-    return _preserve_fresh_selected_ladder(preferred, cached)
+    preferred = _preserve_fresh_selected_ladder(preferred, cached)
+    return _preserve_visible_trade_tape(preferred, cached)
+
+
+def _selected_snapshot_cache_satisfies_request(
+    selected: MarketInstrumentOverview | None,
+    *,
+    include_order_book: bool,
+    include_trades: bool,
+) -> bool:
+    if selected is None:
+        return False
+    if include_order_book and not _selected_order_book_available(selected):
+        return False
+    return not (include_trades and not _selected_trade_tape_state_available(selected))
+
+
+def _selected_trade_tape_state_available(row: MarketInstrumentOverview) -> bool:
+    if row.recent_market_trades:
+        return True
+    return bool(row.trade_tape_status and row.trade_tape_reason)
+
+
+def _with_explicit_trade_tape_status(
+    row: MarketInstrumentOverview | None,
+) -> MarketInstrumentOverview | None:
+    if row is None:
+        return None
+    if row.trade_tape_status and row.trade_tape_reason:
+        return row
+    trades = row.recent_market_trades or []
+    source = row.market_trades_source or _market_trades_source(trades)
+    return row.model_copy(update=_visible_trade_tape_update(trades, source=source))
 
 
 def _preserve_fresh_selected_ladder(
@@ -1137,8 +1203,18 @@ def _order_book_level_count(row: MarketInstrumentOverview) -> int:
     asks = summary.get("asks")
     bid_count = len(bids) if isinstance(bids, list) else 0
     ask_count = len(asks) if isinstance(asks, list) else 0
-    depth_levels = _safe_int(summary.get("depth_levels"))
-    return max(bid_count + ask_count, depth_levels or 0)
+    return bid_count + ask_count
+
+
+def _selected_order_book_available(row: MarketInstrumentOverview | None) -> bool:
+    if row is None or not row.order_book_source or row.order_book_stale:
+        return False
+    summary = row.order_book_summary if isinstance(row.order_book_summary, dict) else {}
+    bids = summary.get("bids")
+    asks = summary.get("asks")
+    bid_count = len(bids) if isinstance(bids, list) else 0
+    ask_count = len(asks) if isinstance(asks, list) else 0
+    return bid_count >= 5 and ask_count >= 5
 
 
 def _safe_int(value: object) -> int | None:
@@ -1173,6 +1249,57 @@ def _selected_ladder_fields(row: MarketInstrumentOverview) -> dict[str, object]:
         "order_book_stale": row.order_book_stale,
         "order_book_summary": row.order_book_summary,
     }
+
+
+def _preserve_visible_trade_tape(
+    preferred: MarketInstrumentOverview,
+    cached: MarketInstrumentOverview,
+) -> MarketInstrumentOverview:
+    cached_trades = cached.recent_market_trades or []
+    if not cached_trades:
+        return preferred
+    preferred_trades = preferred.recent_market_trades or []
+    cached_newest = _newest_trade_timestamp(cached_trades)
+    preferred_newest = _newest_trade_timestamp(preferred_trades)
+    if (
+        preferred_trades
+        and preferred_newest is not None
+        and cached_newest is not None
+        and preferred_newest > cached_newest
+    ):
+        return preferred
+    if not _can_display_delayed_trade_rows(
+        cached_trades,
+        _market_trades_age_ms(cached_trades),
+        source=cached.market_trades_source,
+    ):
+        status = _trade_tape_status(cached_trades, _market_trades_age_ms(cached_trades))
+        if status != "live":
+            return preferred
+    return preferred.model_copy(
+        update={
+            "recent_market_trades": cached.recent_market_trades,
+            "market_trades_source": cached.market_trades_source,
+            "market_trades_age_ms": _market_trades_age_ms(cached_trades),
+            "trade_tape_status": cached.trade_tape_status,
+            "trade_tape_reason": cached.trade_tape_reason,
+        }
+    )
+
+
+def _newest_trade_timestamp(trades: Sequence[dict[str, object]]) -> datetime | None:
+    newest: datetime | None = None
+    for trade in trades:
+        raw = (
+            trade.get("exchange_ts")
+            or trade.get("ts_utc")
+            or trade.get("time")
+            or trade.get("ts")
+        )
+        parsed = _datetime_or_none(raw)
+        if parsed is not None and (newest is None or parsed > newest):
+            newest = parsed
+    return newest
 
 
 def _replace_instrument(
@@ -1239,6 +1366,25 @@ def _session_payload(instrument: MarketInstrumentOverview | None) -> dict[str, o
         "reason_code": reason,
         "next_session_at": None,
     }
+
+
+def _selected_snapshot_warnings(
+    warnings: Sequence[str],
+    selected: MarketInstrumentOverview | None,
+) -> list[str]:
+    visible = list(warnings)
+    if selected is not None and selected.recent_market_trades:
+        visible = [item for item in visible if item != "no_market_trades_samples"]
+    if (
+        selected is not None
+        and _selected_order_book_available(selected)
+    ):
+        visible = [
+            item
+            for item in visible
+            if item not in {"selected_order_book_stale", "no_order_book_samples"}
+        ]
+    return visible
 
 
 def _clock_session_context(*, market_open: bool) -> tuple[str, str]:
@@ -1324,7 +1470,11 @@ def _visible_trade_tape_update(
     age_ms = _market_trades_age_ms(normalized)
     status = _trade_tape_status(normalized, age_ms)
     reason = _trade_tape_reason(normalized, age_ms)
-    if status == "live":
+    if status == "live" or _can_display_delayed_trade_rows(
+        normalized,
+        age_ms,
+        source=source,
+    ):
         return {
             "recent_market_trades": normalized,
             "market_trades_source": source,
@@ -1343,6 +1493,21 @@ def _visible_trade_tape_update(
         "trade_tape_status": status,
         "trade_tape_reason": reason,
     }
+
+
+def _can_display_delayed_trade_rows(
+    trades: Sequence[dict[str, object]],
+    age_ms: int | None,
+    *,
+    source: str,
+) -> bool:
+    if not trades or age_ms is None:
+        return False
+    if not source.startswith("tbank_get_last_trades"):
+        return False
+    live_age_ms = int(_env_float("DASHBOARD_TRADES_MAX_EXCHANGE_AGE_SECONDS", 15.0) * 1000)
+    delayed_age_ms = int(_env_float("DASHBOARD_TRADES_DELAYED_DISPLAY_SECONDS", 60.0) * 1000)
+    return live_age_ms < age_ms <= delayed_age_ms
 
 
 def _has_stream_trade_rows(instrument: MarketInstrumentOverview) -> bool:

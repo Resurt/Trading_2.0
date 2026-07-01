@@ -93,7 +93,17 @@ class TBankBrokerGateway:
             instrument.instrument_uid or instrument.figi or instrument.instrument_id
             for instrument in instruments
         )
-        self._stream_client = TBankSdkStreamClient(config=self.config, instruments=stream_ids)
+        instrument_id_by_broker_id = {
+            broker_id: instrument.instrument_id
+            for instrument in instruments
+            for broker_id in (instrument.instrument_uid, instrument.figi)
+            if broker_id
+        }
+        self._stream_client = TBankSdkStreamClient(
+            config=self.config,
+            instruments=stream_ids,
+            instrument_id_by_broker_id=instrument_id_by_broker_id,
+        )
 
     async def trading_schedules(
         self,

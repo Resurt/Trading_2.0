@@ -321,7 +321,10 @@ cached selected ladder is about to become stale.
 For `selected_details`, the BFF loads the selected instrument with full
 read-model details before applying readonly broker overlays. A partial
 `GetOrderBook` response with fewer levels must not collapse a fresh stream-backed
-selected ladder.
+selected ladder. `status.order_book_available=true` requires actual
+`order_book_summary.bids` and `.asks` arrays with at least five levels per side;
+`depth_levels` alone is not enough and a one-row top-of-book refresh must be
+reported as loading/unavailable instead of a fresh selected book.
 If the dashboard session is closed, `session.session_type` and
 `session.session_phase` must both be `closed`; broker OTC/indicative availability
 is reported through `venue_type`, `quote_source`, and `trading_mode`, not by
@@ -380,18 +383,24 @@ Price source priority for the dashboard is:
 Stale data must stay visible with `quote_status=stale` and timestamp. A candle from
 an older trading date must not be labeled as current/live.
 
-Trade tape freshness is independent from order-book freshness. Stale
-`GetLastTrades` diagnostics must not populate `recent_market_trades`; return an
-empty trade list with `trade_tape_status=stale` and
-`trade_tape_reason=trade_exchange_ts_too_old` instead. Use
+Trade tape freshness is independent from order-book freshness. Fresh rows use
+`trade_tape_status=live`. Short delayed readonly `GetLastTrades` rows may
+populate `recent_market_trades` only while their newest exchange timestamp is
+within `DASHBOARD_TRADES_DELAYED_DISPLAY_SECONDS`; they must keep
+`trade_tape_status=stale` and `trade_tape_reason=trade_exchange_ts_too_old`, so
+clients render them as delayed, not as a live market stream. Rows older than that
+display budget return an empty list with the same stale status/reason. Use
 `market_trades_source=tbank_get_last_trades` for that diagnostic source; raw
 internal names such as stale diagnostic source variants must not appear in the
-operator UI. Clients must display that as delayed/stale status text, not as
-`live`/`market stream` rows.
+operator UI.
 Dashboard trade tape is display-only. It may use T-Bank all-source market trades
 to avoid an empty exchange-only tape, but those rows are not primary calibration
 rows and must not create `market_microstructure_snapshot`,
 `signal_candidate`, `order_intent`, `broker_order`, or `order_state_event`.
+Trade-core market-data stream payloads must canonicalize broker `instrument_uid`
+or `figi` to the selected dashboard id (`MOEX:*`) before writing read-model
+payloads. The original broker id is retained as `broker_instrument_id`, but the
+dashboard joins selected trades/order books by canonical `instrument_id`.
 
 `POST /market/quotes/refresh` remains an explicit readonly broker path. It accepts
 `quotes_only=true` and `include_order_book=false` defaults. It may call T-Invest

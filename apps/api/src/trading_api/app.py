@@ -2286,7 +2286,10 @@ def _order_book_overview_payload(
     trade_tape_status = _trade_tape_status(raw_recent_market_trades, market_trades_age_ms)
     trade_tape_reason = _trade_tape_reason(raw_recent_market_trades, market_trades_age_ms)
     recent_market_trades = (
-        raw_recent_market_trades if trade_tape_status == "live" else []
+        raw_recent_market_trades
+        if trade_tape_status == "live"
+        or _can_display_delayed_trade_rows(raw_recent_market_trades, market_trades_age_ms)
+        else []
     )
     market_trades_source = (
         "tbank_get_last_trades"
@@ -2645,6 +2648,23 @@ def _trade_tape_reason(trades: list[dict[str, object]], age_ms: int | None) -> s
         * 1000
     )
     return "fresh" if age_ms <= max_age_ms else "trade_exchange_ts_too_old"
+
+
+def _can_display_delayed_trade_rows(
+    trades: list[dict[str, object]],
+    age_ms: int | None,
+) -> bool:
+    if not trades or age_ms is None:
+        return False
+    live_age_ms = int(
+        float(os.environ.get("DASHBOARD_TRADES_MAX_EXCHANGE_AGE_SECONDS", "15"))
+        * 1000
+    )
+    delayed_age_ms = int(
+        float(os.environ.get("DASHBOARD_TRADES_DELAYED_DISPLAY_SECONDS", "60"))
+        * 1000
+    )
+    return live_age_ms < age_ms <= delayed_age_ms
 
 
 def _read_service(request: Request) -> Iterator[BffReadService]:

@@ -29,6 +29,11 @@ const TRANSIENT_DASHBOARD_FEED_ERRORS = new Set([
   "request_timeout",
   "dashboard_market_feed_timeout",
 ]);
+const LIVE_TRADE_TAPE_MAX_AGE_MS = 15 * 1000;
+const DELAYED_TRADE_TAPE_DISPLAY_MAX_AGE_MS = 60 * 1000;
+const SELECTED_ORDER_BOOK_MIN_SIDE_LEVELS = 5;
+const SELECTED_ORDER_BOOK_RETRY_LIMIT = 30;
+const SELECTED_ORDER_BOOK_RETRY_MS = 1000;
 const CORE_INSTRUMENT_ORDER = new Map(
   CORE_INSTRUMENT_IDS.map((instrumentId, index) => [instrumentId, index]),
 );
@@ -128,8 +133,11 @@ export const useMarketStore = defineStore("market", () => {
   let dashboardFeedInFlight = false;
   let quoteRefreshInFlight = false;
   let selectedDetailsInFlight = false;
+  let selectedTradesInFlight = false;
   let dataShadowStatusInFlight = false;
   let selectedDetailsRequestId = 0;
+  let selectedOrderBookRetryCount = 0;
+  let selectedOrderBookRetryTimer: number | null = null;
 
   const currentInstrument = computed<MarketInstrumentOverview | null>(() => {
     if (overview.value.instruments.length === 0) {
@@ -261,6 +269,13 @@ export const useMarketStore = defineStore("market", () => {
   }
 
   async function refreshSelectedInstrumentDetails(): Promise<void> {
+    if (selectedDetailsInFlight) {
+      const pendingInstrumentId = selectedInstrumentId.value ?? currentInstrument.value?.instrument_id;
+      if (pendingInstrumentId && shouldRetrySelectedOrderBook(currentInstrument.value)) {
+        scheduleSelectedOrderBookRetry(pendingInstrumentId);
+      }
+      return;
+    }
     const instrument = currentInstrument.value;
     const instrumentId = instrument?.instrument_id ?? selectedInstrumentId.value;
     if (!instrumentId) {
@@ -274,17 +289,28 @@ export const useMarketStore = defineStore("market", () => {
       const snapshot = await apiClient.dashboardMarketFeedSnapshot({
         selected_instrument: instrumentId,
         include_order_book: true,
-        include_trades: true,
+        include_trades: false,
       });
       if (requestId === selectedDetailsRequestId && selectedInstrumentId.value === instrumentId) {
         clearWarning("selected_instrument_details_unavailable");
         applyDashboardFeedSnapshot(snapshot, instrumentId);
+        const applied = currentInstrument.value;
+        if (shouldRetrySelectedOrderBook(applied)) {
+          scheduleSelectedOrderBookRetry(instrumentId);
+        } else {
+          selectedOrderBookRetryCount = 0;
+          clearSelectedOrderBookRetry();
+        }
+        void refreshSelectedInstrumentTrades(instrumentId, requestId);
       } else if (snapshot.selected_details) {
         applyOverview({ generated_at: snapshot.generated_at, instruments: [snapshot.selected_details] });
       }
     } catch (unknownError) {
       if (requestId === selectedDetailsRequestId) {
         recordWarning("selected_instrument_details_unavailable");
+        if (selectedInstrumentId.value === instrumentId && shouldRetrySelectedOrderBook(currentInstrument.value)) {
+          scheduleSelectedOrderBookRetry(instrumentId);
+        }
       }
       if (overview.value.instruments.length === 0) {
         error.value = unknownError instanceof Error ? unknownError.message : "Selected market details failed";
@@ -295,6 +321,52 @@ export const useMarketStore = defineStore("market", () => {
         selectedDetailsInFlight = false;
       }
     }
+  }
+
+  async function refreshSelectedInstrumentTrades(
+    instrumentId: string,
+    requestId: number,
+  ): Promise<void> {
+    if (selectedTradesInFlight || selectedInstrumentId.value !== instrumentId) {
+      return;
+    }
+    selectedTradesInFlight = true;
+    try {
+      const snapshot = await apiClient.dashboardMarketFeedSnapshot({
+        selected_instrument: instrumentId,
+        include_order_book: false,
+        include_trades: true,
+      });
+      if (requestId === selectedDetailsRequestId && selectedInstrumentId.value === instrumentId) {
+        applyDashboardFeedSnapshot(snapshot, instrumentId);
+      }
+    } catch {
+      recordWarning("selected_market_trades_unavailable");
+    } finally {
+      selectedTradesInFlight = false;
+    }
+  }
+
+  function scheduleSelectedOrderBookRetry(instrumentId: string): void {
+    if (selectedOrderBookRetryCount >= SELECTED_ORDER_BOOK_RETRY_LIMIT) {
+      return;
+    }
+    selectedOrderBookRetryCount += 1;
+    clearSelectedOrderBookRetry();
+    selectedOrderBookRetryTimer = window.setTimeout(() => {
+      selectedOrderBookRetryTimer = null;
+      if (selectedInstrumentId.value === instrumentId) {
+        void refreshSelectedInstrumentDetails();
+      }
+    }, SELECTED_ORDER_BOOK_RETRY_MS);
+  }
+
+  function clearSelectedOrderBookRetry(): void {
+    if (selectedOrderBookRetryTimer === null) {
+      return;
+    }
+    window.clearTimeout(selectedOrderBookRetryTimer);
+    selectedOrderBookRetryTimer = null;
   }
 
   function applyDashboardFeedSnapshot(
@@ -502,6 +574,7 @@ export const useMarketStore = defineStore("market", () => {
       window.clearInterval(selectedDetailsTimer);
       selectedDetailsTimer = null;
     }
+    clearSelectedOrderBookRetry();
   }
 
   function startMarketPolling(
@@ -517,6 +590,8 @@ export const useMarketStore = defineStore("market", () => {
   }
 
   watch(selectedInstrumentId, () => {
+    selectedOrderBookRetryCount = 0;
+    clearSelectedOrderBookRetry();
     sendMarketSelection();
     void refreshSelectedInstrumentDetails();
   });
@@ -746,17 +821,24 @@ function withPreservedRecentTrades(
 }
 
 function isTradeTapeStillFresh(instrument: MarketInstrumentOverview): boolean {
+  const ageMs = tradeTapeAgeMs(instrument);
+  if (
+    instrument.trade_tape_status === "stale" &&
+    instrument.trade_tape_reason === "trade_exchange_ts_too_old" &&
+    instrument.market_trades_source === "tbank_get_last_trades"
+  ) {
+    return ageMs !== null && ageMs <= DELAYED_TRADE_TAPE_DISPLAY_MAX_AGE_MS;
+  }
   if (instrument.trade_tape_status && !["live", "fresh"].includes(instrument.trade_tape_status)) {
     return false;
   }
-  const ageMs = tradeTapeAgeMs(instrument);
   if (ageMs !== null) {
-    return ageMs <= 15 * 1000;
+    return ageMs <= LIVE_TRADE_TAPE_MAX_AGE_MS;
   }
   if (instrument.market_trades_age_ms === null || instrument.market_trades_age_ms === undefined) {
     return false;
   }
-  return Number(instrument.market_trades_age_ms) <= 15 * 1000;
+  return Number(instrument.market_trades_age_ms) <= LIVE_TRADE_TAPE_MAX_AGE_MS;
 }
 
 function tradeTapeAgeMs(instrument: MarketInstrumentOverview): number | null {
@@ -813,11 +895,24 @@ function orderBookLevelCount(instrument: MarketInstrumentOverview): number {
   const summary = instrument.order_book_summary ?? {};
   const bids = Array.isArray(summary.bids) ? summary.bids.length : 0;
   const asks = Array.isArray(summary.asks) ? summary.asks.length : 0;
-  const depthLevels = Number(summary.depth_levels);
-  if (Number.isFinite(depthLevels) && depthLevels > bids + asks) {
-    return depthLevels;
-  }
   return bids + asks;
+}
+
+function hasDisplayedSelectedOrderBook(instrument: MarketInstrumentOverview | null): boolean {
+  const summary = instrument?.order_book_summary ?? {};
+  const bids = Array.isArray(summary.bids) ? summary.bids.length : 0;
+  const asks = Array.isArray(summary.asks) ? summary.asks.length : 0;
+  return bids >= SELECTED_ORDER_BOOK_MIN_SIDE_LEVELS && asks >= SELECTED_ORDER_BOOK_MIN_SIDE_LEVELS;
+}
+
+function shouldRetrySelectedOrderBook(instrument: MarketInstrumentOverview | null): boolean {
+  if (!instrument || !instrument.official_exchange_open) {
+    return false;
+  }
+  if (instrument.order_book_stale) {
+    return true;
+  }
+  return !hasDisplayedSelectedOrderBook(instrument);
 }
 
 function orderBookSnapshotFields(

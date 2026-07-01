@@ -17,12 +17,10 @@ const props = defineProps<{
   instrument: MarketInstrumentOverview | null;
 }>();
 
-const bids = computed(() =>
-  levelsFromSummary("bids", "bid", props.instrument?.best_bid, props.instrument?.order_book_summary.best_bid_qty_lots),
-);
-const asks = computed(() =>
-  levelsFromSummary("asks", "ask", props.instrument?.best_ask, props.instrument?.order_book_summary.best_ask_qty_lots),
-);
+const MIN_LADDER_SIDE_LEVELS = 5;
+
+const bids = computed(() => levelsFromSummary("bids", "bid"));
+const asks = computed(() => levelsFromSummary("asks", "ask"));
 const rowCount = computed(() => Math.max(bids.value.length, asks.value.length));
 const rows = computed(() =>
   Array.from({ length: rowCount.value }, (_, index) => ({
@@ -33,7 +31,9 @@ const rows = computed(() =>
 const maxQuantity = computed(() =>
   Math.max(1, ...bids.value.map((level) => level.quantity), ...asks.value.map((level) => level.quantity)),
 );
-const hasBook = computed(() => bids.value.length > 0 || asks.value.length > 0);
+const hasBook = computed(
+  () => bids.value.length >= MIN_LADDER_SIDE_LEVELS && asks.value.length >= MIN_LADDER_SIDE_LEVELS,
+);
 const bookClock = computed(() => timeOnly(props.instrument?.order_book_ts ?? props.instrument?.last_price_at));
 const bookSource = computed(() => {
   if (!props.instrument?.order_book_source) {
@@ -56,8 +56,6 @@ const bookSourceLabel = computed(() => {
 function levelsFromSummary(
   key: "bids" | "asks",
   side: BookSide,
-  fallbackPrice: string | null | undefined,
-  fallbackQuantity: unknown,
 ): BookLevel[] {
   const raw = props.instrument?.order_book_summary[key];
   const parsed = Array.isArray(raw)
@@ -70,8 +68,7 @@ function levelsFromSummary(
       side === "bid" ? right.price - left.price : left.price - right.price,
     );
   }
-  const fallback = levelFromValues(fallbackPrice, fallbackQuantity);
-  return fallback ? [fallback] : [];
+  return [];
 }
 
 function levelFromPayload(value: unknown): BookLevel | null {

@@ -119,7 +119,9 @@ Default freshness thresholds are backend-configurable:
 - `DASHBOARD_LAST_PRICE_MAX_EXCHANGE_AGE_SECONDS=30`
 - `DASHBOARD_SELECTED_BOOK_REFRESH_SECONDS=3`
 - `DASHBOARD_ORDER_BOOK_MAX_EXCHANGE_AGE_SECONDS=30`
+- `DASHBOARD_TRADES_REFRESH_SECONDS=3`
 - `DASHBOARD_TRADES_MAX_EXCHANGE_AGE_SECONDS=15`
+- `DASHBOARD_TRADES_DELAYED_DISPLAY_SECONDS=60`
 
 ## Order Book
 
@@ -148,11 +150,21 @@ for example:
 
 Missing order book must not block the quote board.
 
+For the selected-instrument ladder, `depth_levels` is only metadata. The UI and
+BFF must count actual `order_book_summary.bids` and `.asks` arrays. A selected
+order book is display-complete only when at least five bid levels and five ask
+levels are present and fresh; one top-of-book bid/ask row must be shown as
+loading/unavailable, not as a fresh full book.
+
 When a selected-instrument refresh returns a weaker snapshot, such as one
 book level or no levels, while the previous full ladder is still fresh by
 receipt time, the frontend keeps the previous full ladder until the order-book
 freshness budget expires. A transient partial refresh must not collapse a visible
 10-level ladder to a one-row or empty ladder.
+If the selected instrument still lacks a display-complete ladder after a short
+broker/dashboard pause, the frontend keeps retrying selected details for up to
+about 30 seconds instead of stopping after a few attempts and leaving the panel
+stuck in an empty/loading state.
 
 The BFF also builds `selected_details` from the full read-model row for the
 selected instrument before applying readonly broker refresh overlays. A thin
@@ -186,15 +198,21 @@ Supported status values include:
 Absence of trades must not hide quotes or order-book status. The UI must show the
 status/reason plainly.
 
+Trade rows from the collector stream must be keyed by canonical `MOEX:*`
+`instrument_id`, not only by broker UID/FIGI. The original broker identifier may
+be retained as `broker_instrument_id`, but selected dashboard joins use the
+canonical id so SBER/GAZP/... switches do not lose the tape.
+
 If readonly last trades are present but their exchange timestamp is older than the
 configured threshold, the UI must show the tape as delayed/stale, for example
 `trade_tape_status=stale` and `trade_tape_reason=trade_exchange_ts_too_old`. It
-must not label those rows as a live market stream and must not render them as
-live tape rows. The table is reserved for fresh market-trades stream samples (or
-fresh readonly snapshots when explicitly marked as such); stale diagnostic
-`GetLastTrades` rows are represented only by status/reason text. Stale
-`GetLastTrades` diagnostics use `market_trades_source=tbank_get_last_trades`;
-raw diagnostic source names must not be rendered in the operator UI.
+must not label those rows as a live market stream. Short delayed readonly
+`GetLastTrades` rows may remain visible in the table until
+`DASHBOARD_TRADES_DELAYED_DISPLAY_SECONDS`, but the badge must say that the tape
+is delayed. Rows older than that display budget are hidden and represented only
+by status/reason text. Stale `GetLastTrades` diagnostics use
+`market_trades_source=tbank_get_last_trades`; raw diagnostic source names must
+not be rendered in the operator UI.
 
 The frontend may preserve the last fresh trade tape across an intermittent empty
 or `no_market_trades_samples` refresh only while the newest trade exchange
