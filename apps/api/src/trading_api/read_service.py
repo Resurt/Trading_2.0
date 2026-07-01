@@ -11,6 +11,7 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -419,10 +420,10 @@ class BffReadService:
     ) -> JsonPayload:
         now = datetime.now(tz=UTC)
         order_book_max_age_seconds = _dashboard_order_book_max_age_seconds()
-        registry = self._instrument_registry_row(instrument_id)
-        summary = self._latest_order_book_summary(instrument_id, registry=registry)
         candle = self._latest_market_candle(instrument_id)
         previous_close = self._previous_close(instrument_id, current_session.trading_date)
+        registry = self._instrument_registry_row(instrument_id)
+        summary = self._latest_order_book_summary(instrument_id, registry=registry)
         official_exchange_closed = official_decision.official_exchange_closed
         official_exchange_open = (
             not official_exchange_closed
@@ -750,31 +751,39 @@ class BffReadService:
         ).scalars().first()
 
     def _latest_market_candle(self, instrument_id: str) -> MarketCandle | None:
-        candle = self._session.execute(
-            select(MarketCandle)
-            .where(
-                MarketCandle.instrument_id == instrument_id,
-                MarketCandle.timeframe == "1m",
-            )
-            .order_by(MarketCandle.open_ts_utc.desc())
-            .limit(1)
-        ).scalars().first()
-        if candle is not None:
-            return candle
-        return self._session.execute(
-            select(MarketCandle)
-            .where(MarketCandle.instrument_id == instrument_id)
-            .order_by(MarketCandle.open_ts_utc.desc())
-            .limit(1)
-        ).scalars().first()
+        try:
+            candle = self._session.execute(
+                select(MarketCandle)
+                .where(
+                    MarketCandle.instrument_id == instrument_id,
+                    MarketCandle.timeframe == "1m",
+                )
+                .order_by(MarketCandle.open_ts_utc.desc())
+                .limit(1)
+            ).scalars().first()
+            if candle is not None:
+                return candle
+            return self._session.execute(
+                select(MarketCandle)
+                .where(MarketCandle.instrument_id == instrument_id)
+                .order_by(MarketCandle.open_ts_utc.desc())
+                .limit(1)
+            ).scalars().first()
+        except SQLAlchemyError:
+            self._session.rollback()
+            return None
 
     def _previous_close(self, instrument_id: str, trading_date: date | None) -> Decimal | None:
         stmt = select(MarketCandle).where(MarketCandle.instrument_id == instrument_id)
         if trading_date is not None:
             stmt = stmt.where(MarketCandle.trading_date < trading_date)
-        candle = self._session.execute(
-            stmt.order_by(MarketCandle.close_ts_utc.desc()).limit(1)
-        ).scalars().first()
+        try:
+            candle = self._session.execute(
+                stmt.order_by(MarketCandle.close_ts_utc.desc()).limit(1)
+            ).scalars().first()
+        except SQLAlchemyError:
+            self._session.rollback()
+            return None
         return candle.close_price if candle is not None else None
 
     def latest_microstructure(

@@ -12,7 +12,8 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import Executable, select
+from sqlalchemy.exc import OperationalError
 from starlette.websockets import WebSocketDisconnect
 
 from trade_core.broker_gateway import BrokerUnaryResponse
@@ -1578,6 +1579,56 @@ def test_market_overview_resolves_order_book_summary_by_broker_alias(
     assert sber.best_ask == Decimal("100.1000")
     assert sber.mid_price == Decimal("100.0500")
     assert sber.freshness_status == "fresh"
+
+
+def test_market_overview_keeps_order_book_when_candle_fallback_query_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    force_exchange_open(monkeypatch)
+    database = DatabaseService(f"sqlite+pysqlite:///{tmp_path / 'quotes-candle-error.db'}")
+    Base.metadata.create_all(database.engine)
+    seed_database(database)
+    now = datetime.now(tz=UTC)
+    with database.session_scope() as session:
+        summary = session.execute(
+            select(OrderBookSummary).where(OrderBookSummary.instrument_id == "MOEX:SBER")
+        ).scalars().one()
+        summary.ts_utc = now
+        summary.exchange_ts = now
+        summary.received_ts = now
+
+    with database.session_scope() as session:
+        original_execute = session.execute
+
+        def flaky_execute(
+            statement: Executable,
+            params: Any = None,
+            **kwargs: Any,
+        ) -> Any:
+            entities = [
+                description.get("entity")
+                for description in getattr(statement, "column_descriptions", [])
+            ]
+            if MarketCandle in entities:
+                raise OperationalError(
+                    "select market_candle",
+                    {},
+                    RuntimeError("candle fallback unavailable"),
+                )
+            return original_execute(statement, params, **kwargs)
+
+        monkeypatch.setattr(session, "execute", flaky_execute)
+        service = BffReadService(session)
+        overview = service.market_overview(
+            preflight=preflight_response(market_open=True, reason_code="market_open"),
+        )
+
+    sber = next(row for row in overview.instruments if row.instrument_id == "MOEX:SBER")
+    assert sber.last_price_source == "live_exchange_order_book"
+    assert sber.order_book_source == "live_exchange_order_book"
+    assert sber.best_bid == Decimal("100.0000")
+    assert sber.best_ask == Decimal("100.1000")
 
 
 def test_market_overview_uses_dashboard_order_book_freshness_budget(
