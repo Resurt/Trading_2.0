@@ -21,7 +21,7 @@ from sys import path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 ROOT = Path(__file__).resolve().parents[1]
 for src in (ROOT, ROOT / "packages" / "common" / "src"):
@@ -29,7 +29,11 @@ for src in (ROOT, ROOT / "packages" / "common" / "src"):
         path.insert(0, str(src))
 
 from trading_common.db.config import build_database_url_from_env
-from trading_common.db.models import InstrumentRegistry, MarketMicrostructureSnapshot
+from trading_common.db.models import (
+    InstrumentRegistry,
+    MarketMicrostructureSnapshot,
+    MarketTradeSample,
+)
 from trading_common.db.service import DatabaseService
 
 MSK = ZoneInfo("Europe/Moscow")
@@ -116,6 +120,14 @@ def main() -> None:
                 )
             ).scalars()
         )
+        trade_tape_sample_count = int(
+            session.scalar(
+                select(func.count())
+                .select_from(MarketTradeSample)
+                .where(MarketTradeSample.trading_date == args.date)
+            )
+            or 0
+        )
     points = _price_points(rows, aliases)
     bars = _build_pseudo_bars(points, timeframes=(1, 5, 10, 15))
     windows = _forward_windows(points, bars)
@@ -128,6 +140,7 @@ def main() -> None:
         bars=bars,
         windows=windows,
         known_windows=known,
+        trade_tape_sample_count=trade_tape_sample_count,
     )
     if args.json_output:
         print(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
@@ -420,6 +433,7 @@ def _payload(
     bars: list[PseudoBar],
     windows: list[ForwardWindow],
     known_windows: list[dict[str, Any]],
+    trade_tape_sample_count: int,
 ) -> dict[str, Any]:
     valid = [
         window for window in windows if window.horizon_valid and window.net_bps_proxy is not None
@@ -437,6 +451,29 @@ def _payload(
         "strategy_config_mutated": False,
         "requested_instruments": list(requested_instruments),
         "rows_read": len(rows),
+        "exchange_ts_present_count": sum(1 for row in rows if row.exchange_ts is not None),
+        "exchange_ts_missing_count": sum(1 for row in rows if row.exchange_ts is None),
+        "received_ts_only_count": sum(
+            1 for row in rows if row.freshness_basis == "received_ts_only"
+        ),
+        "strict_dual_freshness_eligible_count": sum(
+            1 for row in rows if row.strict_dual_freshness_eligible
+        ),
+        "freshness_basis_distribution": dict(
+            sorted(
+                {
+                    str(row.freshness_basis or "unknown"): sum(
+                        1
+                        for candidate in rows
+                        if str(candidate.freshness_basis or "unknown")
+                        == str(row.freshness_basis or "unknown")
+                    )
+                    for row in rows
+                }.items()
+            )
+        ),
+        "trade_tape_sample_count": trade_tape_sample_count,
+        "tape_confirmed_candidate_count": 0,
         "valid_price_points": len(points),
         "pseudo_bars_count": len(bars),
         "forward_windows_count": len(windows),

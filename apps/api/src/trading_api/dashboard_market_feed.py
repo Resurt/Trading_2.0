@@ -395,6 +395,14 @@ class DashboardMarketFeedService:
             ref: Any,
         ) -> tuple[str, dict[str, object] | None]:
             async with semaphore:
+                status_payload = await self._get_trading_status(
+                    gateway=gateway,
+                    ref=ref,
+                    instrument=instrument,
+                    record_warnings=False,
+                )
+                if status_payload is not None:
+                    instrument = instrument.model_copy(update=status_payload)
                 payload = await self._get_order_book(
                     gateway=gateway,
                     ref=ref,
@@ -522,6 +530,9 @@ class DashboardMarketFeedService:
             self._last_status_refresh_at[selected_instrument] = now
             if status_payload is not None:
                 current = current.model_copy(update=status_payload)
+                if cached is not None:
+                    current = _preserve_fresh_selected_ladder(current, cached)
+                    current = _preserve_visible_trade_tape(current, cached)
 
         trade_update = _visible_trade_tape_update(
             current.recent_market_trades,
@@ -616,6 +627,7 @@ class DashboardMarketFeedService:
         gateway: Any,
         ref: Any,
         instrument: MarketInstrumentOverview,
+        record_warnings: bool = True,
     ) -> dict[str, object] | None:
         try:
             from trade_core.broker_gateway import TradingStatusRequest
@@ -626,12 +638,14 @@ class DashboardMarketFeedService:
                 timeout_seconds=timeout_seconds,
             )
         except AttributeError:
-            self._record_warning("dashboard_trading_status_not_implemented")
+            if record_warnings:
+                self._record_warning("dashboard_trading_status_not_implemented")
             return None
         except Exception as exc:
-            self._record_warning(
-                _reason_from_exception(exc, "dashboard_trading_status_unavailable")
-            )
+            if record_warnings:
+                self._record_warning(
+                    _reason_from_exception(exc, "dashboard_trading_status_unavailable")
+                )
             return None
         raw_status = str(
             response.data.get("trading_status")
@@ -651,7 +665,6 @@ class DashboardMarketFeedService:
             api_trade_available
             and _status_is_open(normalized_status)
             and not instrument.official_exchange_closed
-            and instrument.api_trade_available is not False
         )
         session_type, session_phase = _clock_session_context(market_open=market_open)
         venue_type = (
@@ -668,7 +681,8 @@ class DashboardMarketFeedService:
             if instrument.official_exchange_closed
             else "market_closed_expected"
         )
-        self._clear_warning("dashboard_trading_status_unavailable")
+        if record_warnings:
+            self._clear_warning("dashboard_trading_status_unavailable")
         return {
             "session_type": session_type,
             "official_exchange_open": market_open,
@@ -826,9 +840,16 @@ class DashboardMarketFeedService:
                     )
                 )
             return None
+        official_exchange_open = bool(
+            not instrument.official_exchange_closed
+            and (
+                instrument.official_exchange_open
+                or instrument.session_phase == "continuous_trading"
+            )
+        )
         payload = _order_book_overview_payload(
             response.data,
-            official_exchange_open=instrument.official_exchange_open,
+            official_exchange_open=official_exchange_open,
             official_exchange_closed=instrument.official_exchange_closed,
             recent_market_trades=recent_trades,
             max_exchange_age_seconds=self.config.order_book_max_exchange_age_seconds,
@@ -1278,6 +1299,13 @@ def _prefer_selected_details(
         return base
     preferred = _prefer_live_row(base, cached)
     if not _cached_row_safe_for_base_session(base, cached):
+        if not base.official_exchange_closed:
+            if (
+                _selected_ladder_display_fresh(cached)
+                and _order_book_level_count(cached) > _order_book_level_count(preferred)
+            ):
+                preferred = preferred.model_copy(update=_selected_ladder_fields(cached))
+            preferred = _preserve_visible_trade_tape(preferred, cached)
         return preferred
     preferred = _preserve_fresh_selected_ladder(preferred, cached)
     return _preserve_visible_trade_tape(preferred, cached)

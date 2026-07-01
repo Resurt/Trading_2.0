@@ -79,6 +79,26 @@ include `reason` with one of `crossed_book`, `invalid_spread`, `invalid_depth`,
 not create `signal_candidate`, `order_intent`, `broker_order`, pseudo-orders, or
 real broker calls.
 
+Data-only exchange timestamp semantics:
+
+- `exchange_ts` is the broker/exchange event timestamp when the source payload
+  provides one.
+- `received_ts` is the local receive/write timestamp.
+- `received_ts` must never be copied into `exchange_ts`.
+- If `exchange_ts` is absent, rows are marked
+  `freshness_basis=received_ts_only`,
+  `strict_dual_freshness_eligible=false`, and
+  `exchange_ts_missing_reason` explains why.
+- `received_ts_only` rows may be used for partial diagnostics, but strict
+  dual-freshness calibration requires exchange-timestamp-confirmed rows.
+
+Data-only trade tape persistence stores real broker market-trade events in
+`market_trade_sample`. Empty `GetLastTrades` responses or missing stream trades
+produce explicit status/reason diagnostics and must not create fake trade rows.
+Daily trend and summary reports expose `trade_tape_sample_count` and
+`tape_confirmed_candidate_count`; on one-day diagnostics, missing tape means
+windows are order-book/mid confirmed only.
+
 ## JSON structured logging
 
 Технические логи пишутся в JSON через стандартный Python logging.

@@ -211,6 +211,21 @@ exchange session.
 | `GET` | `/config/strategy` | Прочитать strategy config. |
 | `PUT` | `/config/strategy` | Обновить strategy config через audited change. |
 
+Data-only analytics/report JSON includes durable freshness/tape counters:
+`exchange_ts_present_count`, `exchange_ts_missing_count`,
+`received_ts_only_count`, `strict_dual_freshness_eligible_count`,
+`freshness_basis_distribution`, `trade_tape_sample_count`, and
+`tape_confirmed_candidate_count`. `received_ts_only` means the row can be used
+for partial diagnostics, not strict dual-freshness calibration.
+
+The maintenance script
+`scripts/run_live_exchange_ts_trade_tape_diagnostic.py` is the operator command
+for open-market verification of broker `exchange_ts` and persisted trade tape.
+When `/session/preflight` reports a closed market, the script exits with
+`market_closed_live_diagnostic_not_run`; closed-market payloads must not be used
+as proof that the broker does or does not provide `exchange_ts` or trades during
+open trading.
+
 ## `/robot/status`
 
 Реализованные поля:

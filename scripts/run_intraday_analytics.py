@@ -11,6 +11,8 @@ from pathlib import Path
 from sys import path
 from typing import Any
 
+from sqlalchemy import func, select
+
 ROOT = Path(__file__).resolve().parents[1]
 for src in (
     ROOT / "apps" / "report-worker" / "src",
@@ -21,6 +23,7 @@ for src in (
 
 from report_worker.analytics.calibration_observatory import IntradayAnalyticsService
 from trading_common.db.config import build_database_url_from_env
+from trading_common.db.models import MarketMicrostructureSnapshot, MarketTradeSample
 from trading_common.db.service import DatabaseService
 
 
@@ -73,6 +76,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 payload = service.build_for_trading_date(args.trading_date, mode=args.mode)
             else:
                 payload = service.build_current_day_snapshot()
+            if args.trading_date:
+                payload["exchange_ts_metadata"] = _exchange_ts_metadata(
+                    session,
+                    trading_date=args.trading_date,
+                )
         output_dir = Path(args.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         name = _output_name(args)
@@ -95,6 +103,41 @@ def _output_name(args: argparse.Namespace) -> str:
     if args.session_type:
         return f"intraday_{trading_date}_{args.session_type}.json"
     return f"intraday_{trading_date}.json"
+
+
+def _exchange_ts_metadata(session: Any, *, trading_date: date) -> dict[str, int | dict[str, int]]:
+    rows = list(
+        session.execute(
+            select(
+                MarketMicrostructureSnapshot.exchange_ts,
+                MarketMicrostructureSnapshot.freshness_basis,
+                MarketMicrostructureSnapshot.strict_dual_freshness_eligible,
+            ).where(MarketMicrostructureSnapshot.trading_date == trading_date)
+        )
+    )
+    trade_tape_sample_count = int(
+        session.scalar(
+            select(func.count())
+            .select_from(MarketTradeSample)
+            .where(MarketTradeSample.trading_date == trading_date)
+        )
+        or 0
+    )
+    basis: dict[str, int] = {}
+    for row in rows:
+        key = str(row.freshness_basis or "unknown")
+        basis[key] = basis.get(key, 0) + 1
+    return {
+        "exchange_ts_present_count": sum(1 for row in rows if row.exchange_ts is not None),
+        "exchange_ts_missing_count": sum(1 for row in rows if row.exchange_ts is None),
+        "received_ts_only_count": basis.get("received_ts_only", 0),
+        "strict_dual_freshness_eligible_count": sum(
+            1 for row in rows if row.strict_dual_freshness_eligible
+        ),
+        "freshness_basis_distribution": basis,
+        "trade_tape_sample_count": trade_tape_sample_count,
+        "tape_confirmed_candidate_count": 0,
+    }
 
 
 if __name__ == "__main__":

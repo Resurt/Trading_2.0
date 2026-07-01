@@ -13,7 +13,7 @@ from pathlib import Path
 from sys import path
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 ROOT = Path(__file__).resolve().parents[1]
 for src in (
@@ -23,7 +23,7 @@ for src in (
         path.insert(0, str(src))
 
 from trading_common.db.config import build_database_url_from_env
-from trading_common.db.models import MarketMicrostructureSnapshot
+from trading_common.db.models import MarketMicrostructureSnapshot, MarketTradeSample
 from trading_common.db.service import DatabaseService
 
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
@@ -47,7 +47,19 @@ def run_report(args: argparse.Namespace) -> dict[str, object]:
                     )
                 ).scalars()
             )
-        payload = summarize(rows, lookback_hours=args.lookback_hours)
+            trade_tape_sample_count = int(
+                session.scalar(
+                    select(func.count())
+                    .select_from(MarketTradeSample)
+                    .where(MarketTradeSample.received_ts >= since)
+                )
+                or 0
+            )
+        payload = summarize(
+            rows,
+            lookback_hours=args.lookback_hours,
+            trade_tape_sample_count=trade_tape_sample_count,
+        )
         output_dir = Path(args.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         output_file = output_dir / "data_shadow_summary_latest.json"
@@ -62,6 +74,7 @@ def summarize(
     rows: list[MarketMicrostructureSnapshot],
     *,
     lookback_hours: int,
+    trade_tape_sample_count: int = 0,
 ) -> dict[str, object]:
     eligible_rows, rejection_reasons = calibration_rows(rows)
     spreads = [row.spread_bps for row in rows if row.spread_bps is not None]
@@ -98,6 +111,19 @@ def summarize(
         "instruments": instruments,
         "sessions": sessions,
         "snapshots_count": len(rows),
+        "exchange_ts_present_count": sum(1 for row in rows if row.exchange_ts is not None),
+        "exchange_ts_missing_count": sum(1 for row in rows if row.exchange_ts is None),
+        "received_ts_only_count": sum(
+            1 for row in rows if row.freshness_basis == "received_ts_only"
+        ),
+        "strict_dual_freshness_eligible_count": sum(
+            1 for row in rows if row.strict_dual_freshness_eligible
+        ),
+        "freshness_basis_distribution": dict(
+            sorted(Counter(str(row.freshness_basis or "unknown") for row in rows).items())
+        ),
+        "trade_tape_sample_count": trade_tape_sample_count,
+        "tape_confirmed_candidate_count": 0,
         "avg_spread_bps": _optional_decimal(avg(spreads)),
         "p50_spread_bps": _optional_decimal(percentile(spreads, 0.50)),
         "p95_spread_bps": _optional_decimal(percentile(spreads, 0.95)),

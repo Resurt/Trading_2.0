@@ -212,6 +212,15 @@ Selected details must include either recent trades or explicit trade tape status
 The dashboard tape is an operator display surface and uses readonly all-source
 market-trades calls/stream samples where needed; it must not write calibration or
 trading entities.
+Quote cards and selected details use readonly broker trading status to classify
+fresh books as live vs display-only. Empty or partial refreshes may preserve the
+last fresh selected ladder/trade tape for display continuity, but this cache is
+never written into calibration tables.
+Persistent calibration evidence is separate: data-only collection stores real
+broker tape samples in `market_trade_sample` only when market-trade stream events
+arrive. The dashboard may display readonly `GetLastTrades` rows, but display-only
+rows are not calibration rows and must not be counted as tape-confirmed windows
+unless they were persisted by the data-only pipeline.
 Supported status values include:
 
 - `live`

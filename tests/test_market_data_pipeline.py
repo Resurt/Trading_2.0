@@ -49,6 +49,7 @@ from trading_common.db.models import (
     InstrumentRegistry,
     MarketCandle,
     MarketMicrostructureSnapshot,
+    MarketTradeSample,
     OrderBookSummary,
 )
 from trading_common.enums import SessionPhase, SessionType
@@ -58,6 +59,14 @@ MSK = ZoneInfo("Europe/Moscow")
 
 def utc(year: int, month: int, day: int, hour: int, minute: int = 0) -> datetime:
     return datetime(year, month, day, hour, minute, tzinfo=UTC)
+
+
+def utc_normalized(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def one_minute_candle(minute: int, *, closed: bool = True) -> Candle:
@@ -599,8 +608,17 @@ def test_live_market_data_collector_writes_microstructure_snapshot() -> None:
         asyncio.run(run())
         session.commit()
         snapshot = session.execute(select(MarketMicrostructureSnapshot)).scalar_one()
+        summary = session.execute(select(OrderBookSummary)).scalar_one()
 
     assert snapshot.instrument_id == "MOEX:SBER"
+    assert utc_normalized(snapshot.exchange_ts) == now
+    assert utc_normalized(snapshot.received_ts) == now
+    assert snapshot.freshness_basis == "exchange_ts"
+    assert snapshot.strict_dual_freshness_eligible is True
+    assert snapshot.exchange_ts_missing_reason is None
+    assert utc_normalized(summary.exchange_ts) == now
+    assert summary.freshness_basis == "exchange_ts"
+    assert summary.strict_dual_freshness_eligible is True
     assert snapshot.best_bid == Decimal("100.00000000")
     assert snapshot.best_ask == Decimal("100.10000000")
     assert snapshot.bid_depth_lots == Decimal("10.00000000")
@@ -608,6 +626,105 @@ def test_live_market_data_collector_writes_microstructure_snapshot() -> None:
     assert snapshot.book_imbalance == Decimal("0.1111")
     assert collector.stats.market_state_snapshots_written == 1
     assert collector.stats.order_books_received == 1
+    engine.dispose()
+
+
+def test_market_trade_stream_is_persisted_without_trading_entities() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    now = utc(2026, 6, 12, 7)
+    event_bus = MarketEventBus()
+
+    with Session(engine) as session:
+        store = SqlAlchemyMarketDataStore(session)
+        pipeline = MarketDataPipeline(
+            event_bus=event_bus,
+            session_context_provider=lambda instrument_id: session_context(instrument_id),
+            store=store,
+        )
+        pipeline.register()
+
+        async def run() -> None:
+            trade = MarketTrade(
+                instrument_id="MOEX:SBER",
+                price=Decimal("100.05"),
+                quantity_lots=Decimal("2"),
+                side="buy",
+                exchange_ts=now,
+                received_ts=now,
+                trade_id="trade-1",
+                payload={"source": "market_trades_stream", "venue_type": "broker_market_trades"},
+            )
+            for _ in range(2):
+                await event_bus.publish(
+                    MarketDataEvent(
+                        event_type=MarketEventType.MARKET_TRADE,
+                        payload=trade,
+                        ts_utc=now,
+                        instrument_id="MOEX:SBER",
+                    )
+                )
+
+        asyncio.run(run())
+        session.commit()
+        samples = list(session.execute(select(MarketTradeSample)).scalars())
+
+    assert len(samples) == 1
+    assert samples[0].instrument_id == "MOEX:SBER"
+    assert utc_normalized(samples[0].exchange_ts) == now
+    assert utc_normalized(samples[0].received_ts) == now
+    assert samples[0].price == Decimal("100.05000000")
+    assert samples[0].trade_id == "trade-1"
+    engine.dispose()
+
+
+def test_missing_order_book_exchange_ts_is_marked_received_ts_only() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    now = utc(2026, 6, 12, 7)
+    event_bus = MarketEventBus()
+
+    with Session(engine) as session:
+        store = SqlAlchemyMarketDataStore(session)
+        pipeline = MarketDataPipeline(
+            event_bus=event_bus,
+            session_context_provider=lambda instrument_id: session_context(instrument_id),
+            store=store,
+        )
+        pipeline.register()
+        collector = LiveMarketDataCollector(
+            event_bus=event_bus,
+            session_context_provider=lambda instrument_id: session_context(instrument_id),
+            store=store,
+        )
+        collector.register()
+
+        async def run() -> None:
+            await event_bus.publish(
+                MarketDataEvent(
+                    event_type=MarketEventType.ORDER_BOOK,
+                    payload=OrderBookSnapshot(
+                        instrument_id="MOEX:SBER",
+                        bids=(PriceLevel(Decimal("100"), Decimal("10")),),
+                        asks=(PriceLevel(Decimal("100.10"), Decimal("8")),),
+                        depth=1,
+                        exchange_ts=None,
+                        received_ts=now,
+                    ),
+                    ts_utc=now,
+                    instrument_id="MOEX:SBER",
+                )
+            )
+
+        asyncio.run(run())
+        session.commit()
+        snapshot = session.execute(select(MarketMicrostructureSnapshot)).scalar_one()
+
+    assert snapshot.exchange_ts is None
+    assert utc_normalized(snapshot.received_ts) == now
+    assert snapshot.freshness_basis == "received_ts_only"
+    assert snapshot.strict_dual_freshness_eligible is False
+    assert snapshot.exchange_ts_missing_reason == "source_payload_missing_exchange_ts"
     engine.dispose()
 
 

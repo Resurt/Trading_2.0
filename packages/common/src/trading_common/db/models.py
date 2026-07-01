@@ -759,6 +759,17 @@ class OrderBookSummary(Base, SessionContextMixin, EventTimestampMixin):
     ask_depth_lots: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False)
     book_imbalance: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
     market_quality_score: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    exchange_age_ms: Mapped[int | None] = mapped_column(Integer)
+    received_age_ms: Mapped[int | None] = mapped_column(Integer)
+    stale_by_exchange_time: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    stale_by_received_time: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    freshness_basis: Mapped[str | None] = mapped_column(String(32))
+    exchange_ts_missing_reason: Mapped[str | None] = mapped_column(String(96))
+    strict_dual_freshness_eligible: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
     summary_payload: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
 
 
@@ -793,9 +804,47 @@ class MarketMicrostructureSnapshot(Base, SessionContextMixin):
     book_imbalance: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
     market_quality_score: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
     feed_freshness_age_ms: Mapped[int | None] = mapped_column(Integer)
+    exchange_age_ms: Mapped[int | None] = mapped_column(Integer)
+    received_age_ms: Mapped[int | None] = mapped_column(Integer)
+    stale_by_exchange_time: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    stale_by_received_time: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    freshness_basis: Mapped[str | None] = mapped_column(String(32))
+    exchange_ts_missing_reason: Mapped[str | None] = mapped_column(String(96))
+    strict_dual_freshness_eligible: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
     is_stale: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     source: Mapped[str] = mapped_column(String(32), nullable=False)
     snapshot_payload: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
+
+
+class MarketTradeSample(Base, SessionContextMixin, TimestampMixin):
+    """Persisted market trade tape sample captured by data-only collection."""
+
+    __tablename__ = "market_trade_sample"
+    __table_args__ = (
+        Index("ix_market_trade_sample_instrument_ts", "instrument_id", "received_ts"),
+        Index("ix_market_trade_sample_trading_date", "trading_date", "instrument_id"),
+    )
+
+    market_trade_sample_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    exchange_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    received_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    instrument_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    price: Mapped[Decimal] = mapped_column(PRICE_TYPE, nullable=False)
+    quantity_lots: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    side: Mapped[str | None] = mapped_column(String(32))
+    source: Mapped[str] = mapped_column(String(64), nullable=False, default="market_trades_stream")
+    venue_type: Mapped[str | None] = mapped_column(String(32))
+    trade_id: Mapped[str | None] = mapped_column(String(128))
+    include_in_calibration: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    payload: Mapped[JsonPayload] = mapped_column(JSONB_TYPE, nullable=False, default=dict)
 
 
 class StrategyStateEvent(Base, SessionContextMixin, EventTimestampMixin):

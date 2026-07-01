@@ -6,10 +6,13 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from sys import path
 from typing import Any
 from uuid import UUID
+
+from sqlalchemy import func, select
 
 ROOT = Path(__file__).resolve().parents[1]
 for src in (
@@ -25,6 +28,7 @@ from report_worker.analytics.calibration_observatory import (
     StrategyConfigProposalService,
 )
 from trading_common.db.config import build_database_url_from_env
+from trading_common.db.models import MarketMicrostructureSnapshot, MarketTradeSample
 from trading_common.db.service import DatabaseService
 
 
@@ -92,10 +96,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     proposed_by="system",
                 )
                 candidate_config_id = str(proposal["candidate_config_id"])
+            exchange_ts_metadata = _exchange_ts_metadata(session, lookback_days=args.lookback_days)
         payload = _output_payload(
             diagnostic=diagnostic,
             cube_rows=cube_rows,
             candidate_config_id=candidate_config_id,
+            exchange_ts_metadata=exchange_ts_metadata,
         )
         output_dir = Path(args.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -115,6 +121,7 @@ def _output_payload(
     diagnostic: dict[str, Any],
     cube_rows: list[dict[str, Any]],
     candidate_config_id: str | None,
+    exchange_ts_metadata: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "diagnostic_run_id": diagnostic["diagnostic_run_id"],
@@ -126,9 +133,46 @@ def _output_payload(
         "dead_contours": _dead_contours(cube_rows),
         "calibration_recommended": diagnostic["calibration_recommended"],
         "candidate_config_id": candidate_config_id,
+        "exchange_ts_metadata": exchange_ts_metadata,
         "warnings": diagnostic["warnings"],
         "blocking_issues": diagnostic["blocking_issues"],
         "diagnostic": diagnostic,
+    }
+
+
+def _exchange_ts_metadata(session: Any, *, lookback_days: int) -> dict[str, Any]:
+    since = datetime.now(tz=UTC) - timedelta(days=lookback_days)
+    rows = list(
+        session.execute(
+            select(
+                MarketMicrostructureSnapshot.exchange_ts,
+                MarketMicrostructureSnapshot.freshness_basis,
+                MarketMicrostructureSnapshot.strict_dual_freshness_eligible,
+            ).where(MarketMicrostructureSnapshot.ts_utc >= since)
+        )
+    )
+    basis: dict[str, int] = {}
+    for row in rows:
+        key = str(row.freshness_basis or "unknown")
+        basis[key] = basis.get(key, 0) + 1
+    trade_tape_sample_count = int(
+        session.scalar(
+            select(func.count())
+            .select_from(MarketTradeSample)
+            .where(MarketTradeSample.received_ts >= since)
+        )
+        or 0
+    )
+    return {
+        "exchange_ts_present_count": sum(1 for row in rows if row.exchange_ts is not None),
+        "exchange_ts_missing_count": sum(1 for row in rows if row.exchange_ts is None),
+        "received_ts_only_count": basis.get("received_ts_only", 0),
+        "strict_dual_freshness_eligible_count": sum(
+            1 for row in rows if row.strict_dual_freshness_eligible
+        ),
+        "freshness_basis_distribution": basis,
+        "trade_tape_sample_count": trade_tape_sample_count,
+        "tape_confirmed_candidate_count": 0,
     }
 
 

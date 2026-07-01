@@ -265,6 +265,7 @@ class MarketInstrumentOverview(BaseModel):
     change_abs: Decimal | None = None
     change_bps: Decimal | None = None
     session_type: str | None = None
+    session_phase: str | None = None
     broker_trading_status: str | None = None
     api_trade_available: bool | None = None
     quote_status: str = "unavailable"
@@ -326,6 +327,13 @@ class MarketMicrostructureSnapshotResponse(BaseModel):
     book_imbalance: Decimal | None = None
     market_quality_score: Decimal | None = None
     feed_freshness_age_ms: int | None = None
+    exchange_age_ms: int | None = None
+    received_age_ms: int | None = None
+    stale_by_exchange_time: bool = False
+    stale_by_received_time: bool = False
+    freshness_basis: str | None = None
+    exchange_ts_missing_reason: str | None = None
+    strict_dual_freshness_eligible: bool = False
     is_stale: bool
     source: str
     payload: JsonPayload = Field(default_factory=dict)

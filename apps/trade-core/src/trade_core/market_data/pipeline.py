@@ -97,6 +97,12 @@ class MarketDataPipeline:
             MarketTrade,
         ):
             self._read_models.apply_market_trade(event.payload)
+            if self._store is not None:
+                context = self._session_context(
+                    event.payload.instrument_id,
+                    event.payload.received_ts,
+                )
+                self._store.save_market_trade_sample(trade=event.payload, context=context)
 
     async def _handle_candle(self, candle: Candle) -> None:
         if self._store is not None and candle.is_closed:
@@ -111,13 +117,47 @@ class MarketDataPipeline:
             order_book,
             now=order_book.received_ts,
         )
-        market_state = replace(
-            market_state,
-            payload=_market_state_payload_from_order_book(order_book.payload),
+        market_state_payload = _market_state_payload_from_order_book(order_book.payload)
+        market_state_payload.update(
+            {
+                "exchange_ts": order_book.exchange_ts.isoformat()
+                if order_book.exchange_ts is not None
+                else None,
+                "received_ts": order_book.received_ts.isoformat(),
+                "freshness_basis": (
+                    "exchange_ts" if order_book.exchange_ts is not None else "received_ts_only"
+                ),
+                "strict_dual_freshness_eligible": order_book.exchange_ts is not None,
+                "exchange_ts_missing_reason": (
+                    None
+                    if order_book.exchange_ts is not None
+                    else "source_payload_missing_exchange_ts"
+                ),
+            }
         )
+        market_state = replace(market_state, payload=market_state_payload)
         if self._store is not None:
             context = self._session_context(order_book.instrument_id, order_book.received_ts)
             payload = dict(order_book.payload)
+            payload.setdefault(
+                "exchange_ts",
+                order_book.exchange_ts.isoformat() if order_book.exchange_ts is not None else None,
+            )
+            payload.setdefault("received_ts", order_book.received_ts.isoformat())
+            payload.setdefault(
+                "freshness_basis",
+                "exchange_ts" if order_book.exchange_ts is not None else "received_ts_only",
+            )
+            payload.setdefault(
+                "strict_dual_freshness_eligible",
+                order_book.exchange_ts is not None,
+            )
+            payload.setdefault(
+                "exchange_ts_missing_reason",
+                None
+                if order_book.exchange_ts is not None
+                else "source_payload_missing_exchange_ts",
+            )
             payload["recent_market_trades"] = self._read_models.recent_trades(
                 order_book.instrument_id
             )[:20]

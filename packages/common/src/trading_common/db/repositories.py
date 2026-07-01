@@ -23,6 +23,7 @@ from trading_common.db.models import (
     MarketContextSnapshot,
     MarketMicrostructureSnapshot,
     MarketStatusSnapshot,
+    MarketTradeSample,
     MicroSession,
     OrderBookSummary,
     OrderIntent,
@@ -843,6 +844,28 @@ class MarketDataRepository:
         self._session.add(snapshot)
         self._session.flush()
         return snapshot
+
+    def save_market_trade_sample(self, sample: MarketTradeSample) -> MarketTradeSample:
+        query = select(MarketTradeSample).where(
+            MarketTradeSample.trading_date == sample.trading_date,
+            MarketTradeSample.instrument_id == sample.instrument_id,
+            MarketTradeSample.source == sample.source,
+        )
+        if sample.trade_id:
+            query = query.where(MarketTradeSample.trade_id == sample.trade_id)
+        else:
+            query = query.where(
+                MarketTradeSample.exchange_ts == sample.exchange_ts,
+                MarketTradeSample.price == sample.price,
+                MarketTradeSample.quantity_lots == sample.quantity_lots,
+                MarketTradeSample.side == sample.side,
+            )
+        existing = self._session.execute(query.limit(1)).scalars().first()
+        if existing is not None:
+            return existing
+        self._session.add(sample)
+        self._session.flush()
+        return sample
 
 
 class MarketContextSnapshotRepository:

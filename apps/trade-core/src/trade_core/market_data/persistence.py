@@ -10,13 +10,20 @@ from uuid import uuid4
 from sqlalchemy.orm import Session
 
 from trade_core.market_data.calculators import MarketState
-from trade_core.market_data.events import Bar, Candle, OrderBookSnapshot, TradingStatusTick
+from trade_core.market_data.events import (
+    Bar,
+    Candle,
+    MarketTrade,
+    OrderBookSnapshot,
+    TradingStatusTick,
+)
 from trade_core.session.models import SessionEventContext
 from trading_common.db.models import (
     AuditEvent,
     MarketCandle,
     MarketMicrostructureSnapshot,
     MarketStatusSnapshot,
+    MarketTradeSample,
     OrderBookSummary,
 )
 from trading_common.db.repositories import MarketDataRepository
@@ -137,6 +144,14 @@ class SqlAlchemyMarketDataStore:
                 ask_depth_lots=market_state.ask_depth_lots,
                 book_imbalance=market_state.book_imbalance,
                 market_quality_score=market_state.market_quality_score,
+                **_freshness_db_values(
+                    exchange_ts=order_book.exchange_ts,
+                    market_state=market_state,
+                    missing_reason=_exchange_ts_missing_reason(
+                        order_book.exchange_ts,
+                        order_book.payload,
+                    ),
+                ),
                 summary_payload=order_book.payload,
             )
         )
@@ -157,12 +172,18 @@ class SqlAlchemyMarketDataStore:
             context=context,
             payload=payload or market_state.payload,
         )
-        event_ts = received_ts or ts_utc
+        payload_values = payload or market_state.payload
+        event_exchange_ts = (
+            exchange_ts
+            or _datetime_from_payload(payload_values, "exchange_ts")
+            or _datetime_from_payload(payload_values, "order_book_ts")
+        )
+        event_ts = received_ts or _datetime_from_payload(payload_values, "received_ts") or ts_utc
         return self._repository.save_microstructure_snapshot(
             MarketMicrostructureSnapshot(
                 **context.as_db_values(),
                 ts_utc=ts_utc,
-                exchange_ts=exchange_ts,
+                exchange_ts=event_exchange_ts,
                 received_ts=event_ts,
                 instrument_id=market_state.instrument_id,
                 best_bid=market_state.best_bid.price if market_state.best_bid else None,
@@ -175,9 +196,38 @@ class SqlAlchemyMarketDataStore:
                 book_imbalance=market_state.book_imbalance,
                 market_quality_score=market_state.market_quality_score,
                 feed_freshness_age_ms=market_state.feed_freshness.age_ms,
+                **_freshness_db_values(
+                    exchange_ts=event_exchange_ts,
+                    market_state=market_state,
+                    missing_reason=_exchange_ts_missing_reason(event_exchange_ts, payload_values),
+                ),
                 is_stale=market_state.feed_freshness.is_stale,
                 source=source,
-                snapshot_payload=payload or market_state.as_read_model(),
+                snapshot_payload=payload_values or market_state.as_read_model(),
+            )
+        )
+
+    def save_market_trade_sample(
+        self,
+        *,
+        trade: MarketTrade,
+        context: SessionEventContext,
+        source: str = "market_trades_stream",
+    ) -> MarketTradeSample:
+        return self._repository.save_market_trade_sample(
+            MarketTradeSample(
+                **context.as_db_values(),
+                exchange_ts=trade.exchange_ts,
+                received_ts=trade.received_ts,
+                instrument_id=trade.instrument_id,
+                price=trade.price,
+                quantity_lots=trade.quantity_lots,
+                side=trade.side,
+                source=str(trade.payload.get("source") or source),
+                venue_type=_string_or_none(trade.payload.get("venue_type")),
+                trade_id=trade.trade_id,
+                include_in_calibration=bool(trade.payload.get("include_in_calibration", False)),
+                payload=trade.payload,
             )
         )
 
@@ -289,3 +339,58 @@ def _validate_primary_microstructure(
         or market_state.book_imbalance > ONE
     ):
         raise MarketMicrostructureRejectedError(MarketMicrostructureRejectReason.INVALID_IMBALANCE)
+
+
+def _freshness_db_values(
+    *,
+    exchange_ts: datetime | None,
+    market_state: MarketState,
+    missing_reason: str | None,
+) -> dict[str, object]:
+    freshness = market_state.feed_freshness
+    return {
+        "exchange_age_ms": freshness.exchange_age_ms,
+        "received_age_ms": freshness.received_age_ms,
+        "stale_by_exchange_time": freshness.stale_by_exchange_time,
+        "stale_by_received_time": freshness.stale_by_received_time,
+        "freshness_basis": "exchange_ts" if exchange_ts is not None else "received_ts_only",
+        "exchange_ts_missing_reason": None if exchange_ts is not None else missing_reason,
+        "strict_dual_freshness_eligible": exchange_ts is not None,
+    }
+
+
+def _exchange_ts_missing_reason(
+    exchange_ts: datetime | None,
+    payload: dict[str, object] | None,
+) -> str | None:
+    if exchange_ts is not None:
+        return None
+    payload = payload or {}
+    explicit = payload.get("exchange_ts_missing_reason")
+    if isinstance(explicit, str) and explicit:
+        return explicit[:96]
+    return "source_payload_missing_exchange_ts"
+
+
+def _datetime_from_payload(payload: dict[str, object] | None, key: str) -> datetime | None:
+    if not payload:
+        return None
+    value = payload.get(key)
+    if isinstance(value, datetime):
+        return value.astimezone(UTC)
+    if isinstance(value, str) and value:
+        normalized = value.replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
+    return None
+
+
+def _string_or_none(value: object) -> str | None:
+    if value is None:
+        return None
+    return str(value)

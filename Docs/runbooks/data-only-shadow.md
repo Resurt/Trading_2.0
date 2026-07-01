@@ -30,8 +30,26 @@ The collector writes `market_microstructure_snapshot` with:
 - `best_bid`, `best_ask`, `mid_price`, `spread_abs`, `spread_bps`;
 - `bid_depth_lots`, `ask_depth_lots`, `book_imbalance`;
 - `market_quality_score`, `feed_freshness_age_ms`, `is_stale`;
+- `exchange_ts` when the broker/source payload provides exchange event time;
+- `received_ts` for the local receive/write time;
+- `exchange_age_ms`, `received_age_ms`, `stale_by_exchange_time`,
+  `stale_by_received_time`, `freshness_basis`, `exchange_ts_missing_reason`, and
+  `strict_dual_freshness_eligible`;
 - session context: `trading_date`, `session_type`, `session_phase`, `micro_session_id`;
 - `source=data_only_shadow`.
+
+The collector also persists real market tape samples in `market_trade_sample`
+when broker market-trade stream events arrive. It must never create fake tape
+rows. Missing trades are reported as status/reason diagnostics, not as samples.
+Dashboard-only `GetLastTrades` rows are display data unless the data-only
+collector persists them through the market data pipeline.
+
+`exchange_ts` must never be fabricated from `received_ts`. If historical rows do
+not contain an exchange timestamp and no matching broker/order-book payload
+contains it, remediation marks them as `freshness_basis=received_ts_only`,
+`strict_dual_freshness_eligible=false`, and records
+`exchange_ts_missing_reason`. Such rows can support partial diagnostics but not
+strict dual-freshness calibration.
 
 ## Local smoke
 
@@ -59,6 +77,10 @@ python scripts/run_data_shadow_summary_report.py --lookback-hours 6 --json-outpu
 ```
 
 The report is written to `.local/collection_reports/data_shadow/data_shadow_summary_latest.json`.
+The report exposes `exchange_ts_present_count`, `exchange_ts_missing_count`,
+`received_ts_only_count`, `strict_dual_freshness_eligible_count`,
+`freshness_basis_distribution`, `trade_tape_sample_count`, and
+`tape_confirmed_candidate_count`.
 
 ## Readiness gate
 
@@ -110,6 +132,22 @@ Interpretation boundary:
 - 10-20 trading days are early evidence, not final truth.
 - Candidate configs created by the observatory are draft proposals only and are not applied to live
   trading automatically.
+
+## Exchange timestamp and tape verification
+
+Closed-market broker payloads are inconclusive for `exchange_ts` and trade tape
+availability. After a schema/pipeline change, verify during an open collection
+window with:
+
+```bash
+python scripts/run_live_exchange_ts_trade_tape_diagnostic.py --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR --minutes 10 --json-output
+```
+
+The script is readonly. It calls `GetOrderBook`, `GetLastPrices`,
+`GetLastTrades`, and `GetTradingStatus`, checks DB deltas for
+`market_microstructure_snapshot`, `order_book_summary`, and
+`market_trade_sample`, and exits with `market_closed_live_diagnostic_not_run`
+when the market is closed.
 
 ## Session preflight before live samples
 
