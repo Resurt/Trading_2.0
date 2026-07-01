@@ -192,6 +192,53 @@ describe("LiveDashboardView", () => {
     expect(sessionBlock).not.toContain("запись рыночных логов запущена");
   });
 
+  it("localizes stop command banner statuses and reasons", async () => {
+    const wrapper = mountWithStores();
+    const robot = useRobotStore();
+    robot.lastCommandStatus = "stop_requested";
+    robot.lastCommandMessage = "Сбор логов остановлен.";
+    robot.lastCommandReasonCode = "operator_stop_requested";
+    robot.lastCommandAt = "2026-07-01T17:00:00Z";
+    await nextTick();
+
+    const banner = wrapper.find(".command-status-panel").text();
+    expect(banner).toContain("Остановка запрошена");
+    expect(banner).toContain("оператор остановил сбор логов");
+    expect(banner).not.toContain("stop_requested");
+    expect(banner).not.toContain("operator_stop_requested");
+  });
+
+  it("hides stale start/preflight collector messages after stop", async () => {
+    const wrapper = mountWithStores();
+    const market = useMarketStore();
+    market.dataShadowStatus = {
+      ...market.dataShadowStatus,
+      collector_state: "stopped_by_operator",
+      effective_logging_state: "stopped",
+      reason_code: "data_only_collection_stopped",
+      warnings: ["start_preflight_pending"],
+    };
+    market.warnings = ["runtime_command_accepted", "preflight_pending", "selected_market_trades_unavailable"];
+    await nextTick();
+
+    const collectorPanel = wrapper.find(".collector-panel").text();
+    expect(collectorPanel).toContain("лента сделок выбранного инструмента временно недоступна");
+    expect(collectorPanel).not.toContain("проверяется торговая сессия перед стартом");
+    expect(collectorPanel).not.toContain("проверяется торговая сессия");
+    expect(collectorPanel).not.toContain("команда принята runtime");
+    expect(collectorPanel).not.toContain("selected_market_trades_unavailable");
+  });
+
+  it("renders dashboard feed 500 errors as administrator text", async () => {
+    const wrapper = mountWithStores();
+    const market = useMarketStore();
+    market.feedErrors = ["500 Internal Server Error: Internal Server Error"];
+    await nextTick();
+
+    expect(wrapper.text()).toContain("API временно не вернул данные экрана");
+    expect(wrapper.text()).not.toContain("500 Internal Server Error");
+  });
+
   it("uses closed dashboard feed status over stale robot session fields", async () => {
     const wrapper = mountWithStores();
     const robot = useRobotStore();

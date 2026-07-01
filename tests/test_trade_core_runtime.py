@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Callable
+from contextlib import suppress
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -706,6 +707,93 @@ def test_data_only_stop_interrupts_order_book_polling_batch(tmp_path: Path) -> N
             assert session.scalar(select(func.count()).select_from(OrderIntent)) == 0
             assert session.scalar(select(func.count()).select_from(BrokerOrder)) == 0
         await runtime.shutdown()
+
+    asyncio.run(run())
+
+
+def test_robot_command_background_poller_applies_stop_without_run_cycle(
+    tmp_path: Path,
+) -> None:
+    gateway = RecordingStreamGateway(now=msk(2026, 6, 28, 14, 30))
+    config = replace(
+        runtime_config(tmp_path),
+        data_only_shadow_enabled=True,
+        tick_interval_seconds=30,
+        robot_command_poll_interval_seconds=0.05,
+    )
+    runtime = TradeCoreRuntime(
+        config=config,
+        launch_policy=LaunchModePolicy.from_mode(RuntimeMode.SHADOW),
+        database=DatabaseService(config.database_url or ""),
+        broker_gateway=cast(BrokerGateway, gateway),
+        report_job_dispatcher=noop_report_job_dispatcher(),
+    )
+
+    async def run() -> None:
+        await runtime.start()
+        runtime._stop_event = asyncio.Event()
+        runtime._robot_command_lock = asyncio.Lock()
+        try:
+            with runtime.database.session_scope() as session:
+                RobotCommandRepository(session).create(
+                    command_type="start",
+                    requested_by="desk-operator",
+                    requested_role="operator",
+                    requested_at=datetime.now(tz=UTC),
+                    payload={
+                        "mode": "data_shadow",
+                        "trading_disabled": True,
+                        "data_only_shadow": True,
+                        "preflight_result": {
+                            "now_msk": "2026-06-28T14:30:00+03:00",
+                            "session_type": "weekend",
+                            "session_phase": "continuous_trading",
+                            "market_open": True,
+                            "market_window_open": True,
+                            "market_closed_expected": False,
+                            "official_exchange_open": False,
+                            "official_exchange_closed": False,
+                            "venue_type": "broker_status_fallback_time_rules",
+                            "quote_source_allowed_for_data_collection": True,
+                            "data_only_collection_allowed": True,
+                            "streams_for_calibration_allowed": True,
+                            "reason_code": "market_open",
+                        },
+                    },
+                )
+            assert await runtime.process_robot_commands_async() == 1
+            assert runtime.stats.collector_state == "collecting"
+
+            poller = asyncio.create_task(runtime._poll_robot_commands_forever())
+            try:
+                with runtime.database.session_scope() as session:
+                    RobotCommandRepository(session).create(
+                        command_type="stop",
+                        requested_by="desk-operator",
+                        requested_role="operator",
+                        requested_at=datetime.now(tz=UTC),
+                        payload={
+                            "mode": "data_shadow",
+                            "trading_disabled": True,
+                            "data_only_shadow": True,
+                        },
+                    )
+                deadline = asyncio.get_running_loop().time() + 1.5
+                while runtime.stats.collector_state != "stopped_by_operator":
+                    if asyncio.get_running_loop().time() > deadline:
+                        pytest.fail("background command poller did not apply Stop in time")
+                    await asyncio.sleep(0.05)
+                assert runtime.stats.collector_state == "stopped_by_operator"
+                assert runtime.stats.stream_tasks_started == 0
+                assert gateway.post_order_calls == []
+                assert gateway.cancel_order_calls == []
+            finally:
+                runtime._stop_event.set()
+                poller.cancel()
+                with suppress(asyncio.CancelledError):
+                    await poller
+        finally:
+            await runtime.shutdown()
 
     asyncio.run(run())
 

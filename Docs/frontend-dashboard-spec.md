@@ -338,6 +338,9 @@ accepts the command, shows `Сбор логов остановлен.` while pol
 `/runtime/data-shadow/status` for the authoritative `stopped_by_operator`
 confirmation. The data-only panel must not keep showing
 `data_only_collection_started` or `Идёт сбор` after an accepted Stop command.
+Backend confirmation should normally arrive through the trade-core command poller
+within a couple of seconds; a persistent `stop_requested`/`stopping` banner is a
+runtime fault, not a normal report-generation delay.
 
 ## Safety Invariants
 

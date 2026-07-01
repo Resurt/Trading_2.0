@@ -185,7 +185,7 @@ exchange session.
 | Method | Path | Назначение |
 | --- | --- | --- |
 | `POST` | `/robot/start` | Запросить запуск робота в настроенном режиме. |
-| `POST` | `/robot/stop` | Запросить controlled stop. API быстро принимает команду; trade-core применяет её в runtime loop and data-only polling checks. Stop не ждёт построения отчётов. |
+| `POST` | `/robot/stop` | Запросить controlled stop. API быстро принимает команду; trade-core применяет её через быстрый robot-command poller, runtime loop and data-only polling checks. Stop не ждёт построения отчётов. |
 | `POST` | `/robot/pause` | Запретить новые entries без остановки процесса. |
 | `POST` | `/robot/resume` | Возобновить прием новых entries после pause/stop. |
 | `POST` | `/robot/emergency-stop` | Немедленно перевести runtime в emergency stopped mode. |

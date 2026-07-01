@@ -93,8 +93,17 @@ const quoteRows = computed(() => market.quoteRows);
 
 const selectedInstrument = computed(() => market.currentInstrument);
 const collectorMessages = computed(() => {
+  const collectorStopped =
+    market.dataShadowStatus.collector_state !== "collecting" &&
+    market.dataShadowStatus.effective_logging_state !== "collecting";
   const items = [...market.dataShadowStatus.warnings, ...market.warnings]
     .filter((warning): warning is string => Boolean(warning))
+    .filter((warning) => {
+      if (!collectorStopped) {
+        return true;
+      }
+      return !["preflight_pending", "start_preflight_pending", "runtime_command_accepted"].includes(warning);
+    })
     .map((warning) => reasonLabel(warning));
   return [...new Set(items)].slice(0, 4);
 });
@@ -139,6 +148,11 @@ function commandStatusLabel(status: string | null): string {
   const labels: Record<string, string> = {
     checking_preflight: "Проверка preflight",
     start_requesting: "Запрос старта",
+    preflight_pending: "Проверяю сессию",
+    preflight_retrying: "Повторная проверка",
+    starting: "Запускаю сбор",
+    start_pending: "Запуск запрошен",
+    collecting: "Сбор идёт",
     requested: "Запрошено",
     accepted: "Принято",
     applied: "Выполнено",
@@ -146,6 +160,11 @@ function commandStatusLabel(status: string | null): string {
     blocked_by_preflight: "Старт заблокирован",
     preflight_failed: "Preflight не завершился",
     stop_requesting: "Запрос остановки",
+    stop_requested: "Остановка запрошена",
+    stopping: "Останавливаю сбор",
+    stopped_by_operator: "Сбор остановлен",
+    stopped: "Сбор остановлен",
+    idle: "Сбор остановлен",
     stop_failed: "Ошибка остановки",
     balance_refresh_completed: "Баланс обновлён",
     balance_refresh_degraded: "Баланс недоступен",
@@ -155,6 +174,9 @@ function commandStatusLabel(status: string | null): string {
 }
 
 function reasonLabel(reason: string | null | undefined): string {
+  if (reason?.includes("500 Internal Server Error") || reason?.includes("Internal Server Error")) {
+    return "API временно не вернул данные экрана; показываю последнее полученное состояние.";
+  }
   const labels: Record<string, string> = {
     market_open: "рынок открыт",
     market_closed_expected: "рынок закрыт по расписанию",
@@ -170,6 +192,11 @@ function reasonLabel(reason: string | null | undefined): string {
     data_only_collection_started: "запись рыночных логов запущена",
     data_only_collection_resumed: "запись рыночных логов возобновлена",
     data_only_collector_already_running: "запись рыночных логов уже идёт",
+    controlled_stop_requested: "запрошена остановка сбора логов",
+    operator_stop_requested: "оператор остановил сбор логов",
+    runtime_command_accepted: "команда принята runtime",
+    preflight_pending: "проверяется торговая сессия",
+    start_preflight_pending: "проверяется торговая сессия перед стартом",
     data_only_session_window_closed: "окно data-only сбора закрыто",
     data_only_collection_allowed: "data-only сбор разрешён",
     data_only_collection_blocked: "data-only сбор заблокирован",
@@ -198,6 +225,7 @@ function reasonLabel(reason: string | null | undefined): string {
     dashboard_gateway_unavailable: "readonly broker gateway недоступен",
     selected_order_book_unavailable: "стакан выбранного инструмента недоступен",
     selected_order_book_stale: "стакан выбранного инструмента устарел",
+    selected_market_trades_unavailable: "лента сделок выбранного инструмента временно недоступна",
     quality_not_calculated: "качество стакана ещё не рассчитано",
     empty_market_ws_snapshot: "пустой market WS snapshot проигнорирован",
     selected_instrument_details_unavailable: "details выбранного инструмента недоступны",
@@ -213,6 +241,9 @@ function operatorError(value: string | null): string {
   const cleaned = value.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
   if (cleaned.includes("504 Gateway") || cleaned.includes("Gateway Time-out")) {
     return "API не ответил вовремя; экран держит последнее полученное состояние.";
+  }
+  if (cleaned.includes("500 Internal Server Error") || cleaned.includes("Internal Server Error")) {
+    return "API временно не вернул данные экрана; показываю последнее полученное состояние.";
   }
   if (cleaned.toLowerCase().includes("timeout")) {
     return "API отвечает медленно; экран не стирает предыдущие данные и повторяет запрос.";
@@ -954,7 +985,7 @@ function degradedFlagLabel(flag: string): string {
         <strong>{{ commandStatusLabel(robot.lastCommandStatus) }}</strong>
       </div>
       <p>{{ robot.lastCommandMessage }}</p>
-      <code v-if="robot.lastCommandReasonCode">{{ reasonLabel(robot.lastCommandReasonCode) }}</code>
+      <span v-if="robot.lastCommandReasonCode">{{ reasonLabel(robot.lastCommandReasonCode) }}</span>
       <small v-if="robot.lastCommandNextSessionAt">next {{ compactDateTime(robot.lastCommandNextSessionAt) }}</small>
       <small v-if="robot.lastCommandAt">{{ compactDateTime(robot.lastCommandAt) }}</small>
       <button

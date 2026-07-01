@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import AsyncIterator, Mapping
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
@@ -166,6 +167,7 @@ class TradeCoreRuntimeConfig:
     exchange: str = DEFAULT_EXCHANGE
     instruments: tuple[InstrumentRef, ...] = DEFAULT_INSTRUMENTS
     tick_interval_seconds: float = 1.0
+    robot_command_poll_interval_seconds: float = 0.25
     database_url: str | None = None
     auto_create_sqlite_schema: bool = False
     strategy_id: str = "baseline"
@@ -223,6 +225,9 @@ class TradeCoreRuntimeConfig:
             exchange=env.get("TRADING_EXCHANGE", DEFAULT_EXCHANGE),
             instruments=_instruments_from_env(env.get("TRADING_INSTRUMENTS")),
             tick_interval_seconds=float(env.get("TRADE_CORE_TICK_INTERVAL_SECONDS", "1.0")),
+            robot_command_poll_interval_seconds=float(
+                env.get("TRADING_ROBOT_COMMAND_POLL_INTERVAL_SECONDS", "0.25")
+            ),
             database_url=database_url,
             auto_create_sqlite_schema=auto_create_sqlite_schema,
             strategy_id=env.get("TRADING_STRATEGY_ID", "baseline"),
@@ -699,6 +704,7 @@ class TradeCoreRuntime:
         self._stream_tasks: tuple[asyncio.Task[None], ...] = ()
         self._stop_event: asyncio.Event | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._robot_command_lock: asyncio.Lock | None = None
         self._thread: Thread | None = None
         self._current_schedule: TradingSchedule | None = None
         self._current_snapshot: SessionSnapshot | None = None
@@ -899,12 +905,20 @@ class TradeCoreRuntime:
 
         self._loop = asyncio.get_running_loop()
         self._stop_event = asyncio.Event()
+        self._robot_command_lock = asyncio.Lock()
         await self.start()
+        command_poller = asyncio.create_task(
+            self._poll_robot_commands_forever(),
+            name="trade-core-robot-command-poller",
+        )
         try:
             while not self._stop_event.is_set():
                 await self.run_cycle()
                 await asyncio.sleep(self.config.tick_interval_seconds)
         finally:
+            command_poller.cancel()
+            with suppress(asyncio.CancelledError):
+                await command_poller
             await self.shutdown()
 
     def start_background(self) -> Thread:
@@ -923,6 +937,24 @@ class TradeCoreRuntime:
     def request_stop(self) -> None:
         if self._loop is not None and self._stop_event is not None:
             self._loop.call_soon_threadsafe(self._stop_event.set)
+
+    async def _poll_robot_commands_forever(self) -> None:
+        interval = max(0.05, self.config.robot_command_poll_interval_seconds)
+        while self._stop_event is None or not self._stop_event.is_set():
+            try:
+                await self.process_robot_commands_async()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log_event(
+                    logger=LOGGER,
+                    level="WARNING",
+                    event_type="robot_command_poll_failed",
+                    component="runtime.robot_command_poller",
+                    error_code=type(exc).__name__,
+                    error_message=str(exc),
+                )
+            await asyncio.sleep(interval)
 
     async def shutdown(self) -> None:
         """Cancel streams, flush events, write audit row and close resources."""
@@ -1951,6 +1983,15 @@ class TradeCoreRuntime:
     async def process_robot_commands_async(self) -> int:
         """Apply durable operator commands written by the API control plane."""
 
+        lock = self._robot_command_lock
+        if lock is not None and lock.locked():
+            return 0
+        if lock is not None:
+            async with lock:
+                return await self._process_robot_commands_unlocked()
+        return await self._process_robot_commands_unlocked()
+
+    async def _process_robot_commands_unlocked(self) -> int:
         session = self._session
         if session is None:
             return 0

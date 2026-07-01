@@ -249,6 +249,9 @@ the command status strip. It does not wait for intraday, summary, calibration, o
 other report generation. The dashboard must immediately switch the data-only logging
 panel from active collection to `Останавливается`/`Сбор логов остановлен` after the
 operator command is accepted, then reconcile with `/runtime/data-shadow/status`.
+Trade-core runs a fast robot-command poller
+(`TRADING_ROBOT_COMMAND_POLL_INTERVAL_SECONDS`, default `0.25`) so Stop does not
+wait for the next full runtime tick.
 If the runtime is inside the readonly order-book polling fallback, it checks Stop
 between instruments and must not wait for a full universe polling batch to finish.
 
