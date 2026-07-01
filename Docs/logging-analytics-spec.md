@@ -69,6 +69,16 @@ closure, or for OTC/dealer/indicative/stale/local-history display data. Known-in
 primary rows are purged with a manifest and audit evidence, not merely hidden with
 `not_for_calibration`.
 
+Data-only microstructure persistence rejects invalid primary rows before insert.
+The rejection audit action is `data_only_microstructure_row_rejected`; payloads
+include `reason` with one of `crossed_book`, `invalid_spread`, `invalid_depth`,
+`invalid_imbalance`, `missing_bid_ask`, `outside_session_window`, or
+`non_calibration_source`. Historical deterministic metadata repair uses
+`data_only_quality_rows_repaired`; invalid market-value purge uses
+`data_only_invalid_rows_purged`. These actions never delete `audit_event` and do
+not create `signal_candidate`, `order_intent`, `broker_order`, pseudo-orders, or
+real broker calls.
+
 ## JSON structured logging
 
 Технические логи пишутся в JSON через стандартный Python logging.

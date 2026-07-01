@@ -1271,7 +1271,7 @@ def _preserve_visible_trade_tape(
     if not _can_display_delayed_trade_rows(
         cached_trades,
         _market_trades_age_ms(cached_trades),
-        source=cached.market_trades_source,
+        source=cached.market_trades_source or "",
     ):
         status = _trade_tape_status(cached_trades, _market_trades_age_ms(cached_trades))
         if status != "live":
@@ -1470,7 +1470,10 @@ def _visible_trade_tape_update(
     age_ms = _market_trades_age_ms(normalized)
     status = _trade_tape_status(normalized, age_ms)
     reason = _trade_tape_reason(normalized, age_ms)
-    if status == "live" or _can_display_delayed_trade_rows(
+    read_model_source = source == "order_book_summary_payload" or source.startswith(
+        "market_trades_stream"
+    )
+    if (normalized and read_model_source) or status == "live" or _can_display_delayed_trade_rows(
         normalized,
         age_ms,
         source=source,
@@ -1514,9 +1517,7 @@ def _has_stream_trade_rows(instrument: MarketInstrumentOverview) -> bool:
     if not instrument.recent_market_trades:
         return False
     source = instrument.market_trades_source or ""
-    return source in {"market_trades_stream", "order_book_summary_payload"} or source.startswith(
-        "market_trades_stream"
-    )
+    return source == "market_trades_stream" or source.startswith("market_trades_stream")
 
 
 def _freshness_payload(

@@ -627,7 +627,7 @@ def _expected_open_times(
         if cursor.weekday() < 5:
             windows = (
                 (time(7, 0), time(10, 0)),
-                (time(10, 0), time(18, 59)),
+                (time(10, 0), time(19, 0)),
                 (time(19, 0), time(23, 50)),
             )
         else:

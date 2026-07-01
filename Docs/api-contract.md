@@ -472,6 +472,14 @@ If a same-day session window ends and another window remains,
 `completed_for_day_at` is set. Recent snapshots alone must not make a paused or
 stopped collector look alive.
 
+If Start is requested before a same-day collection window and the next window is
+within `DATA_SHADOW_START_ARMING_MAX_WAIT_HOURS`, trade-core may return
+`command_status=armed_until_next_window`, `daily_collection_active=true`,
+`next_collection_window_at`, `start_armed_at`, and
+`effective_logging_state=armed`/`waiting_for_open`. No streams or calibration
+rows are created before the window opens. Manual Stop cancels both armed and
+active daily collection.
+
 `GET /robot/status` distinguishes the API control state from logging state with
 `robot_control_state`, `data_shadow_collector_state`, `daily_collection_active`,
 and `effective_logging_state`. It must not report a stopped or paused data-shadow
@@ -479,6 +487,7 @@ collector as simply running.
 
 Trade-core emits these data-only lifecycle audit events:
 `data_only_shadow_collection_started`,
+`data_only_shadow_collection_armed_until_next_window`,
 `data_only_shadow_collection_window_closed`,
 `data_only_shadow_collection_paused_until_next_window`,
 `data_only_shadow_collection_resumed`,
@@ -495,6 +504,14 @@ microstructure through bounded readonly `GetOrderBook` polling. These rows keep
 `source=data_only_shadow` and include `data_only_polling_fallback=true`,
 `include_in_calibration`, `calibration_allowed`, and `venue_type` in
 `snapshot_payload`. Stop disables both streams and polling.
+
+Primary microstructure/order-book writes reject invalid calibration samples before
+persistence. Rejection reasons include `crossed_book`, `invalid_spread`,
+`invalid_depth`, `invalid_imbalance`, `missing_bid_ask`,
+`outside_session_window`, and `non_calibration_source`. Rejected data-only
+microstructure samples emit rate-limited
+`data_only_microstructure_row_rejected` audit evidence and do not create trading
+entities.
 
 After a trade-core restart, `started`/`resumed` lifecycle audit events restore only
 the daily collection intent. They are not proof that this new process has live stream

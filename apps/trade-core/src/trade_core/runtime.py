@@ -1157,7 +1157,7 @@ class TradeCoreRuntime:
                         "official_exchange" if calibration_allowed else "display_only"
                     ),
                 }
-                received_at = datetime.now(tz=UTC)
+                received_at = now_utc
                 order_book = order_book_from_mapping(payload, received_at=received_at)
                 await self.process_order_book(order_book)
                 successful += 1
@@ -2205,14 +2205,15 @@ class TradeCoreRuntime:
             else "session_preflight_required"
         )
         raw_preflight = dict(preflight) if isinstance(preflight, Mapping) else {}
+        preflight_now = _preflight_now_msk(raw_preflight) or datetime.now(tz=MSK)
         annotated_preflight = self._annotate_data_only_preflight_payload(
             raw_preflight,
-            now=datetime.now(tz=MSK),
+            now=preflight_now,
         )
         if not market_open or not collection_allowed:
             can_arm, next_window, arm_reason = self._data_only_start_can_arm(
                 annotated_preflight,
-                now=datetime.now(tz=MSK),
+                now=preflight_now,
             )
             if can_arm and next_window is not None:
                 now_utc = datetime.now(tz=UTC)
@@ -2243,7 +2244,7 @@ class TradeCoreRuntime:
                 self.stats.next_retry_at = next_window.start_at.astimezone(UTC)
                 self.stats.remaining_windows_today = self._remaining_windows_today(
                     trading_date=next_window.trading_date,
-                    after=datetime.now(tz=MSK),
+                    after=preflight_now,
                 )
                 annotated_preflight["next_collection_window_at"] = (
                     next_window.start_at.isoformat()
@@ -2985,7 +2986,7 @@ class TradeCoreRuntime:
             and isinstance(self._data_only_preflight_payload, Mapping)
         ):
             context = self._session_context_from_data_only_preflight(
-                self._data_only_preflight_payload,
+                preflight=self._data_only_preflight_payload,
                 observed_at=observed_at or datetime.now(tz=MSK),
             )
             self._data_only_session_context = context

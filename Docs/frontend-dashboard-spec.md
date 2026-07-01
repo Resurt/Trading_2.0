@@ -133,6 +133,16 @@ The selected order-book refresh interval must stay below the order-book freshnes
 budget so an open-market selected ladder does not oscillate between fresh and
 stale while the readonly broker/API is responsive.
 
+Selected details must be requested with the resolved selected instrument
+UID/FIGI, not only the displayed `MOEX:*` string. Switching SBER -> GAZP -> VTBR
+must preserve the requested selected instrument and refresh the corresponding
+details. When broker order-book levels are returned, the API/UI must render
+`best_bid`, `best_ask`, `mid_price`, `spread_abs`, `spread_bps`,
+bid/ask depth, `book_imbalance`, and `order_book_summary.bids[]`/`.asks[]`.
+If no broker book is returned or the call times out, the selected panel must show
+an explicit status/reason; `no_order_book_samples` is not a successful open-market
+book without raw broker evidence.
+
 `order_book_summary.instrument_id` may be stored as the broker `instrument_uid`
 or another resolved broker alias. The BFF must resolve `MOEX:*`, ticker,
 `instrument_uid`, and `figi` aliases before deciding that a quote card has no
@@ -218,7 +228,13 @@ The frontend may preserve the last fresh trade tape across an intermittent empty
 or `no_market_trades_samples` refresh only while the newest trade exchange
 timestamp remains inside the trade freshness budget. Once that budget expires, or
 when the selected instrument changes, old rows must be dropped and the panel must
-show the explicit trade tape status/reason instead of stale table rows.
+show the explicit status/reason instead of implying live trades.
+
+Acceptance is covered by
+`scripts/run_selected_orderbook_trade_tape_acceptance.py --instruments MOEX:SBER,MOEX:GAZP,MOEX:VTBR`.
+The check verifies selected switching, bid/ask rendering when broker levels are
+available, explicit trade tape status, UID/FIGI-based resolution evidence, and
+that dashboard feed calls do not write calibration or trading tables.
 
 ## Connection Indicator
 

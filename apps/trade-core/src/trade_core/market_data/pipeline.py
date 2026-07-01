@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import replace
+from inspect import signature
 
 from trade_core.market_data.bars import BarEngine
 from trade_core.market_data.event_bus import MarketEventBus
@@ -17,13 +18,16 @@ from trade_core.market_data.events import (
     OrderBookSnapshot,
     TradingStatusTick,
 )
-from trade_core.market_data.persistence import SqlAlchemyMarketDataStore
+from trade_core.market_data.persistence import (
+    MarketMicrostructureRejectedError,
+    SqlAlchemyMarketDataStore,
+)
 from trade_core.market_data.read_models import MarketReadModelStore
 from trade_core.session.models import SessionEventContext
 from trading_common.observability import DomainEventType
 from trading_common.telemetry import bind_context, get_logger, log_event
 
-SessionContextProvider = Callable[[str], SessionEventContext]
+SessionContextProvider = Callable[..., SessionEventContext]
 LOGGER = get_logger(__name__)
 
 
@@ -74,7 +78,7 @@ class MarketDataPipeline:
             TradingStatusTick,
         ):
             self._read_models.apply_trading_status(event.payload)
-            context = self._session_context_provider(event.payload.instrument_id)
+            context = self._session_context(event.payload.instrument_id, event.payload.received_ts)
             _log_market_event(
                 event_type=DomainEventType.MARKET_STATUS_CHANGED.value,
                 component="market_data.pipeline",
@@ -96,7 +100,7 @@ class MarketDataPipeline:
 
     async def _handle_candle(self, candle: Candle) -> None:
         if self._store is not None and candle.is_closed:
-            context = self._session_context_provider(candle.instrument_id)
+            context = self._session_context(candle.instrument_id, candle.close_ts_utc)
             self._store.save_candle(candle=candle, context=context)
 
         for bar in self._bar_engine.on_candle(candle):
@@ -112,17 +116,27 @@ class MarketDataPipeline:
             payload=_market_state_payload_from_order_book(order_book.payload),
         )
         if self._store is not None:
-            context = self._session_context_provider(order_book.instrument_id)
+            context = self._session_context(order_book.instrument_id, order_book.received_ts)
             payload = dict(order_book.payload)
             payload["recent_market_trades"] = self._read_models.recent_trades(
                 order_book.instrument_id
             )[:20]
             enriched_order_book = replace(order_book, payload=payload)
-            self._store.save_order_book_summary(
-                order_book=enriched_order_book,
-                market_state=market_state,
-                context=context,
-            )
+            try:
+                self._store.save_order_book_summary(
+                    order_book=enriched_order_book,
+                    market_state=market_state,
+                    context=context,
+                )
+            except MarketMicrostructureRejectedError as exc:
+                log_event(
+                    logger=LOGGER,
+                    event_type="data_only_microstructure_row_rejected",
+                    component="market_data.pipeline",
+                    instrument_id=order_book.instrument_id,
+                    reason=exc.reason.value,
+                    table="order_book_summary",
+                )
         await self._event_bus.publish(
             MarketDataEvent(
                 event_type=MarketEventType.MARKET_STATE_UPDATED,
@@ -134,7 +148,7 @@ class MarketDataPipeline:
 
     async def _publish_closed_bar(self, bar: Bar) -> None:
         self._read_models.apply_bar(bar)
-        context = self._session_context_provider(bar.instrument_id)
+        context = self._session_context(bar.instrument_id, bar.close_ts_utc)
         _log_market_event(
             event_type=DomainEventType.BAR_CLOSED.value,
             component="bar_engine",
@@ -157,6 +171,12 @@ class MarketDataPipeline:
                 instrument_id=bar.instrument_id,
             )
         )
+
+    def _session_context(self, instrument_id: str, observed_at: object) -> SessionEventContext:
+        provider = self._session_context_provider
+        if len(signature(provider).parameters) >= 2:
+            return provider(instrument_id, observed_at)
+        return provider(instrument_id)
 
 
 def _log_market_event(

@@ -946,12 +946,6 @@ class BffReadService:
             else _datetime_payload_value(lifecycle_payload, "next_collection_window_at")
         )
         preflight_next_session_at = _next_session_from_preflight(preflight_payload)
-        if (
-            collector_day_complete
-            and preflight_next_session_at is not None
-            and preflight_next_session_at <= datetime.now(tz=UTC) + timedelta(seconds=60)
-        ):
-            preflight_next_session_at = None
         next_session_at = (
             preflight_next_session_at
             if collector_day_complete

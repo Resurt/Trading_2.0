@@ -1926,12 +1926,13 @@ def test_dashboard_market_feed_waits_for_selected_refresh_when_cache_incomplete(
         return await asyncio.wait_for(task, timeout=2)
 
     snapshot = asyncio.run(run())
-    selected = snapshot["selected_details"]
+    selected = cast(dict[str, Any], snapshot["selected_details"])
+    status = cast(dict[str, Any], snapshot["status"])
 
     assert gateway.order_book_calls == 1
     assert len(selected["order_book_summary"]["bids"]) == 5
     assert len(selected["order_book_summary"]["asks"]) == 5
-    assert snapshot["status"]["order_book_available"] is True
+    assert status["order_book_available"] is True
 
 
 def test_dashboard_market_feed_keeps_full_selected_ladder_over_partial_refresh(

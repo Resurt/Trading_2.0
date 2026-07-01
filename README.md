@@ -330,13 +330,19 @@ is disabled by Stop and never calls `PostOrder`, `CancelOrder`, or creates tradi
 entities.
 
 One operator Start is a daily data-only collection intent, not a single-session
-toggle. On weekdays the runtime must collect `weekday_morning`, pause at the
-morning cutoff as `paused_until_next_window`, auto-resume for `weekday_main`, pause
-again before `weekday_evening`, and finish as `stopped_day_complete` after the last
-window. Manual Stop cancels the daily intent and prevents auto-resume. Runtime and
-API status distinguish `robot_control_state`, `data_shadow_collector_state`,
-`daily_collection_active`, and `effective_logging_state` so a stopped or paused
-collector is not reported as simply running.
+toggle. If Start is clicked before the first same-day collection window and that
+window is within the arming threshold, trade-core records
+`armed_until_next_window`, keeps streams stopped, and starts after a fresh
+preflight at the window open. The canonical weekday windows are half-open:
+`[07:00,10:00)` morning, `[10:00,19:00)` main, and `[19:00,23:50)` evening.
+The 10:00 and 19:00 exact boundaries belong to the new window/hour bucket. On
+weekdays the runtime must collect morning, close/resume into main, close/resume
+into evening, and finish as `stopped_day_complete` after the final window.
+Manual Stop cancels armed and active daily intent. Runtime and API status
+distinguish `robot_control_state`, `data_shadow_collector_state`,
+`daily_collection_active`, and `effective_logging_state` (`armed`,
+`waiting_for_open`, `collecting`, `blocked`, `stopped`) so a stopped, armed, or
+paused collector is not reported as simply running.
 
 If the trade-core process or container restarts during an active collection window,
 the latest durable `data_only_shadow_collection_started`/`resumed` audit event is
@@ -350,12 +356,15 @@ skipped, so account-level `GetPositions`/`GetPortfolio` calls happen only throug
 explicit balance diagnostics such as `/portfolio/refresh`.
 
 Known-invalid primary data-only rows are not retained as rejected calibration
-samples. If a bug writes `market_microstructure_snapshot` or `order_book_summary`
-after the session cutoff, during official closure, in OTC/indicative mode, from
-stale local history, or with wrong session context, maintenance must write a
-purge manifest, preserve the incident in `audit_event`, and remove those rows
-from primary calibration/logging tables. The protected CLI is
-`scripts/run_purge_invalid_data_shadow_rows.py`.
+samples. Crossed books, negative spreads, invalid depth/imbalance, missing
+bid/ask, outside-window rows, and OTC/dealer/indicative/stale/local display data
+are rejected before primary persistence. If a historical bug wrote such rows,
+maintenance must write a manifest, preserve the incident in `audit_event`, and
+purge invalid market values from primary calibration/logging tables. Deterministic
+metadata bugs such as wrong `micro_session_id` may be repaired when market values
+are valid. Protected CLIs are `scripts/run_purge_invalid_data_shadow_rows.py` for
+known late rows and `scripts/run_repair_data_shadow_quality_issues.py` for the
+quality repair/purge policy.
 
 The Start button must show an animated preflight/start progress state, not a silent
 disabled button. The command strip shows the phase, message, reason code and next

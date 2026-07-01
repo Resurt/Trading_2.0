@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC
 from decimal import Decimal
+from inspect import signature
 
 from trade_core.market_data.calculators import MarketState
 from trade_core.market_data.event_bus import MarketEventBus
@@ -15,12 +16,15 @@ from trade_core.market_data.events import (
     MarketEventType,
     OrderBookSnapshot,
 )
-from trade_core.market_data.persistence import SqlAlchemyMarketDataStore
+from trade_core.market_data.persistence import (
+    MarketMicrostructureRejectedError,
+    SqlAlchemyMarketDataStore,
+)
 from trade_core.session.models import SessionEventContext
 from trading_common import TradingMetrics
 from trading_common.telemetry import get_logger, log_event
 
-SessionContextProvider = Callable[[str], SessionEventContext]
+SessionContextProvider = Callable[..., SessionEventContext]
 LOGGER = get_logger(__name__)
 
 
@@ -31,8 +35,10 @@ class LiveMarketDataCollectorStats:
     candles_received: int = 0
     order_books_received: int = 0
     market_state_snapshots_written: int = 0
+    market_state_snapshots_rejected: int = 0
     spread_samples: list[Decimal] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    rejection_counts: dict[str, int] = field(default_factory=dict)
 
 
 class LiveMarketDataCollector:
@@ -99,7 +105,7 @@ class LiveMarketDataCollector:
             return
         market_state = event.payload
         try:
-            context = self._session_context_provider(market_state.instrument_id)
+            context = self._session_context(market_state.instrument_id, event.ts_utc)
             snapshot = self._store.save_microstructure_snapshot(
                 market_state=market_state,
                 context=context,
@@ -132,6 +138,42 @@ class LiveMarketDataCollector:
                 else None,
                 source=self._source,
             )
+        except MarketMicrostructureRejectedError as exc:
+            self.stats.market_state_snapshots_rejected += 1
+            rejection_key = f"{market_state.instrument_id}:{exc.reason.value}"
+            rejection_count = self.stats.rejection_counts.get(rejection_key, 0) + 1
+            self.stats.rejection_counts[rejection_key] = rejection_count
+            if self._metrics is not None:
+                self._metrics.inc_market_microstructure_snapshot(
+                    instrument_id=market_state.instrument_id,
+                    status="rejected",
+                )
+            audit_payload = {
+                **market_state.as_read_model(),
+                **market_state.payload,
+                "collector_source": self._source,
+                "source": market_state.payload.get("source", self._source),
+                "event_type": event.event_type.value,
+                "rejection_count": rejection_count,
+            }
+            if rejection_count == 1 or rejection_count % 100 == 0:
+                context = self._session_context(market_state.instrument_id, event.ts_utc)
+                self._store.save_microstructure_rejection_audit(
+                    market_state=market_state,
+                    context=context,
+                    reason=exc.reason,
+                    payload=audit_payload,
+                )
+            log_event(
+                logger=LOGGER,
+                level="WARNING",
+                event_type="data_only_microstructure_row_rejected",
+                component="market_data.live_collector",
+                instrument_id=market_state.instrument_id,
+                reason=exc.reason.value,
+                source=self._source,
+                rejection_count=rejection_count,
+            )
         except Exception as exc:
             self.stats.errors.append(type(exc).__name__)
             if self._metrics is not None:
@@ -149,3 +191,9 @@ class LiveMarketDataCollector:
                 source=self._source,
             )
             raise
+
+    def _session_context(self, instrument_id: str, observed_at: object) -> SessionEventContext:
+        provider = self._session_context_provider
+        if len(signature(provider).parameters) >= 2:
+            return provider(instrument_id, observed_at)
+        return provider(instrument_id)

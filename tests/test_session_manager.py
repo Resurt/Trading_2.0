@@ -79,12 +79,6 @@ def weekday_schedule() -> TradingSchedule:
             SessionType.WEEKDAY_MAIN,
             SessionPhase.CONTINUOUS_TRADING,
             msk(2026, 6, 12, 10),
-            msk(2026, 6, 12, 18, 59),
-        ),
-        window(
-            SessionType.WEEKDAY_MAIN,
-            SessionPhase.BREAK,
-            msk(2026, 6, 12, 18, 59),
             msk(2026, 6, 12, 19),
         ),
         window(
@@ -118,28 +112,23 @@ def test_session_manager_transitions_weekday_morning_to_main() -> None:
     assert main.session_phase is SessionPhase.CONTINUOUS_TRADING
 
 
-def test_session_manager_transitions_main_to_break_and_evening() -> None:
+def test_session_manager_transitions_main_to_evening_half_open() -> None:
     manager = SessionManager()
 
     main = manager.evaluate(
-        now=msk(2026, 6, 12, 18, 58, 59),
-        schedule=weekday_schedule(),
-        broker_status=status(),
-    )
-    session_break = manager.evaluate(
         now=msk(2026, 6, 12, 18, 59, 30),
         schedule=weekday_schedule(),
         broker_status=status(),
     )
     evening = manager.evaluate(
-        now=msk(2026, 6, 12, 19, 1),
+        now=msk(2026, 6, 12, 19),
         schedule=weekday_schedule(),
         broker_status=status(),
     )
 
     assert main.session_type is SessionType.WEEKDAY_MAIN
-    assert session_break.session_phase is SessionPhase.BREAK
-    assert not session_break.is_trading_allowed
+    assert main.session_phase is SessionPhase.CONTINUOUS_TRADING
+    assert main.is_trading_allowed
     assert evening.session_type is SessionType.WEEKDAY_EVENING
     assert evening.is_trading_allowed
 
@@ -325,9 +314,23 @@ def test_auction_and_break_boundaries_do_not_open_micro_sessions() -> None:
         schedule=auction_schedule,
         broker_status=status(),
     )
+    break_schedule = schedule(
+        window(
+            SessionType.WEEKDAY_MAIN,
+            SessionPhase.CONTINUOUS_TRADING,
+            msk(2026, 6, 12, 10),
+            msk(2026, 6, 12, 11),
+        ),
+        window(
+            SessionType.WEEKDAY_MAIN,
+            SessionPhase.BREAK,
+            msk(2026, 6, 12, 11),
+            msk(2026, 6, 12, 12),
+        ),
+    )
     break_snapshot = manager.evaluate(
-        now=msk(2026, 6, 12, 18, 59, 30),
-        schedule=weekday_schedule(),
+        now=msk(2026, 6, 12, 11, 30),
+        schedule=break_schedule,
         broker_status=status(),
     )
 

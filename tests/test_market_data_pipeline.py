@@ -44,7 +44,13 @@ from trade_core.market_data.persistence import SqlAlchemyMarketDataStore
 from trade_core.session.models import SessionEventContext
 from trading_common import LaunchModePolicy, RuntimeMode
 from trading_common.db import Base
-from trading_common.db.models import InstrumentRegistry, MarketCandle, MarketMicrostructureSnapshot
+from trading_common.db.models import (
+    AuditEvent,
+    InstrumentRegistry,
+    MarketCandle,
+    MarketMicrostructureSnapshot,
+    OrderBookSummary,
+)
 from trading_common.enums import SessionPhase, SessionType
 
 MSK = ZoneInfo("Europe/Moscow")
@@ -554,6 +560,61 @@ def test_live_market_data_collector_writes_microstructure_snapshot() -> None:
     assert snapshot.book_imbalance == Decimal("0.1111")
     assert collector.stats.market_state_snapshots_written == 1
     assert collector.stats.order_books_received == 1
+    engine.dispose()
+
+
+def test_crossed_order_book_is_rejected_before_primary_persistence() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    now = utc(2026, 6, 12, 7)
+    event_bus = MarketEventBus()
+    read_models = MarketReadModelStore()
+
+    with Session(engine) as session:
+        store = SqlAlchemyMarketDataStore(session)
+        pipeline = MarketDataPipeline(
+            event_bus=event_bus,
+            session_context_provider=lambda instrument_id: session_context(instrument_id),
+            read_models=read_models,
+            store=store,
+        )
+        pipeline.register()
+        collector = LiveMarketDataCollector(
+            event_bus=event_bus,
+            session_context_provider=lambda instrument_id: session_context(instrument_id),
+            store=store,
+        )
+        collector.register()
+
+        async def run() -> None:
+            await event_bus.publish(
+                MarketDataEvent(
+                    event_type=MarketEventType.ORDER_BOOK,
+                    payload=OrderBookSnapshot(
+                        instrument_id="MOEX:SBER",
+                        bids=(PriceLevel(Decimal("101"), Decimal("10")),),
+                        asks=(PriceLevel(Decimal("100"), Decimal("8")),),
+                        depth=1,
+                        exchange_ts=now,
+                        received_ts=now,
+                    ),
+                    ts_utc=now,
+                    instrument_id="MOEX:SBER",
+                )
+            )
+
+        asyncio.run(run())
+        session.commit()
+        micro_count = session.scalar(select(func.count()).select_from(MarketMicrostructureSnapshot))
+        order_book_count = session.scalar(select(func.count()).select_from(OrderBookSummary))
+        audit = session.execute(select(AuditEvent)).scalar_one()
+
+    assert read_models.live_order_book("MOEX:SBER") is not None
+    assert micro_count == 0
+    assert order_book_count == 0
+    assert collector.stats.market_state_snapshots_rejected == 1
+    assert audit.action == "data_only_microstructure_row_rejected"
+    assert audit.audit_payload["reason"] == "crossed_book"
     engine.dispose()
 
 

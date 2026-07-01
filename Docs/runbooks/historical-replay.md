@@ -87,7 +87,7 @@ python scripts/run_launch_readiness.py --mode historical-replay --dry-run
 Historical candles получают fallback-классификацию, если нет broker schedule:
 
 - `weekday_morning`: 07:00-10:00 MSK;
-- `weekday_main`: 10:00-18:59 MSK;
+- `weekday_main`: [10:00,19:00) MSK;
 - `weekday_evening`: 19:00-23:50 MSK;
 - `weekend`: отдельный weekend contour;
 - вне окна: `session_phase=closed`;

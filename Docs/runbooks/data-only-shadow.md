@@ -432,6 +432,18 @@ should run.
 
 ## Session close behavior
 
+Weekday data-only windows are half-open in MSK:
+`[07:00,10:00)` for `weekday_morning`, `[10:00,19:00)` for
+`weekday_main`, and `[19:00,23:50)` for `weekday_evening`. Exact boundaries
+belong to the new interval: `10:00:00` is main/hour 10 and `19:00:00` is
+evening/hour 19. `micro_session_id` is deterministic from MSK timestamp,
+session type, and floored hour bucket.
+
+If an operator clicks Start before the next same-day window and the wait is
+within `DATA_SHADOW_START_ARMING_MAX_WAIT_HOURS`, the command is armed as
+`armed_until_next_window`. Streams remain stopped until fresh preflight at the
+window open. Manual Stop cancels armed and active daily collection.
+
 The collector must not keep writing calibration rows after the fresh preflight
 window closes. On each runtime cycle, trade-core rechecks the current data-only
 preflight context. If the current time is outside `current_window_start_at` /
@@ -453,6 +465,15 @@ logging tables after a purge manifest is written. Incident evidence stays in
 `.local` reports and `audit_event`; the invalid primary rows do not remain as
 calibration inputs.
 
+Deterministic metadata errors, such as a wrong hour bucket or
+`micro_session_id` on otherwise valid market rows, may be repaired with a
+manifest. Invalid market values, including crossed books and negative spreads,
+are purged from primary calibration/logging rows. Use
+`scripts/run_repair_data_shadow_quality_issues.py --date YYYY-MM-DD --dry-run`
+first, then `--apply` only after reviewing the manifest. The script writes
+`data_only_quality_rows_repaired` and `data_only_invalid_rows_purged` audit
+events and refuses mass changes by default.
+
 Use the protected purge CLI for known late data-shadow rows:
 
 ```bash
@@ -463,3 +484,10 @@ python scripts/run_purge_invalid_data_shadow_rows.py --date TODAY --reason late_
 The purge must record `data_only_invalid_rows_purged` in `audit_event` and must
 not delete valid rows before the cutoff, `audit_event`, `robot_command`, or
 historical candle backfill data.
+
+Forward writes are guarded as well. Crossed books, negative spreads, invalid
+mid/spread/depth/imbalance, missing bid/ask, outside-session rows, and
+non-calibration display sources are rejected before
+`market_microstructure_snapshot`/`order_book_summary` persistence. Rejected
+microstructure emits rate-limited `data_only_microstructure_row_rejected`
+audit_event records with the rejection reason.

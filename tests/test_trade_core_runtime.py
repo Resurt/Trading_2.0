@@ -768,22 +768,9 @@ def test_data_only_weekday_start_rolls_morning_main_evening_and_completes_day(
 
         gateway.now = msk(2026, 6, 29, 18, 59)
         await runtime.run_cycle(now=msk(2026, 6, 29, 18, 59))
-        assert runtime.stats.collector_state == "paused_until_next_window"
+        assert runtime.stats.collector_state == "collecting"
         assert runtime.stats.daily_collection_active is True
         assert runtime.stats.next_collection_window_at == msk(2026, 6, 29, 19)
-
-        with runtime.database.session_factory() as session:
-            gap_rows = session.scalar(
-                select(func.count())
-                .select_from(MarketMicrostructureSnapshot)
-                .where(
-                    MarketMicrostructureSnapshot.ts_utc
-                    >= msk(2026, 6, 29, 18, 59).astimezone(UTC),
-                    MarketMicrostructureSnapshot.ts_utc
-                    < msk(2026, 6, 29, 19).astimezone(UTC),
-                )
-            )
-            assert gap_rows == 0
 
         gateway.now = msk(2026, 6, 29, 19)
         await runtime.run_cycle(now=msk(2026, 6, 29, 19))
@@ -899,7 +886,7 @@ def test_data_only_daily_intent_restores_and_resumes_after_runtime_restart(
         data_only_shadow_enabled=True,
         data_only_order_book_poll_interval_seconds=1,
     )
-    first_gateway = PollingOrderBookGateway(now=msk(2026, 6, 29, 7, 5))
+    first_gateway = PollingOrderBookGateway(now=msk(2026, 6, 29, 6, 50))
     first_runtime = TradeCoreRuntime(
         config=config,
         launch_policy=LaunchModePolicy.from_mode(RuntimeMode.SHADOW),
@@ -910,27 +897,36 @@ def test_data_only_daily_intent_restores_and_resumes_after_runtime_restart(
 
     async def first_run() -> None:
         await first_runtime.start()
+        preflight = data_only_preflight_payload(
+            now=msk(2026, 6, 29, 6, 50),
+            session_type="weekday_morning",
+            start_at=msk(2026, 6, 29, 7),
+            end_at=msk(2026, 6, 29, 10),
+            next_collection_at=msk(2026, 6, 29, 7),
+        )
+        preflight.update(
+            {
+                "session_phase": "closed",
+                "market_open": False,
+                "market_window_open": False,
+                "data_only_collection_allowed": False,
+                "streams_for_calibration_allowed": False,
+                "reason_code": "before_collection_window",
+            }
+        )
         create_data_only_start_command(
             first_runtime,
-            data_only_preflight_payload(
-                now=msk(2026, 6, 29, 7, 5),
-                session_type="weekday_morning",
-                start_at=msk(2026, 6, 29, 7),
-                end_at=msk(2026, 6, 29, 10),
-            ),
+            preflight,
         )
         assert await first_runtime.process_robot_commands_async() == 1
-        await first_runtime.run_cycle(now=msk(2026, 6, 29, 7, 5))
-        first_gateway.now = msk(2026, 6, 29, 10)
-        await first_runtime.run_cycle(now=msk(2026, 6, 29, 10))
-        first_gateway.now = msk(2026, 6, 29, 18, 59)
-        await first_runtime.run_cycle(now=msk(2026, 6, 29, 18, 59))
-        assert first_runtime.stats.collector_state == "paused_until_next_window"
+        assert first_runtime.stats.collector_state == "armed_until_next_window"
+        assert first_runtime.stats.daily_collection_active is True
+        assert first_gateway.order_book_requests == []
         await first_runtime.shutdown()
 
     asyncio.run(first_run())
 
-    second_gateway = PollingOrderBookGateway(now=msk(2026, 6, 29, 19))
+    second_gateway = PollingOrderBookGateway(now=msk(2026, 6, 29, 7))
     second_runtime = TradeCoreRuntime(
         config=config,
         launch_policy=LaunchModePolicy.from_mode(RuntimeMode.SHADOW),
@@ -942,8 +938,8 @@ def test_data_only_daily_intent_restores_and_resumes_after_runtime_restart(
     async def second_run() -> None:
         await second_runtime.start()
         assert second_runtime.stats.daily_collection_active is True
-        assert second_runtime.stats.collector_state == "paused_until_next_window"
-        await second_runtime.run_cycle(now=msk(2026, 6, 29, 19))
+        assert second_runtime.stats.collector_state == "armed_until_next_window"
+        await second_runtime.run_cycle(now=msk(2026, 6, 29, 7))
         assert second_runtime.stats.collector_state == "collecting"
         with second_runtime.database.session_factory() as session:
             latest = session.execute(
@@ -952,7 +948,7 @@ def test_data_only_daily_intent_restores_and_resumes_after_runtime_restart(
                 )
             ).scalars().first()
             assert latest is not None
-            assert latest.session_type == "weekday_evening"
+            assert latest.session_type == "weekday_morning"
         assert second_gateway.post_order_calls == []
         assert second_gateway.cancel_order_calls == []
         await second_runtime.shutdown()
@@ -987,7 +983,7 @@ def test_data_only_daily_intent_restarts_active_window_after_runtime_restart(
                 now=msk(2026, 6, 29, 10, 10),
                 session_type="weekday_main",
                 start_at=msk(2026, 6, 29, 10),
-                end_at=msk(2026, 6, 29, 18, 59),
+                end_at=msk(2026, 6, 29, 19),
                 next_collection_at=msk(2026, 6, 29, 19),
             ),
         )
