@@ -1,7 +1,7 @@
 import { mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { nextTick } from "vue";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { useMarketStore } from "../stores/market";
 import { usePortfolioStore } from "../stores/portfolio";
@@ -127,6 +127,10 @@ function mountWithStores() {
 }
 
 describe("LiveDashboardView", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("renders operator dashboard with quote cards and readable status", () => {
     const wrapper = mountWithStores();
 
@@ -145,11 +149,10 @@ describe("LiveDashboardView", () => {
     expect(wrapper.text()).toContain("биржевая");
     expect(wrapper.text()).toContain("Data-only сбор");
     expect(wrapper.text()).toContain("Реальные заявки и стратегия отключены");
-    expect(wrapper.text()).toContain("старт сбора");
-    expect(wrapper.text()).toContain("прошло");
+    expect(wrapper.text()).toContain("старт микросессии");
+    expect(wrapper.text()).toContain("прошло в микросессии");
     expect(wrapper.text()).toMatch(/\d+ч\s\d{2}м\s\d{2}с/);
-    expect(wrapper.text()).not.toContain("старт часа");
-    expect(wrapper.text()).not.toContain("прошло в часе");
+    expect(wrapper.text()).not.toContain("старт сбора");
     expect(wrapper.text()).not.toContain("записано рынка");
     expect(wrapper.text()).not.toContain("записано стаканов");
     expect(wrapper.text()).not.toContain("последнее сообщение");
@@ -165,6 +168,71 @@ describe("LiveDashboardView", () => {
     expect(wrapper.text()).toContain("Спред слишком широкий");
     expect(wrapper.text()).toContain("spread above configured threshold");
     expect(wrapper.text()).not.toContain("request-1");
+  });
+
+  it("shows collector elapsed time for the current hourly micro-session, not collector uptime", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-01T20:40:39Z"));
+    const wrapper = mountWithStores();
+    const robot = useRobotStore();
+    const market = useMarketStore();
+    robot.status = {
+      ...robot.status,
+      micro_session_id: "2026-07-01:weekday_evening:20260701T2300",
+      collector_started_at: "2026-07-01T18:52:44.475698Z",
+    };
+    robot.session = {
+      ...robot.session,
+      micro_session_id: "2026-07-01:weekday_evening:20260701T2300",
+    };
+    robot.lastSessionPreflight = {
+      market_open: true,
+      market_closed_expected: false,
+      now_msk: "2026-07-01T23:40:39+03:00",
+      trading_date: "2026-07-01",
+      calendar_date: "2026-07-01",
+      session_type: "weekday_evening",
+      session_phase: "continuous_trading",
+      broker_trading_status: "normal_trading",
+      api_trade_available: true,
+      official_exchange_open: true,
+      official_exchange_closed: false,
+      official_exchange_reason_code: null,
+      official_exchange_source: "local_moex_calendar_rules",
+      broker_stream_available: true,
+      broker_otc_or_indicative_available: false,
+      api_trade_available_raw: true,
+      api_trade_available_for_exchange: true,
+      quote_source_allowed_for_data_collection: true,
+      data_only_collection_allowed: true,
+      streams_for_display_allowed: true,
+      streams_for_calibration_allowed: true,
+      venue_type: "official_exchange",
+      trading_mode: "standard_exchange",
+      broker_availability_ignored_because_official_exchange_closed: false,
+      next_session_at: "2026-07-02T07:00:00+03:00",
+      next_session_type: "weekday_morning",
+      current_window_start_at: "2026-07-01T19:00:00+03:00",
+      current_window_end_at: "2026-07-01T23:50:00+03:00",
+      reason_code: "market_open",
+      source: "test",
+      instruments_checked: ["MOEX:SBER"],
+      per_instrument_status: {},
+      warnings: [],
+    };
+    market.dataShadowStatus = {
+      ...market.dataShadowStatus,
+      collector_state: "collecting",
+      collector_started_at: "2026-07-01T18:52:44.475698Z",
+      next_session_at: "2026-07-01T20:40:40Z",
+    };
+    await nextTick();
+
+    expect(wrapper.text()).toContain("старт микросессии");
+    expect(wrapper.text()).toContain("прошло в микросессии");
+    expect(wrapper.text()).toContain("00ч 40м 39с");
+    expect(wrapper.text()).not.toContain("01ч 47м");
+    expect(wrapper.text()).not.toContain("01.07, 23:40:40");
   });
 
   it("does not duplicate open-market text in the session ribbon", () => {

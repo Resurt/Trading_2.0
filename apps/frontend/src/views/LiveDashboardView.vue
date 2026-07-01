@@ -108,6 +108,13 @@ const collectorMessages = computed(() => {
   return [...new Set(items)].slice(0, 4);
 });
 const MIN_SELECTED_ORDER_BOOK_SIDE_LEVELS = 5;
+const MSK_OFFSET_MS = 3 * 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
+
+type MicroSessionWindow = {
+  startMs: number;
+  endMs: number;
+};
 
 function toneFromQuote(instrument: MarketInstrumentOverview): "good" | "warn" | "muted" {
   if (instrument.quote_status === "live") {
@@ -694,7 +701,7 @@ function nextSessionAt(): string | null | undefined {
   return (
     market.dashboardFeedStatus.next_session_at ??
     robot.lastSessionPreflight?.next_session_at ??
-    market.dataShadowStatus.next_session_at
+    (displayMarketOpen() === false ? market.dataShadowStatus.next_session_at : null)
   );
 }
 
@@ -726,42 +733,138 @@ function collectorReasonLabel(): string {
 }
 
 function collectorNextSessionAt(): string | null | undefined {
-  if (displayMarketOpen() === false) {
-    return nextSessionAt();
-  }
-  return market.dataShadowStatus.next_session_at ?? nextSessionAt();
+  return nextSessionAt();
 }
 
-function collectorStartedAt(): string | null {
+function collectorMicroSessionWindow(): MicroSessionWindow | null {
   if (market.dataShadowStatus.collector_state !== "collecting") {
     return null;
   }
-  return market.dataShadowStatus.collector_started_at ?? market.dataShadowStatus.started_at ?? null;
+  return (
+    microSessionWindowFromId(robot.status.micro_session_id ?? robot.session.micro_session_id) ??
+    microSessionWindowFromClock()
+  );
 }
 
-function collectorStartedAtLabel(): string {
-  const startedAt = collectorStartedAt();
-  return startedAt ? compactDateTime(startedAt) : "0";
+function collectorMicroSessionStartedAtLabel(): string {
+  const window = collectorMicroSessionWindow();
+  return window ? compactDateTime(new Date(window.startMs).toISOString()) : "0";
 }
 
-function collectorElapsedLabel(): string {
-  const startedAt = collectorStartedAt();
-  if (!startedAt) {
+function collectorMicroSessionElapsedLabel(): string {
+  const window = collectorMicroSessionWindow();
+  if (!window) {
     return "00ч 00м 00с";
   }
 
-  const startedMs = new Date(startedAt).getTime();
-  if (!Number.isFinite(startedMs)) {
-    return "00ч 00м 00с";
-  }
-
-  const elapsedSeconds = Math.max(0, Math.floor((nowTick.value - startedMs) / 1000));
+  const effectiveNow = Math.min(nowTick.value, window.endMs);
+  const elapsedSeconds = Math.max(0, Math.floor((effectiveNow - window.startMs) / 1000));
   const days = Math.floor(elapsedSeconds / 86_400);
   const hours = Math.floor(elapsedSeconds / 3_600);
   const minutes = Math.floor((elapsedSeconds % 3_600) / 60);
   const seconds = elapsedSeconds % 60;
   const prefix = days > 0 ? `${days}д ` : "";
   return `${prefix}${String(hours).padStart(2, "0")}ч ${String(minutes).padStart(2, "0")}м ${String(seconds).padStart(2, "0")}с`;
+}
+
+function collectorWindowEndAtLabel(): string {
+  const endMs = collectionWindowEndMs();
+  return endMs ? compactDateTime(new Date(endMs).toISOString()) : compactDateTime(robot.lastSessionPreflight?.current_window_end_at);
+}
+
+function microSessionWindowFromId(microSessionId: string | null | undefined): MicroSessionWindow | null {
+  const match = microSessionId?.match(/:(\d{8})T(\d{2})00$/);
+  if (!match) {
+    return null;
+  }
+  const [, yyyymmdd, hourText] = match;
+  const year = Number(yyyymmdd.slice(0, 4));
+  const month = Number(yyyymmdd.slice(4, 6));
+  const day = Number(yyyymmdd.slice(6, 8));
+  const hour = Number(hourText);
+  if (![year, month, day, hour].every(Number.isFinite)) {
+    return null;
+  }
+  const startMs = mskDateUtcMs(year, month, day, hour);
+  const endMs = microSessionEndMs(startMs);
+  return { startMs, endMs };
+}
+
+function microSessionWindowFromClock(): MicroSessionWindow | null {
+  const parts = mskPartsFromUtcMs(nowTick.value);
+  const defaultBounds = defaultCollectionWindowBounds(parts, displaySessionType());
+  const collectionStartMs = collectionWindowStartMs() ?? defaultBounds?.startMs ?? null;
+  const collectionEndMs = collectionWindowEndMs() ?? defaultBounds?.endMs ?? null;
+  if (collectionStartMs === null || collectionEndMs === null) {
+    return null;
+  }
+  const hourStartMs = mskDateUtcMs(parts.year, parts.month, parts.day, parts.hour);
+  const startMs = Math.max(hourStartMs, collectionStartMs);
+  const endMs = Math.min(startMs + HOUR_MS, collectionEndMs);
+  if (endMs <= startMs) {
+    return null;
+  }
+  return { startMs, endMs };
+}
+
+function microSessionEndMs(startMs: number): number {
+  const collectionEndMs = collectionWindowEndMs();
+  return collectionEndMs ? Math.min(startMs + HOUR_MS, collectionEndMs) : startMs + HOUR_MS;
+}
+
+function collectionWindowStartMs(): number | null {
+  return parseIsoMs(robot.lastSessionPreflight?.current_window_start_at);
+}
+
+function collectionWindowEndMs(): number | null {
+  return parseIsoMs(robot.lastSessionPreflight?.current_window_end_at);
+}
+
+function parseIsoMs(value: string | null | undefined): number | null {
+  if (!value) {
+    return null;
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function mskPartsFromUtcMs(value: number): { year: number; month: number; day: number; hour: number } {
+  const mskDate = new Date(value + MSK_OFFSET_MS);
+  return {
+    year: mskDate.getUTCFullYear(),
+    month: mskDate.getUTCMonth() + 1,
+    day: mskDate.getUTCDate(),
+    hour: mskDate.getUTCHours(),
+  };
+}
+
+function mskDateUtcMs(year: number, month: number, day: number, hour: number, minute = 0): number {
+  return Date.UTC(year, month - 1, day, hour, minute) - MSK_OFFSET_MS;
+}
+
+function defaultCollectionWindowBounds(
+  parts: { year: number; month: number; day: number },
+  sessionType: string | null | undefined,
+): MicroSessionWindow | null {
+  if (sessionType === "weekday_morning") {
+    return {
+      startMs: mskDateUtcMs(parts.year, parts.month, parts.day, 7),
+      endMs: mskDateUtcMs(parts.year, parts.month, parts.day, 10),
+    };
+  }
+  if (sessionType === "weekday_main") {
+    return {
+      startMs: mskDateUtcMs(parts.year, parts.month, parts.day, 10),
+      endMs: mskDateUtcMs(parts.year, parts.month, parts.day, 19),
+    };
+  }
+  if (sessionType === "weekday_evening") {
+    return {
+      startMs: mskDateUtcMs(parts.year, parts.month, parts.day, 19),
+      endMs: mskDateUtcMs(parts.year, parts.month, parts.day, 23, 50),
+    };
+  }
+  return null;
 }
 
 function orderBookSideCounts(instrument: MarketInstrumentOverview | null): { bids: number; asks: number } {
@@ -1180,12 +1283,14 @@ function degradedFlagLabel(flag: string): string {
             <dd>{{ collectorMarketLabel() }}</dd>
             <dt>причина</dt>
             <dd>{{ collectorReasonLabel() }}</dd>
+            <dt>конец окна</dt>
+            <dd>{{ collectorWindowEndAtLabel() }}</dd>
             <dt>следующая сессия</dt>
             <dd>{{ compactDateTime(collectorNextSessionAt()) }}</dd>
-            <dt>старт сбора</dt>
-            <dd>{{ collectorStartedAtLabel() }}</dd>
-            <dt>прошло</dt>
-            <dd>{{ collectorElapsedLabel() }}</dd>
+            <dt>старт микросессии</dt>
+            <dd>{{ collectorMicroSessionStartedAtLabel() }}</dd>
+            <dt>прошло в микросессии</dt>
+            <dd>{{ collectorMicroSessionElapsedLabel() }}</dd>
           </dl>
           <div class="collector-messages" aria-live="polite">
             <span class="collector-messages__label">сообщения</span>

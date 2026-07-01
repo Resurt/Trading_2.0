@@ -290,13 +290,19 @@ The Collector panel is for administrator-ready lifecycle state, not internal row
 counters. Do not show `samples`, raw snapshot counts, order-book row counts, or
 sample age as primary UI fields. While collection is active, show:
 
-- `старт сбора`: `collector_started_at` from `/runtime/data-shadow/status`, falling
-  back to `started_at`;
-- `прошло`: elapsed wall-clock time since `старт сбора`, formatted as
-  `HHч MMм SSс` and updated every second.
+- `конец окна`: `current_window_end_at` from fresh preflight; for the evening
+  window this is `23:50` MSK;
+- `следующая сессия`: exchange `next_session_at` from dashboard/preflight, not
+  the runtime collector heartbeat/retry timestamp;
+- `старт микросессии`: the current hourly `micro_session_id` boundary in MSK
+  (`...T2300` means `23:00:00`);
+- `прошло в микросессии`: elapsed wall-clock time since the current hourly
+  micro-session start, formatted as `HHч MMм SSс` and updated every second.
+  Clamp the value to the current micro-session end, so it cannot exceed one
+  hour and the final evening micro-session cannot exceed `23:00-23:50`.
 
-If collection is not active or start time is unavailable, show `старт сбора=0` and
-`прошло=00ч 00м 00с`.
+If collection is not active or the micro-session boundary is unavailable, show
+`старт микросессии=0` and `прошло в микросессии=00ч 00м 00с`.
 
 Warnings and transient diagnostics in the `Запись логов` panel must render inside
 a fixed-height `сообщения` area with compact text. Messages may scroll inside that
