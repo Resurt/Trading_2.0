@@ -754,7 +754,7 @@ def _fallback_schedule(now_msk: datetime, *, lookahead_days: int) -> TradingSche
         windows.extend(
             (
                 _window(day, SessionType.WEEKDAY_MORNING, time(7, 0), time(10, 0)),
-                _window(day, SessionType.WEEKDAY_MAIN, time(10, 0), time(18, 59)),
+                _window(day, SessionType.WEEKDAY_MAIN, time(10, 0), time(19, 0)),
                 _window(day, SessionType.WEEKDAY_EVENING, time(19, 0), time(23, 50)),
             )
         )

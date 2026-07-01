@@ -593,7 +593,7 @@ def classify_historical_exchange_ts(exchange_ts: datetime) -> HistoricalSessionC
         session_type = SessionType.WEEKDAY_MAIN
         phase = (
             SessionPhase.CONTINUOUS_TRADING
-            if time(10, 0) <= local_time < time(18, 59)
+            if time(10, 0) <= local_time < time(19, 0)
             else SessionPhase.CLOSED
         )
     else:

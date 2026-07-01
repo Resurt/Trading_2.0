@@ -196,6 +196,9 @@ class TradeCoreRuntimeConfig:
     data_only_daily_collection_enabled: bool = True
     data_only_auto_resume_enabled: bool = True
     data_only_session_rollover_check_seconds: float = 30.0
+    data_only_start_arming_enabled: bool = True
+    data_only_start_arming_max_wait_hours: float = 4.0
+    data_only_start_arming_check_seconds: float = 30.0
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> TradeCoreRuntimeConfig:
@@ -271,6 +274,16 @@ class TradeCoreRuntimeConfig:
             ),
             data_only_session_rollover_check_seconds=float(
                 env.get("DATA_SHADOW_SESSION_ROLLOVER_CHECK_SECONDS", "30")
+            ),
+            data_only_start_arming_enabled=_bool_env(
+                env.get("DATA_SHADOW_START_ARMING_ENABLED"),
+                default=True,
+            ),
+            data_only_start_arming_max_wait_hours=float(
+                env.get("DATA_SHADOW_START_ARMING_MAX_WAIT_HOURS", "4")
+            ),
+            data_only_start_arming_check_seconds=float(
+                env.get("DATA_SHADOW_START_ARMING_CHECK_SECONDS", "30")
             ),
         )
 
@@ -1183,7 +1196,10 @@ class TradeCoreRuntime:
             and not self._data_only_collection_window_open(now=now)
         ):
             await self._close_current_data_only_window(now=now)
-        if self.stats.collector_state == "paused_until_next_window":
+        if self.stats.collector_state in {
+            "paused_until_next_window",
+            "armed_until_next_window",
+        }:
             await self._resume_data_only_collection_if_due(now=now)
 
     async def _close_current_data_only_window(self, *, now: datetime) -> None:
@@ -1426,6 +1442,48 @@ class TradeCoreRuntime:
                 "strategy_trading_disabled": True,
             },
         )
+
+    def _data_only_start_can_arm(
+        self,
+        preflight: Mapping[str, object],
+        *,
+        now: datetime,
+    ) -> tuple[bool, ScheduleWindow | None, str]:
+        if not self.config.data_only_start_arming_enabled:
+            return False, None, "data_only_start_arming_disabled"
+        if preflight.get("official_exchange_closed") is True:
+            return False, None, str(
+                preflight.get("reason_code") or "official_exchange_closed"
+            )
+        now_msk = _ensure_msk(now)
+        trading_date = _payload_date(preflight, "trading_date") or now_msk.date()
+        next_window_at = _preflight_datetime_msk(
+            preflight,
+            "next_collection_window_at",
+        ) or _preflight_datetime_msk(preflight, "next_session_at")
+        next_window = None
+        if next_window_at is not None:
+            for window in self._collection_windows_for_day(trading_date):
+                if window.start_at == next_window_at:
+                    next_window = window
+                    break
+        if next_window is None:
+            next_window = self._next_collection_window_after(
+                trading_date=trading_date,
+                after=now_msk,
+                include_equal=True,
+            )
+        if next_window is None:
+            return False, None, "no_collection_window_today"
+        if next_window.trading_date != now_msk.date():
+            return False, None, "next_collection_window_not_today"
+        wait_seconds = (next_window.start_at - now_msk).total_seconds()
+        if wait_seconds < 0:
+            return False, None, "next_collection_window_in_past"
+        max_wait_seconds = self.config.data_only_start_arming_max_wait_hours * 3600
+        if wait_seconds > max_wait_seconds:
+            return False, None, "next_collection_window_too_far"
+        return True, next_window, "armed_until_next_window"
 
     def _data_only_polling_calibration_allowed(self, *, now: datetime) -> bool:
         preflight = self._data_only_preflight_payload or {}
@@ -1684,6 +1742,7 @@ class TradeCoreRuntime:
             return
         lifecycle_actions = {
             "data_only_shadow_collection_started",
+            "data_only_shadow_collection_armed_until_next_window",
             "data_only_shadow_collection_resumed",
             "data_only_shadow_collection_paused_until_next_window",
             "data_only_shadow_collection_day_complete",
@@ -1725,10 +1784,19 @@ class TradeCoreRuntime:
             return
 
         self.stats.daily_collection_active = True
-        self.stats.day_collection_state = "active"
-        self.stats.collector_state = "paused_until_next_window"
-        self.stats.current_window_state = "paused_until_next_window"
-        self.robot_control_state = "paused_until_next_window"
+        restored_wait_state = (
+            "armed_until_next_window"
+            if action == "data_only_shadow_collection_armed_until_next_window"
+            else "paused_until_next_window"
+        )
+        self.stats.day_collection_state = (
+            "armed_until_next_window"
+            if restored_wait_state == "armed_until_next_window"
+            else "active"
+        )
+        self.stats.collector_state = restored_wait_state
+        self.stats.current_window_state = restored_wait_state
+        self.robot_control_state = restored_wait_state
         self.stats.cancelled_by_operator = False
         self.stats.completed_for_day = False
         self.stats.current_trading_date = _payload_date(payload, "trading_date")
@@ -1737,12 +1805,19 @@ class TradeCoreRuntime:
         self.stats.next_collection_window_at = _coerce_datetime_payload(
             payload.get("next_collection_window_at")
         )
-        if action == "data_only_shadow_collection_paused_until_next_window":
+        if action in {
+            "data_only_shadow_collection_paused_until_next_window",
+            "data_only_shadow_collection_armed_until_next_window",
+        }:
             self.stats.next_resume_at = _coerce_datetime_payload(payload.get("next_resume_at"))
         else:
             self.stats.next_resume_at = None
         if (
-            action == "data_only_shadow_collection_paused_until_next_window"
+            action
+            in {
+                "data_only_shadow_collection_paused_until_next_window",
+                "data_only_shadow_collection_armed_until_next_window",
+            }
             and self.stats.next_resume_at is None
         ):
             self.stats.next_resume_at = self.stats.next_collection_window_at
@@ -1761,28 +1836,47 @@ class TradeCoreRuntime:
         observed_at: datetime,
     ) -> SessionEventContext:
         now_msk = _ensure_msk(observed_at)
-        session_type = _enum_payload(
-            preflight.get("session_type"),
-            SessionType,
-            default=SessionType.WEEKEND if now_msk.weekday() >= 5 else SessionType.WEEKDAY_MAIN,
+        trading_date = _payload_date(preflight, "trading_date") or now_msk.date()
+        current_window = self._collection_window_for_now(now_msk, trading_date=trading_date)
+        session_type = (
+            current_window.session_type
+            if current_window is not None
+            else _enum_payload(
+                preflight.get("session_type"),
+                SessionType,
+                default=SessionType.WEEKEND
+                if now_msk.weekday() >= 5
+                else SessionType.WEEKDAY_MAIN,
+            )
         )
-        window_open = self._data_only_collection_window_open(now=now_msk)
-        session_phase = _enum_payload(
-            preflight.get("session_phase"),
-            SessionPhase,
-            default=SessionPhase.CONTINUOUS_TRADING
-            if preflight.get("market_open") is True
-            else SessionPhase.CLOSED,
+        window_open = (
+            current_window is not None
+            and preflight.get("data_only_collection_allowed") is True
+            and preflight.get("market_open") is True
+        )
+        session_phase = (
+            current_window.session_phase
+            if current_window is not None
+            else _enum_payload(
+                preflight.get("session_phase"),
+                SessionPhase,
+                default=SessionPhase.CONTINUOUS_TRADING
+                if preflight.get("market_open") is True
+                else SessionPhase.CLOSED,
+            )
         )
         if not window_open:
             session_phase = SessionPhase.CLOSED
-        trading_date = now_msk.date()
         micro_session_id = (
             f"{trading_date.isoformat()}:{session_type.value}:"
             f"{now_msk.replace(minute=0, second=0, microsecond=0):%Y%m%dT%H%M}"
         )
         return SessionEventContext(
-            calendar_date=now_msk.date(),
+            calendar_date=(
+                current_window.calendar_date
+                if current_window is not None and current_window.calendar_date is not None
+                else now_msk.date()
+            ),
             trading_date=trading_date,
             session_type=session_type,
             session_phase=session_phase,
@@ -2110,7 +2204,83 @@ class TradeCoreRuntime:
             if isinstance(preflight, Mapping)
             else "session_preflight_required"
         )
+        raw_preflight = dict(preflight) if isinstance(preflight, Mapping) else {}
+        annotated_preflight = self._annotate_data_only_preflight_payload(
+            raw_preflight,
+            now=datetime.now(tz=MSK),
+        )
         if not market_open or not collection_allowed:
+            can_arm, next_window, arm_reason = self._data_only_start_can_arm(
+                annotated_preflight,
+                now=datetime.now(tz=MSK),
+            )
+            if can_arm and next_window is not None:
+                now_utc = datetime.now(tz=UTC)
+                requested_instruments = _tuple_payload(payload, "instruments") or tuple(
+                    instrument.instrument_id for instrument in self.config.instruments
+                )
+                working_instruments = _tuple_payload(
+                    annotated_preflight,
+                    "working_instruments",
+                ) or requested_instruments
+                self.robot_control_state = "armed_until_next_window"
+                self.stats.collector_state = "armed_until_next_window"
+                self.stats.current_window_state = "armed_until_next_window"
+                self.stats.day_collection_state = "armed_until_next_window"
+                self.stats.daily_collection_active = True
+                self.stats.current_trading_date = next_window.trading_date
+                self.stats.requested_instruments = requested_instruments
+                self.stats.working_instruments = working_instruments
+                self.stats.cancelled_by_operator = False
+                self.stats.completed_for_day = False
+                self.stats.completed_for_day_at = None
+                self.stats.paused_at = now_utc
+                self.stats.last_pause_reason = arm_reason
+                self.stats.last_stop_reason = None
+                self.stats.preflight_phase = "armed_until_next_window"
+                self.stats.next_collection_window_at = next_window.start_at
+                self.stats.next_resume_at = next_window.start_at
+                self.stats.next_retry_at = next_window.start_at.astimezone(UTC)
+                self.stats.remaining_windows_today = self._remaining_windows_today(
+                    trading_date=next_window.trading_date,
+                    after=datetime.now(tz=MSK),
+                )
+                annotated_preflight["next_collection_window_at"] = (
+                    next_window.start_at.isoformat()
+                )
+                annotated_preflight["next_resume_at"] = next_window.start_at.isoformat()
+                annotated_preflight["command_status"] = "armed_until_next_window"
+                self._data_only_preflight_payload = annotated_preflight
+                self._data_only_session_context = None
+                self._write_audit_event(
+                    action="data_only_shadow_collection_armed_until_next_window",
+                    payload={
+                        **self._data_only_lifecycle_payload(),
+                        "command_id": str(command.command_id),
+                        "runtime_id": str(self.runtime_id),
+                        "reason_code": arm_reason,
+                        "start_armed_at": now_utc.isoformat(),
+                        "next_collection_window_at": next_window.start_at.isoformat(),
+                        "preflight_result": annotated_preflight,
+                        "readonly_calls_only": True,
+                        "real_orders_disabled": True,
+                        "strategy_trading_disabled": True,
+                    },
+                )
+                return (
+                    "data_only_collection_armed_until_next_window",
+                    {
+                        **self._data_only_lifecycle_payload(),
+                        "collector_state": self.stats.collector_state,
+                        "accepted": True,
+                        "stream_tasks": 0,
+                        "real_orders_disabled": True,
+                        "strategy_trading_disabled": True,
+                        "preflight_phase": self.stats.preflight_phase,
+                        "preflight_result": annotated_preflight,
+                    },
+                )
+
             self.robot_control_state = "preflight_blocked"
             self.stats.collector_state = "preflight_blocked"
             self.stats.current_window_state = "preflight_blocked"
@@ -2179,7 +2349,6 @@ class TradeCoreRuntime:
         self.stats.collector_state = "starting"
         self.stats.current_window_state = "starting"
         now = datetime.now(tz=UTC)
-        raw_preflight = dict(preflight) if isinstance(preflight, Mapping) else {}
         requested_instruments = _tuple_payload(payload, "instruments") or tuple(
             instrument.instrument_id for instrument in self.config.instruments
         )
@@ -2804,8 +2973,23 @@ class TradeCoreRuntime:
                     error_message=str(exc),
                 )
 
-    def _session_context_for(self, instrument_id: str) -> SessionEventContext:
+    def _session_context_for(
+        self,
+        instrument_id: str,
+        observed_at: datetime | None = None,
+    ) -> SessionEventContext:
         del instrument_id
+        if (
+            self.config.data_only_shadow_enabled
+            and self.stats.collector_state == "collecting"
+            and isinstance(self._data_only_preflight_payload, Mapping)
+        ):
+            context = self._session_context_from_data_only_preflight(
+                self._data_only_preflight_payload,
+                observed_at=observed_at or datetime.now(tz=MSK),
+            )
+            self._data_only_session_context = context
+            return context
         if (
             self.config.data_only_shadow_enabled
             and self.stats.collector_state == "collecting"
@@ -3450,7 +3634,7 @@ def default_trading_schedule(moment: datetime) -> TradingSchedule:
     return TradingSchedule(
         windows=(
             _window(trading_date, SessionKind.MORNING, time(7, 0), time(10, 0)),
-            _window(trading_date, SessionKind.MAIN, time(10, 0), time(18, 59)),
+            _window(trading_date, SessionKind.MAIN, time(10, 0), time(19, 0)),
             _window(trading_date, SessionKind.EVENING, time(19, 0), time(23, 50)),
         )
     )
