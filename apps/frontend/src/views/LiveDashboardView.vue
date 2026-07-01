@@ -198,6 +198,7 @@ function reasonLabel(reason: string | null | undefined): string {
     dashboard_gateway_unavailable: "readonly broker gateway недоступен",
     selected_order_book_unavailable: "стакан выбранного инструмента недоступен",
     selected_order_book_stale: "стакан выбранного инструмента устарел",
+    quality_not_calculated: "качество стакана ещё не рассчитано",
     empty_market_ws_snapshot: "пустой market WS snapshot проигнорирован",
     selected_instrument_details_unavailable: "details выбранного инструмента недоступны",
     data_shadow_status_unavailable: "статус data-only временно недоступен",
@@ -775,6 +776,18 @@ function hasRealOrderBook(instrument: MarketInstrumentOverview | null): boolean 
   );
 }
 
+function displayQualityScore(instrument: MarketInstrumentOverview | null): string | null {
+  const score =
+    instrument?.display_market_quality_score ??
+    instrument?.market_quality_score ??
+    instrument?.market_quality ??
+    null;
+  if (score === null || score === "") {
+    return null;
+  }
+  return Number.isFinite(Number(score)) ? String(score) : null;
+}
+
 function selectedBidAskValue(instrument: MarketInstrumentOverview | null): string {
   if (!hasRealOrderBook(instrument)) {
     return "Стакан загружается";
@@ -802,27 +815,29 @@ function selectedImbalanceValue(instrument: MarketInstrumentOverview | null): st
 }
 
 function displayQualityValue(instrument: MarketInstrumentOverview | null): string {
-  if (!hasRealOrderBook(instrument)) {
-    return "нет стакана";
+  const score = displayQualityScore(instrument);
+  if (score) {
+    return formatPercentRatio(score);
   }
-  return formatPercentRatio(instrument?.display_market_quality_score);
+  return "нет расчёта";
 }
 
 function displayQualityDetail(instrument: MarketInstrumentOverview | null): string {
   if (!instrument) {
-    return "instrument_unavailable";
+    return "инструмент не выбран";
   }
-  if (!hasRealOrderBook(instrument)) {
-    return reasonLabel(instrument.reason_code ?? "no_order_book_samples");
+  if (displayQualityScore(instrument)) {
+    return instrument.market_quality_label ?? "рассчитано";
   }
-  return instrument.market_quality_label ?? "unknown";
+  return reasonLabel(instrument.reason_code ?? "quality_not_calculated");
 }
 
 function displayQualityTone(instrument: MarketInstrumentOverview | null): "good" | "warn" | "info" {
-  if (!hasRealOrderBook(instrument)) {
+  const score = displayQualityScore(instrument);
+  if (!score) {
     return "warn";
   }
-  return Number(instrument?.display_market_quality_score ?? 0) >= 0.7 ? "good" : "warn";
+  return Number(score) >= 0.7 ? "good" : "warn";
 }
 
 function calibrationQualityLabel(instrument: MarketInstrumentOverview | null): string {
@@ -1058,7 +1073,7 @@ function degradedFlagLabel(flag: string): string {
               <span class="quote-card__freshness">{{ quoteFreshness(instrument) }}</span>
               <span class="quote-card__meta">
                 <small>спред {{ formatSpread(instrument) }}</small>
-                <small>стакан {{ displayQualityValue(instrument) }}</small>
+                <small>качество стакана {{ displayQualityValue(instrument) }}</small>
               </span>
               <small :class="`quote-change quote-change--${changeTone(instrument.change_bps)}`">
                 {{ formatChangeBps(instrument.change_bps) }}

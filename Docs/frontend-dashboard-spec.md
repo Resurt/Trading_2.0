@@ -131,6 +131,11 @@ The dashboard performs live `GetOrderBook` calls only for the selected instrumen
 The quote board must not request full depth for all eight instruments. Quote cards
 may still show bid/ask, spread, depth and freshness from the stored
 `order_book_summary` read-model produced by data-only collection.
+When `/market/overview` includes `display_market_quality_score`, every quote card
+must show that as `качество стакана N %`. Do not replace an available quality
+score with `нет стакана` just because full `bids[]`/`asks[]` ladder levels are
+missing from the overview payload; full ladder levels are required only for the
+selected order-book widget.
 The selected order-book refresh interval must stay below the order-book freshness
 budget so an open-market selected ladder does not oscillate between fresh and
 stale while the readonly broker/API is responsive.

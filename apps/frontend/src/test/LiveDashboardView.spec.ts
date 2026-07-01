@@ -310,7 +310,8 @@ describe("LiveDashboardView", () => {
 
     expect(wrapper.text()).toContain("Лента сделок недоступна");
     expect(wrapper.text()).toContain("свежие сделки не пришли");
-    expect(wrapper.text()).toContain("нет стакана");
+    expect(wrapper.find(".quote-card").text()).toContain("качество стакана");
+    expect(wrapper.find(".quote-card").text()).toContain("35");
     expect(wrapper.text()).toContain("display-only");
   });
 
@@ -340,6 +341,9 @@ describe("LiveDashboardView", () => {
 
     expect(wrapper.text()).toContain("Стакан пока не получен");
     expect(wrapper.text()).toContain("Стакан загружается");
+    expect(wrapper.find(".quote-card").text()).toContain("качество стакана");
+    expect(wrapper.find(".quote-card").text()).toContain("92");
+    expect(wrapper.find(".quote-card").text()).not.toContain("качество стакана нет");
     expect(wrapper.find(".depth-ladder-row").exists()).toBe(false);
   });
 });
