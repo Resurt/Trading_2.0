@@ -404,6 +404,31 @@ class FakeDelayedTradesGateway(FakeDashboardFeedGateway):
         )
 
 
+class FakeLongDelayedTradesGateway(FakeDashboardFeedGateway):
+    async def get_last_trades(
+        self,
+        request: object,
+        metadata: object = None,
+    ) -> BrokerUnaryResponse:
+        del request, metadata
+        now = datetime.now(tz=UTC)
+        return BrokerUnaryResponse(
+            method_name="GetLastTrades",
+            data={
+                "trades": [
+                    {
+                        "instrument_uid": "uid-sber",
+                        "figi": "figi-sber",
+                        "price": "313.25",
+                        "quantity_lots": "11",
+                        "side": "sell",
+                        "ts_utc": (now - timedelta(minutes=2)).isoformat(),
+                    }
+                ]
+            },
+        )
+
+
 class FakeIntermittentTradesGateway(FakeDashboardFeedGateway):
     def __init__(self) -> None:
         self.trade_calls = 0
@@ -1821,6 +1846,44 @@ def test_dashboard_market_feed_returns_short_delayed_trades_as_stale_rows(
     assert selected["market_trades_source"] == "tbank_get_last_trades"
     assert selected["trade_tape_status"] == "stale"
     assert selected["trade_tape_reason"] == "trade_exchange_ts_too_old"
+
+
+def test_dashboard_market_feed_returns_broker_delayed_trades_up_to_display_window(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app_module = importlib.import_module("trading_api.app")
+
+    monkeypatch.setenv("DASHBOARD_MARKET_FEED_ENABLED", "true")
+    monkeypatch.setenv("DASHBOARD_TRADES_DELAYED_DISPLAY_SECONDS", "300")
+    force_exchange_open(monkeypatch)
+    monkeypatch.setattr(
+        app_module,
+        "_readonly_tbank_gateway",
+        lambda: FakeLongDelayedTradesGateway(),
+    )
+    database = DatabaseService(f"sqlite+pysqlite:///{tmp_path / 'dashboard-feed-long-delayed.db'}")
+    Base.metadata.create_all(database.engine)
+    seed_database(database)
+    app = create_fastapi_app(database=database, report_task_client=FakeReportTaskClient())
+    client = TestClient(app)
+
+    snapshot = client.get(
+        "/dashboard/market-feed/snapshot",
+        headers={"X-API-Role": "observer"},
+        params={
+            "selected_instrument": "MOEX:SBER",
+            "include_order_book": True,
+            "include_trades": True,
+        },
+    ).json()
+
+    selected = snapshot["selected_details"]
+    assert selected["recent_market_trades"][0]["price"] == "313.25"
+    assert selected["market_trades_source"] == "tbank_get_last_trades"
+    assert selected["trade_tape_status"] == "stale"
+    assert selected["trade_tape_reason"] == "trade_exchange_ts_too_old"
+    assert snapshot["status"]["trade_tape_available"] is True
 
 
 def test_dashboard_market_feed_preserves_trade_tape_over_empty_get_last_trades(

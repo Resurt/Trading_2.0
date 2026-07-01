@@ -1,6 +1,6 @@
 # Frontend Dashboard Spec
 
-Status: current source of truth, updated 2026-06-30.
+Status: current source of truth, updated 2026-07-01.
 
 Legacy historical content was moved to
 `Docs/archive/2026-06-30/frontend-dashboard-spec-legacy.md`. Do not use archived
@@ -46,11 +46,13 @@ last good data and shows a degraded/stale warning instead of clearing the board.
 Transient REST timeouts such as `request_timeout` or
 `dashboard_market_feed_timeout` are retry warnings when a current WebSocket or
 last-good dashboard snapshot is available. They must not override the top
-Dashboard Feed tile into `ошибка`; the ribbon should keep showing `online` and
+market screen tile into `ошибка`; the ribbon should keep showing `обновляется` and
 the latest successful `last_refresh_at` until there is no usable live/last-good
 market data left.
 
 ## Session Ribbon
+
+The session ribbon describes the market session only. It must not fall back to data-only collector command reasons such as `data_only_collection_started`, `data_only_collection_stopped`, or `data_only_collector_already_running`; those belong to the data-only logging panel. When the dashboard feed says the market is open, the session detail stays stable as `рынок открыт` and does not flicker based on selected-instrument warnings or collector lifecycle events.
 
 The top session ribbon should show operator-ready state, not raw diagnostics. In
 normal open-market state it displays the session name and a single `рынок открыт`
@@ -121,7 +123,7 @@ Default freshness thresholds are backend-configurable:
 - `DASHBOARD_ORDER_BOOK_MAX_EXCHANGE_AGE_SECONDS=30`
 - `DASHBOARD_TRADES_REFRESH_SECONDS=3`
 - `DASHBOARD_TRADES_MAX_EXCHANGE_AGE_SECONDS=15`
-- `DASHBOARD_TRADES_DELAYED_DISPLAY_SECONDS=60`
+- `DASHBOARD_TRADES_DELAYED_DISPLAY_SECONDS=300`
 
 ## Order Book
 
@@ -208,6 +210,8 @@ Supported status values include:
 Absence of trades must not hide quotes or order-book status. The UI must show the
 status/reason plainly.
 
+Readonly `GetLastTrades` uses a short primary lookback first and then a bounded fallback lookback when the short window returns an empty broker response. This is only for operator visibility: delayed rows are marked `stale` when outside the live freshness budget, remain visible for up to `DASHBOARD_TRADES_DELAYED_DISPLAY_SECONDS=300`, and are never treated as calibration rows or trading evidence.
+
 Trade rows from the collector stream must be keyed by canonical `MOEX:*`
 `instrument_id`, not only by broker UID/FIGI. The original broker identifier may
 be retained as `broker_instrument_id`, but selected dashboard joins use the
@@ -265,6 +269,18 @@ When market display is online and logging is stopped, use copy like:
 ```text
 Рынок отображается. Запись логов остановлена.
 ```
+
+The Collector panel is for administrator-ready lifecycle state, not internal row
+counters. Do not show `samples`, raw snapshot counts, order-book row counts, or
+sample age as primary UI fields. While collection is active, show:
+
+- `старт сбора`: `collector_started_at` from `/runtime/data-shadow/status`, falling
+  back to `started_at`;
+- `прошло`: elapsed wall-clock time since `старт сбора`, formatted as
+  `HHч MMм SSс` and updated every second.
+
+If collection is not active or start time is unavailable, show `старт сбора=0` and
+`прошло=00ч 00м 00с`.
 
 ## Start/Stop Command UX
 

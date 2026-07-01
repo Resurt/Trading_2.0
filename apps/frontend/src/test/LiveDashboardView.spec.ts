@@ -131,7 +131,7 @@ describe("LiveDashboardView", () => {
     const wrapper = mountWithStores();
 
     expect(wrapper.find('[data-testid="live-dashboard"]').exists()).toBe(true);
-    expect(wrapper.text()).toContain("Котировки core universe");
+    expect(wrapper.text()).toContain("Котировки выбранных инструментов");
     expect(wrapper.text()).toContain("8 инструментов");
     expect(wrapper.findAll(".quote-card").length).toBe(8);
     expect(wrapper.find(".quote-table").exists()).toBe(false);
@@ -143,12 +143,25 @@ describe("LiveDashboardView", () => {
     expect(wrapper.text()).toContain("Площадка");
     expect(wrapper.text()).toContain("биржевая");
     expect(wrapper.text()).toContain("Data-only сбор");
-    expect(wrapper.text()).toContain("заявок, pseudo-orders");
+    expect(wrapper.text()).toContain("Реальные заявки и стратегия отключены");
+    expect(wrapper.text()).toContain("старт сбора");
+    expect(wrapper.text()).toContain("прошло");
+    expect(wrapper.text()).toMatch(/\d+ч\s\d{2}м\s\d{2}с/);
+    expect(wrapper.text()).not.toContain("старт часа");
+    expect(wrapper.text()).not.toContain("прошло в часе");
+    expect(wrapper.text()).not.toContain("записано рынка");
+    expect(wrapper.text()).not.toContain("записано стаканов");
+    expect(wrapper.text()).not.toContain("последнее сообщение");
+    expect(wrapper.text()).not.toContain("снимков рынка");
+    expect(wrapper.text()).not.toContain("снимков стакана");
+    expect(wrapper.text()).not.toContain("поступление данных");
+    expect(wrapper.text()).not.toContain("рыночные сообщения поступают");
+    expect(wrapper.text()).not.toContain("samples");
     expect(wrapper.text()).toMatch(/250\s000,00/);
     expect(wrapper.text()).not.toContain("acc***001");
     expect(wrapper.text()).not.toContain("freshness");
     expect(wrapper.text()).not.toContain("Обновить");
-    expect(wrapper.text()).toContain("spread_too_wide");
+    expect(wrapper.text()).toContain("Спред слишком широкий");
     expect(wrapper.text()).toContain("spread above configured threshold");
     expect(wrapper.text()).not.toContain("request-1");
   });
@@ -161,6 +174,21 @@ describe("LiveDashboardView", () => {
     expect(sessionRibbon).toContain("рынок открыт");
     expect(sessionRibbon).not.toContain("рынок открыт · рынок открыт");
     expect(sessionRibbon).not.toContain("2026-06-13");
+  });
+
+  it("keeps collector command reasons out of the session ribbon", async () => {
+    const wrapper = mountWithStores();
+    const market = useMarketStore();
+    market.dataShadowStatus = {
+      ...market.dataShadowStatus,
+      reason_code: "data_only_collection_started",
+    };
+    await nextTick();
+
+    const sessionBlock = wrapper.find('[data-testid="session-ribbon"]').findAll("div")[0].text();
+    expect(sessionBlock).toContain("рынок открыт");
+    expect(sessionBlock).not.toContain("data_only_collection_started");
+    expect(sessionBlock).not.toContain("запись рыночных логов запущена");
   });
 
   it("uses closed dashboard feed status over stale robot session fields", async () => {
@@ -227,7 +255,7 @@ describe("LiveDashboardView", () => {
     await nextTick();
 
     const sessionRibbon = wrapper.find('[data-testid="session-ribbon"]').text();
-    expect(sessionRibbon).toContain("online");
+    expect(sessionRibbon).toContain("обновляется");
     expect(sessionRibbon).not.toContain("request_timeout");
   });
 

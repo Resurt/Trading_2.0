@@ -581,6 +581,42 @@ describe("market store", () => {
     expect(market.currentInstrument?.trade_tape_status).toBe("stale");
   });
 
+  it("keeps broker delayed trade tape for the operator display window", () => {
+    const market = useMarketStore();
+    const now = new Date().toISOString();
+    const delayedTradeTs = new Date(Date.now() - 2 * 60_000).toISOString();
+    market.applyOverview({
+      generated_at: now,
+      instruments: [
+        instrument({
+          recent_market_trades: [
+            { price: "75.66", exchange_ts: delayedTradeTs, quantity_lots: "3", side: "sell" },
+          ],
+          market_trades_source: "tbank_get_last_trades",
+          market_trades_age_ms: 120_000,
+          trade_tape_status: "stale",
+          trade_tape_reason: "trade_exchange_ts_too_old",
+        }),
+      ],
+    });
+
+    market.applyOverview({
+      generated_at: now,
+      instruments: [
+        instrument({
+          market_trades_source: "no_market_trades_samples",
+          market_trades_age_ms: null,
+          trade_tape_status: "no_market_trades_samples",
+          trade_tape_reason: "no_market_trades_samples",
+        }),
+      ],
+    });
+
+    expect(market.currentInstrument?.recent_market_trades).toHaveLength(1);
+    expect(market.currentInstrument?.recent_market_trades[0]?.price).toBe("75.66");
+    expect(market.currentInstrument?.trade_tape_status).toBe("stale");
+  });
+
   it("keeps fresh trade tape when an intermittent no-samples snapshot arrives", () => {
     const market = useMarketStore();
     const now = new Date().toISOString();

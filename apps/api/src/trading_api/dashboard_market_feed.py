@@ -33,7 +33,7 @@ class DashboardMarketFeedConfig:
     last_price_max_exchange_age_seconds: float = 30.0
     order_book_max_exchange_age_seconds: float = 30.0
     trades_max_exchange_age_seconds: float = 15.0
-    trades_delayed_display_seconds: float = 60.0
+    trades_delayed_display_seconds: float = 300.0
 
     @classmethod
     def from_env(cls) -> DashboardMarketFeedConfig:
@@ -56,7 +56,7 @@ class DashboardMarketFeedConfig:
                 "DASHBOARD_TRADES_MAX_EXCHANGE_AGE_SECONDS", 15.0
             ),
             trades_delayed_display_seconds=_env_float(
-                "DASHBOARD_TRADES_DELAYED_DISPLAY_SECONDS", 60.0
+                "DASHBOARD_TRADES_DELAYED_DISPLAY_SECONDS", 300.0
             ),
         )
 
@@ -605,22 +605,37 @@ class DashboardMarketFeedService:
             from trade_core.broker_gateway import LastTradesRequest
 
             to_ts = datetime.now(tz=UTC)
-            from_ts = to_ts - timedelta(
-                minutes=max(1, _env_int("DASHBOARD_TRADES_LOOKBACK_MINUTES", 30))
-            )
             trade_source = "all"
-            timeout_seconds = _env_float("DASHBOARD_TRADES_TIMEOUT_SECONDS", 1.0)
-            response = await _run_readonly_broker_call(
-                lambda: gateway.get_last_trades(
-                    LastTradesRequest(
-                        instrument=ref,
-                        from_=from_ts,
-                        to=to_ts,
-                        trade_source=trade_source,
-                    )
-                ),
+            timeout_seconds = _env_float("DASHBOARD_TRADES_TIMEOUT_SECONDS", 3.0)
+            lookback_minutes = max(1, _env_int("DASHBOARD_TRADES_LOOKBACK_MINUTES", 2))
+            fallback_lookback_minutes = max(
+                lookback_minutes,
+                _env_int("DASHBOARD_TRADES_FALLBACK_LOOKBACK_MINUTES", 30),
+            )
+            response = await self._get_last_trades_window(
+                gateway=gateway,
+                request_type=LastTradesRequest,
+                ref=ref,
+                to_ts=to_ts,
+                lookback_minutes=lookback_minutes,
+                trade_source=trade_source,
                 timeout_seconds=timeout_seconds,
             )
+            raw_trades = response.data.get("trades")
+            if (
+                fallback_lookback_minutes > lookback_minutes
+                and isinstance(raw_trades, list)
+                and not raw_trades
+            ):
+                response = await self._get_last_trades_window(
+                    gateway=gateway,
+                    request_type=LastTradesRequest,
+                    ref=ref,
+                    to_ts=datetime.now(tz=UTC),
+                    lookback_minutes=fallback_lookback_minutes,
+                    trade_source=trade_source,
+                    timeout_seconds=timeout_seconds,
+                )
         except AttributeError:
             self._record_warning("no_market_trades_feed_implemented")
             return []
@@ -651,6 +666,30 @@ class DashboardMarketFeedService:
             self._clear_warning("no_market_trades_samples")
             self._clear_warning("no_market_trades_feed_implemented")
         return normalized
+
+    async def _get_last_trades_window(
+        self,
+        *,
+        gateway: Any,
+        request_type: type[Any],
+        ref: Any,
+        to_ts: datetime,
+        lookback_minutes: int,
+        trade_source: str,
+        timeout_seconds: float,
+    ) -> Any:
+        from_ts = to_ts - timedelta(minutes=lookback_minutes)
+        return await _run_readonly_broker_call(
+            lambda: gateway.get_last_trades(
+                request_type(
+                    instrument=ref,
+                    from_=from_ts,
+                    to=to_ts,
+                    trade_source=trade_source,
+                )
+            ),
+            timeout_seconds=timeout_seconds,
+        )
 
     async def _get_order_book(
         self,
@@ -1509,7 +1548,7 @@ def _can_display_delayed_trade_rows(
     if not source.startswith("tbank_get_last_trades"):
         return False
     live_age_ms = int(_env_float("DASHBOARD_TRADES_MAX_EXCHANGE_AGE_SECONDS", 15.0) * 1000)
-    delayed_age_ms = int(_env_float("DASHBOARD_TRADES_DELAYED_DISPLAY_SECONDS", 60.0) * 1000)
+    delayed_age_ms = int(_env_float("DASHBOARD_TRADES_DELAYED_DISPLAY_SECONDS", 300.0) * 1000)
     return live_age_ms < age_ms <= delayed_age_ms
 
 

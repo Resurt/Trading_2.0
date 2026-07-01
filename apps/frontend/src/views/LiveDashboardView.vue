@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 
 import type { JsonPayload, MarketInstrumentOverview } from "../api/types";
 import OrderBookWidget from "../components/dashboard/OrderBookWidget.vue";
@@ -21,6 +21,20 @@ import {
 const robot = useRobotStore();
 const market = useMarketStore();
 const portfolio = usePortfolioStore();
+const nowTick = ref(Date.now());
+let clockTimer: ReturnType<typeof setInterval> | null = null;
+
+onMounted(() => {
+  clockTimer = setInterval(() => {
+    nowTick.value = Date.now();
+  }, 1_000);
+});
+
+onBeforeUnmount(() => {
+  if (clockTimer !== null) {
+    clearInterval(clockTimer);
+  }
+});
 
 const SESSION_LABELS: Record<string, string> = {
   weekday_morning: "Утренняя сессия",
@@ -145,8 +159,11 @@ function reasonLabel(reason: string | null | undefined): string {
     session_preflight_unavailable: "preflight недоступен",
     preflight_unavailable: "preflight недоступен",
     collector_waiting_for_operator_start: "ожидает Start",
-    collector_no_recent_samples: "нет свежих live samples",
+    collector_no_recent_samples: "нет свежих рыночных сообщений",
     data_only_collection_stopped: "data-only сбор остановлен",
+    data_only_collection_started: "запись рыночных логов запущена",
+    data_only_collection_resumed: "запись рыночных логов возобновлена",
+    data_only_collector_already_running: "запись рыночных логов уже идёт",
     data_only_session_window_closed: "окно data-only сбора закрыто",
     data_only_collection_allowed: "data-only сбор разрешён",
     data_only_collection_blocked: "data-only сбор заблокирован",
@@ -166,11 +183,11 @@ function reasonLabel(reason: string | null | undefined): string {
     not_for_calibration: "не для калибровки",
     broker_quote_not_for_calibration: "брокерская котировка только для отображения",
     stale_order_book: "стакан устарел",
-    no_order_book_samples: "нет samples стакана",
+    no_order_book_samples: "стакан пока не пришёл",
     no_market_trades_feed_implemented: "market trades feed ещё не реализован",
-    dashboard_market_feed_unavailable: "dashboard live feed временно недоступен",
-    dashboard_refresh_retrying: "dashboard feed повторяет refresh; показываю последнее свежее состояние",
-    dashboard_market_feed_timeout: "dashboard feed не успел обновиться; идёт повтор refresh",
+    dashboard_market_feed_unavailable: "экран рынка временно не получил свежие данные",
+    dashboard_refresh_retrying: "экран рынка повторяет обновление; показываю последнее свежее состояние",
+    dashboard_market_feed_timeout: "экран рынка не успел обновиться; идёт повтор запроса",
     dashboard_last_prices_unavailable: "last prices временно недоступны",
     dashboard_gateway_unavailable: "readonly broker gateway недоступен",
     selected_order_book_unavailable: "стакан выбранного инструмента недоступен",
@@ -325,10 +342,10 @@ function displayDataOnlyAllowed(): boolean | null {
 function sessionDetail(): string {
   const marketOpen = displayMarketOpen();
   const reason =
-    (marketOpen === false ? market.dashboardFeedStatus.warnings[0] : selectedInstrument.value?.reason_code) ??
-    market.dashboardFeedStatus.warnings[0] ??
-    market.dataShadowStatus.reason_code ??
-    robot.lastCommandReasonCode;
+    marketOpen === false
+      ? (market.dashboardFeedStatus.warnings[0] ??
+        (robot.lastSessionPreflight?.market_open === false ? robot.lastSessionPreflight.reason_code : null))
+      : null;
   const parts: string[] = [];
   if (marketOpen === true) {
     parts.push("рынок открыт");
@@ -446,7 +463,7 @@ function brokerStatusValue(): string {
 
 function tradingModeValue(): string {
   if (market.dataShadowStatus.collector_state === "collecting") {
-    return "Data-only сбор";
+    return "Логи пишутся";
   }
   return "Торговля отключена";
 }
@@ -458,7 +475,7 @@ function tradingModeDetail(): string {
   if (market.dashboardFeedStatus.running && market.dataShadowStatus.collector_state !== "collecting") {
     return "Рынок отображается. Запись data-only логов остановлена.";
   }
-  return "Data-only Start управляет только записью логов; заявок, pseudo-orders и signal_candidate нет.";
+  return "Включена только запись рыночных данных. Реальные заявки и стратегия отключены.";
 }
 
 function formatBps(value: string | null | undefined): string {
@@ -565,7 +582,7 @@ function dashboardFeedValue(): string {
     return "ошибка";
   }
   if (market.dashboardFeedStatus.running) {
-    return market.dashboardFeedStatus.market_open ? "online" : "stale/closed";
+    return market.dashboardFeedStatus.market_open ? "обновляется" : "рынок закрыт";
   }
   return "запускается";
 }
@@ -576,7 +593,7 @@ function dashboardFeedDetail(): string {
     return reasonLabel(blockingErrors[0]);
   }
   if (market.dashboardFeedStatus.last_refresh_at) {
-    return `feed ${compactDateTime(market.dashboardFeedStatus.last_refresh_at)}`;
+    return `обновлено ${compactDateTime(market.dashboardFeedStatus.last_refresh_at)}`;
   }
   if (market.feedWarnings.length) {
     return reasonLabel(market.feedWarnings[0]);
@@ -695,6 +712,38 @@ function collectorNextSessionAt(): string | null | undefined {
     return nextSessionAt();
   }
   return market.dataShadowStatus.next_session_at ?? nextSessionAt();
+}
+
+function collectorStartedAt(): string | null {
+  if (market.dataShadowStatus.collector_state !== "collecting") {
+    return null;
+  }
+  return market.dataShadowStatus.collector_started_at ?? market.dataShadowStatus.started_at ?? null;
+}
+
+function collectorStartedAtLabel(): string {
+  const startedAt = collectorStartedAt();
+  return startedAt ? compactDateTime(startedAt) : "0";
+}
+
+function collectorElapsedLabel(): string {
+  const startedAt = collectorStartedAt();
+  if (!startedAt) {
+    return "00ч 00м 00с";
+  }
+
+  const startedMs = new Date(startedAt).getTime();
+  if (!Number.isFinite(startedMs)) {
+    return "00ч 00м 00с";
+  }
+
+  const elapsedSeconds = Math.max(0, Math.floor((nowTick.value - startedMs) / 1000));
+  const days = Math.floor(elapsedSeconds / 86_400);
+  const hours = Math.floor(elapsedSeconds / 3_600);
+  const minutes = Math.floor((elapsedSeconds % 3_600) / 60);
+  const seconds = elapsedSeconds % 60;
+  const prefix = days > 0 ? `${days}д ` : "";
+  return `${prefix}${String(hours).padStart(2, "0")}ч ${String(minutes).padStart(2, "0")}м ${String(seconds).padStart(2, "0")}с`;
 }
 
 function orderBookSideCounts(instrument: MarketInstrumentOverview | null): { bids: number; asks: number } {
@@ -920,27 +969,27 @@ function degradedFlagLabel(flag: string): string {
 
     <section class="session-ribbon" data-testid="session-ribbon">
       <div>
-        <span class="eyebrow">session</span>
+        <span class="eyebrow">сессия</span>
         <strong>{{ sessionLabel(displaySessionType()) }}</strong>
         <small>{{ sessionDetail() }}</small>
       </div>
       <div>
-        <span class="eyebrow">phase</span>
+        <span class="eyebrow">фаза</span>
         <strong>{{ phaseLabel(displaySessionPhase()) }}</strong>
         <small>{{ brokerStatusValue() }}</small>
       </div>
       <div>
-        <span class="eyebrow">venue</span>
+        <span class="eyebrow">площадка</span>
         <strong>{{ venueStatusValue() }}</strong>
         <small>{{ nextSessionLabel() }}</small>
       </div>
       <div>
-        <span class="eyebrow">dashboard feed</span>
+        <span class="eyebrow">экран рынка</span>
         <strong>{{ dashboardFeedValue() }}</strong>
         <small>{{ dashboardFeedDetail() }}</small>
       </div>
       <div>
-        <span class="eyebrow">data-only</span>
+        <span class="eyebrow">запись логов</span>
         <strong>{{ collectionAllowedLabel() }}</strong>
         <small>{{ collectionReason() }}</small>
       </div>
@@ -974,8 +1023,8 @@ function degradedFlagLabel(flag: string): string {
     <div class="dashboard-layout">
       <div class="dashboard-layout__main">
         <DataPanel>
-          <template #eyebrow>quotes</template>
-          <template #title>Котировки core universe</template>
+          <template #eyebrow>рынок</template>
+          <template #title>Котировки выбранных инструментов</template>
           <template #action>
             <span class="status-badge status-badge--info">{{ quoteRows.length }} инструментов</span>
           </template>
@@ -1020,7 +1069,7 @@ function degradedFlagLabel(flag: string): string {
         </DataPanel>
 
         <DataPanel>
-          <template #eyebrow>selected instrument</template>
+          <template #eyebrow>инструмент</template>
           <template #title>{{ selectedInstrumentTitle() }}</template>
           <template #action>
             <select v-model="market.selectedInstrumentId" class="compact-input">
@@ -1091,10 +1140,10 @@ function degradedFlagLabel(flag: string): string {
 
       <div class="dashboard-layout__side">
         <DataPanel>
-          <template #eyebrow>collector</template>
+          <template #eyebrow>запись логов</template>
           <template #title>Data-only сбор</template>
           <p class="operator-note">
-            {{ market.dashboardFeedStatus.running && market.dataShadowStatus.collector_state !== "collecting" ? "Рынок отображается. Запись логов остановлена." : "Start управляет только записью data-only логов." }}
+            {{ market.dashboardFeedStatus.running && market.dataShadowStatus.collector_state !== "collecting" ? "Рынок на экране обновляется, но запись логов сейчас остановлена." : "Start включает только запись рыночных логов: без реальных заявок и без работы стратегии." }}
           </p>
           <dl class="definition-grid">
             <dt>состояние</dt>
@@ -1105,14 +1154,10 @@ function degradedFlagLabel(flag: string): string {
             <dd>{{ collectorReasonLabel() }}</dd>
             <dt>следующая сессия</dt>
             <dd>{{ compactDateTime(collectorNextSessionAt()) }}</dd>
-            <dt>поток</dt>
-            <dd>{{ market.dataShadowStatus.stream_alive ? "samples идут" : "samples нет" }}</dd>
-            <dt>snapshots</dt>
-            <dd>{{ market.dataShadowStatus.market_microstructure_snapshots }}</dd>
-            <dt>стаканы</dt>
-            <dd>{{ market.dataShadowStatus.order_book_snapshots }}</dd>
-            <dt>возраст sample</dt>
-            <dd>{{ market.dataShadowStatus.last_message_age_seconds ?? "нет samples" }}</dd>
+            <dt>старт сбора</dt>
+            <dd>{{ collectorStartedAtLabel() }}</dd>
+            <dt>прошло</dt>
+            <dd>{{ collectorElapsedLabel() }}</dd>
           </dl>
           <div v-if="market.dataShadowStatus.warnings.length" class="operator-list operator-list--compact">
             <div v-for="warning in market.dataShadowStatus.warnings" :key="warning">
@@ -1127,7 +1172,7 @@ function degradedFlagLabel(flag: string): string {
         </DataPanel>
 
         <DataPanel>
-          <template #eyebrow>venue</template>
+          <template #eyebrow>площадка</template>
           <template #title>Площадка</template>
           <dl class="definition-grid">
             <dt>режим</dt>
@@ -1140,26 +1185,26 @@ function degradedFlagLabel(flag: string): string {
         </DataPanel>
 
         <DataPanel>
-          <template #eyebrow>strategy</template>
-          <template #title>Current signal</template>
+          <template #eyebrow>стратегия</template>
+          <template #title>Сигнал стратегии</template>
           <SignalReasonCard :signal="robot.currentSignal" />
         </DataPanel>
 
         <DataPanel>
-          <template #eyebrow>risk</template>
-          <template #title>Recent risk events</template>
+          <template #eyebrow>контроль</template>
+          <template #title>Последние блокировки стратегии</template>
           <RiskEventsList :signals="robot.signals" />
         </DataPanel>
 
         <DataPanel>
-          <template #eyebrow>health</template>
+          <template #eyebrow>состояние</template>
           <template #title>Что требует внимания</template>
           <div v-if="robot.status.degraded_flags.length" class="operator-list">
             <div v-for="flag in robot.status.degraded_flags" :key="flag">
               <strong>{{ degradedFlagLabel(flag) }}</strong>
             </div>
           </div>
-          <EmptyState v-else title="Критичных проблем нет" detail="Dashboard не видит degraded flags." />
+          <EmptyState v-else title="Критичных проблем нет" detail="Проверки API, данных и счёта не показывают критичных сбоев." />
         </DataPanel>
       </div>
     </div>

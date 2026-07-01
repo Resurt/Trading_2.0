@@ -30,7 +30,7 @@ const TRANSIENT_DASHBOARD_FEED_ERRORS = new Set([
   "dashboard_market_feed_timeout",
 ]);
 const LIVE_TRADE_TAPE_MAX_AGE_MS = 15 * 1000;
-const DELAYED_TRADE_TAPE_DISPLAY_MAX_AGE_MS = 60 * 1000;
+const DELAYED_TRADE_TAPE_DISPLAY_MAX_AGE_MS = 5 * 60 * 1000;
 const SELECTED_ORDER_BOOK_MIN_SIDE_LEVELS = 5;
 const SELECTED_ORDER_BOOK_RETRY_LIMIT = 30;
 const SELECTED_ORDER_BOOK_RETRY_MS = 1000;
@@ -73,6 +73,7 @@ const EMPTY_DATA_SHADOW_STATUS: DataShadowStatusResponse = {
   p95_spread_bps: null,
   avg_market_quality_score: null,
   current_session: null,
+  collector_started_at: null,
   started_at: null,
   stopped_at: null,
   last_command_id: null,

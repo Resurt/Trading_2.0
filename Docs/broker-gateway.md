@@ -199,6 +199,8 @@ Sandbox/live endpoint выбирается только через `LaunchModePo
 
 `InstrumentResolverService` загружает `TRADING_INSTRUMENTS` (`SBER,GAZP` по умолчанию), вызывает `BrokerGateway.resolve_instruments`, получает реальные `instrument_uid`, `figi`, `class_code`, `ticker`, `lot_size`, `min_price_increment`, trade availability и short/weekend flags, затем upsert-ит `instrument_registry`.
 
+If broker resolution times out or is temporarily unavailable, shadow/runtime startup may use the already-resolved `instrument_registry` cache only when every requested ticker has enabled rows with real `instrument_uid` or `figi`. Incomplete cache remains fail-fast; placeholder ids and unresolved seed rows are still blocked.
+
 Начиная с sandbox/shadow/production, market streams, candles, order placement, positions и reports должны использовать один canonical `instrument_id`, равный broker `instrument_uid`. Placeholder UID (`runtime-placeholder`) запрещён launch-readiness gate.
 
 Высокоуровневый SDK стабильно отдает `x-tracking-id` через `response_metadata`.

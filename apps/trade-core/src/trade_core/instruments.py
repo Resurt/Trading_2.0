@@ -51,9 +51,34 @@ class InstrumentResolverService:
 
         tickers = tuple(_ticker_for(instrument) for instrument in requested)
         class_code = requested[0].class_code if requested and requested[0].class_code else "TQBR"
-        response = await self.broker_gateway.resolve_instruments(
-            InstrumentResolveRequest(tickers=tickers, class_code=class_code)
-        )
+        try:
+            response = await self.broker_gateway.resolve_instruments(
+                InstrumentResolveRequest(tickers=tickers, class_code=class_code)
+            )
+        except Exception as exc:
+            cached = self._resolved_from_registry(tickers)
+            if len(cached) == len(tickers) and all(
+                is_broker_resolved_instrument(instrument) for instrument in cached
+            ):
+                log_event(
+                    logger=LOGGER,
+                    event_type="instrument_registry_cached_fallback",
+                    component="runtime.instruments",
+                    launch_mode=self.launch_policy.mode.value,
+                    tickers=list(tickers),
+                    instrument_count=len(cached),
+                    error_code=type(exc).__name__,
+                    error_message=str(exc),
+                )
+                return cached
+            self._mark_failed_tickers(
+                list(tickers),
+                class_code=class_code,
+                error_code="instrument_resolver_broker_unavailable",
+                error_message=str(exc),
+            )
+            msg = "T-Bank instrument resolver unavailable and cached registry is incomplete"
+            raise RuntimeError(msg) from exc
         resolved = tuple(
             self._upsert_resolved_payload(payload, exchange=self.exchange)
             for payload in _instrument_payloads(response.data)
@@ -140,6 +165,29 @@ class InstrumentResolverService:
             )
         self.session.flush()
         return tuple(registered)
+
+    def _resolved_from_registry(self, tickers: tuple[str, ...]) -> tuple[InstrumentRef, ...]:
+        if not tickers:
+            return ()
+        rows = self.session.execute(
+            select(InstrumentRegistry).where(InstrumentRegistry.ticker.in_(tickers))
+        ).scalars()
+        by_ticker = {row.ticker: row for row in rows if row.is_enabled}
+        resolved: list[InstrumentRef] = []
+        for ticker in tickers:
+            row = by_ticker.get(ticker)
+            if row is None or not is_broker_resolved_instrument(row):
+                return ()
+            resolved.append(
+                InstrumentRef(
+                    instrument_id=row.instrument_id,
+                    instrument_uid=row.instrument_uid,
+                    figi=row.figi,
+                    ticker=row.ticker,
+                    class_code=row.class_code,
+                )
+            )
+        return tuple(resolved)
 
     def _upsert_resolved_payload(
         self,

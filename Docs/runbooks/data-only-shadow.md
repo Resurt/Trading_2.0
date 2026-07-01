@@ -266,6 +266,82 @@ old stream tasks are still alive and must not wait for a future evening
 `next_resume_at`. It should run a fresh preflight on the next cycle and immediately
 restart streams/polling when the current collection window is open.
 
+## Controlled Docker rebuild while collecting
+
+Docker rebuilds/restarts are never done blindly while data-only collection is
+running. If a code or configuration change requires `docker compose up -d --build`
+and the current status shows `collector_state=collecting`, `stream_alive=true`, or
+fresh snapshots are growing, use this controlled Stop -> rebuild -> Start flow:
+
+1. Capture the current state:
+
+   ```text
+   GET /health
+   GET http://localhost:8001/health
+   GET /runtime/data-shadow/status
+   GET /robot/status
+   GET /session/preflight?instruments=SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR&mode=data_shadow&cache=false
+   ```
+
+2. Stop collection through the operator API before touching Docker:
+
+   ```text
+   POST /robot/stop
+   X-API-Role: operator
+   X-API-Actor: controlled_docker_rebuild
+   ```
+
+   Verify that `collector_state` is `stopped_by_operator`/`stopped`/`idle`,
+   `stream_alive=false`, snapshot counts stop growing after the grace period, and
+   `signal_candidate`, `order_intent`, `broker_order`, `order_state_event`,
+   `PostOrder`, and `CancelOrder` deltas remain zero. If controlled Stop fails,
+   do not rebuild.
+
+3. Rebuild/restart Docker only after the controlled Stop is confirmed:
+
+   ```bash
+   docker compose up -d --build
+   docker compose ps
+   ```
+
+   Wait for `api`, `trade-core`, Postgres, Redis, frontend, report worker, Loki,
+   Fluent Bit, Prometheus, and Grafana health checks to be healthy or ready as
+   applicable. Re-check `GET /health`, `GET http://localhost:8001/health`, and a
+   fresh preflight with `cache=false`.
+
+4. Start data-only collection again if the fresh preflight allows collection:
+
+   ```text
+   POST /robot/start
+   X-API-Role: operator
+   X-API-Actor: restart_after_controlled_docker_rebuild
+
+   {
+     "mode": "data_shadow",
+     "reason": "restart_after_controlled_docker_rebuild",
+     "instruments": "SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR",
+     "real_orders_disabled": true,
+     "strategy_trading_disabled": true
+   }
+   ```
+
+   If the current session is open, acceptance is `collector_state=collecting` and
+   either `stream_alive=true` or both `market_microstructure_snapshot` and
+   `order_book_summary` counts grow. Check this for at least one minute after
+   Start; prefer confirming 8/8 instruments have fresh snapshots. Trading entity
+   deltas and `PostOrder`/`CancelOrder` must stay zero.
+
+5. If the current session is closed but the next same-day collection window is
+   within the arming threshold, Start may arm the command as
+   `command_status=armed_until_next_window`; no primary rows should be written
+   before the window opens. If preflight is blocked and the next session is not
+   today, do not Start; record `reason_code` and `next_session_at`.
+
+The intent is to preserve collection continuity and operator control: stop
+normally, rebuild normally, prove the stack is healthy, start normally, and prove
+the collector actually resumed. Do not run `docker compose up -d --build` against
+a live collector without this sequence.
+
 ## Broker balance visibility
 
 Refresh broker account state before live data-only checks:

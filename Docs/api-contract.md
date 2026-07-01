@@ -282,6 +282,13 @@ dashboard request starts a lightweight refresh path:
   `trade_tape_status=no_market_trades_samples` /
   `market_trades_source=no_market_trades_samples` or
   `no_market_trades_feed_implemented`;
+
+The selected trade-tape path first requests a short `GetLastTrades` lookback and,
+when the broker returns an empty trades list, retries once with
+`DASHBOARD_TRADES_FALLBACK_LOOKBACK_MINUTES` (default 30). The display budget for
+delayed rows is `DASHBOARD_TRADES_DELAYED_DISPLAY_SECONDS=300`; delayed rows keep
+`trade_tape_status=stale` and `trade_tape_reason=trade_exchange_ts_too_old`.
+
 - selected broker trading status: `GetTradingStatus`, default every 5 seconds, used
   only to keep `session_type`/`session_phase`/`venue_type` consistent for display;
 - session/venue fields are display metadata only. Official exchange closed days stay
@@ -304,6 +311,11 @@ Response fields:
   spread, depth, imbalance, quality components, order-book freshness and trade tape;
 - `status`: enabled/running/freshness counters, selected instrument, warnings/errors;
 - `data_only_collection_required=false`.
+
+The operator dashboard must not mix market-session copy with data-only collector
+lifecycle reasons. Market session text is derived from the dashboard feed/session
+fields. Data-only reasons such as `data_only_collection_started` are displayed only
+in the logging panel and `/runtime/data-shadow/status`.
 
 Every quote/order-book/trade-tape row carries dual freshness metadata where the
 broker response receipt time is distinct from exchange data time:

@@ -18,6 +18,7 @@ from trade_core.broker_gateway import (
     BrokerUnaryResponse,
     CancelOrderRequest,
     InstrumentRef,
+    InstrumentResolveRequest,
     OrderPlacementRequest,
 )
 from trade_core.infra.tbank import (
@@ -27,6 +28,7 @@ from trade_core.infra.tbank import (
     build_sandbox_smoke_plan,
 )
 from trade_core.infra.tbank.secrets import load_tbank_tokens_for_launch
+from trade_core.instruments import InstrumentResolverService
 from trade_core.market_data import Candle, Timeframe
 from trade_core.replay import (
     ReplayCounterfactualCase,
@@ -59,7 +61,7 @@ from trading_common import (
     parse_runtime_mode,
 )
 from trading_common.db.base import Base
-from trading_common.db.models import BrokerOrder
+from trading_common.db.models import BrokerOrder, InstrumentRegistry
 from trading_common.db.repositories import OrderRepository
 from trading_common.enums import SessionPhase, SessionType
 
@@ -273,6 +275,86 @@ def test_shadow_mode_records_pseudo_order_without_broker_post() -> None:
         assert intent.cancel_reason_code == "stale_order"
         assert fake_gateway.cancelled == []
 
+    engine.dispose()
+
+
+def test_instrument_resolver_uses_cached_registry_when_broker_resolver_times_out() -> None:
+    class TimeoutResolveGateway:
+        def __init__(self) -> None:
+            self.requests: list[InstrumentResolveRequest] = []
+
+        async def resolve_instruments(
+            self,
+            request: InstrumentResolveRequest,
+            metadata: object | None = None,
+        ) -> BrokerUnaryResponse:
+            del metadata
+            self.requests.append(request)
+            raise TimeoutError("ShareBy timeout")
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    fake_gateway = TimeoutResolveGateway()
+
+    with Session(engine) as session:
+        session.add_all(
+            [
+                InstrumentRegistry(
+                    instrument_id="MOEX:SBER",
+                    ticker="SBER",
+                    class_code="TQBR",
+                    figi="figi-sber",
+                    instrument_uid="uid-sber",
+                    name="SBER",
+                    lot_size=10,
+                    min_price_increment=Decimal("0.01"),
+                    currency="RUB",
+                    is_enabled=True,
+                    supports_morning=True,
+                    supports_evening=True,
+                    supports_weekend=False,
+                    source="tbank_resolved",
+                    resolution_status="resolved",
+                    instrument_payload={},
+                ),
+                InstrumentRegistry(
+                    instrument_id="MOEX:GAZP",
+                    ticker="GAZP",
+                    class_code="TQBR",
+                    figi="figi-gazp",
+                    instrument_uid="uid-gazp",
+                    name="GAZP",
+                    lot_size=10,
+                    min_price_increment=Decimal("0.01"),
+                    currency="RUB",
+                    is_enabled=True,
+                    supports_morning=True,
+                    supports_evening=True,
+                    supports_weekend=False,
+                    source="tbank_resolved",
+                    resolution_status="resolved",
+                    instrument_payload={},
+                ),
+            ]
+        )
+        session.flush()
+        service = InstrumentResolverService(
+            broker_gateway=cast(BrokerGateway, fake_gateway),
+            session=session,
+            launch_policy=LaunchModePolicy.from_mode(RuntimeMode.SHADOW),
+        )
+        resolved = asyncio.run(
+            service.resolve_startup_instruments(
+                (
+                    InstrumentRef(instrument_id="MOEX:SBER", ticker="SBER", class_code="TQBR"),
+                    InstrumentRef(instrument_id="MOEX:GAZP", ticker="GAZP", class_code="TQBR"),
+                )
+            )
+        )
+
+    assert fake_gateway.requests[0].tickers == ("SBER", "GAZP")
+    assert [instrument.instrument_uid for instrument in resolved] == ["uid-sber", "uid-gazp"]
+    assert [instrument.instrument_id for instrument in resolved] == ["MOEX:SBER", "MOEX:GAZP"]
     engine.dispose()
 
 

@@ -1,40 +1,65 @@
 <script setup lang="ts">
 import type { SignalResponse } from "../../api/types";
 import { formatDecimal, stringifyValue } from "../../utils/format";
-import { codeWithLabel } from "../../utils/labels";
+import { humanizeCode } from "../../utils/labels";
 import EmptyState from "../ui/EmptyState.vue";
 import StatusPill from "../ui/StatusPill.vue";
 
 defineProps<{
   signal: SignalResponse | null;
 }>();
+
+function sideLabel(side: string | null | undefined): string {
+  if (side === "buy") {
+    return "покупка";
+  }
+  if (side === "sell") {
+    return "продажа";
+  }
+  return side ?? "нет направления";
+}
+
+function signalTypeLabel(type: string | null | undefined): string {
+  if (type === "entry") {
+    return "вход в позицию";
+  }
+  if (type === "exit") {
+    return "выход из позиции";
+  }
+  return type ?? "нет типа сигнала";
+}
 </script>
 
 <template>
   <div v-if="signal" class="reason-card">
     <div class="reason-card__top">
       <strong>{{ signal.instrument_id }}</strong>
-      <StatusPill :code="signal.candidate_status" compact />
+      <StatusPill :code="signal.candidate_status" :label="humanizeCode(signal.candidate_status)" compact />
     </div>
     <dl class="definition-grid">
-      <dt>candidate_id</dt>
+      <dt>ID кандидата</dt>
       <dd><code>{{ signal.candidate_id }}</code></dd>
-      <dt>timeframe</dt>
+      <dt>таймфрейм</dt>
       <dd>{{ signal.timeframe }}</dd>
-      <dt>side</dt>
-      <dd>{{ signal.side }}</dd>
-      <dt>signal_type</dt>
-      <dd>{{ signal.signal_type }}</dd>
-      <dt>expected_edge_bps</dt>
+      <dt>направление</dt>
+      <dd>{{ sideLabel(signal.side) }}</dd>
+      <dt>тип сигнала</dt>
+      <dd>{{ signalTypeLabel(signal.signal_type) }}</dd>
+      <dt>ожидаемый запас</dt>
       <dd>{{ formatDecimal(signal.expected_edge_bps, 2) }}</dd>
-      <dt>final_blocker</dt>
+      <dt>почему не торгуем</dt>
       <dd>
-        <StatusPill v-if="signal.final_blocker_code" :code="signal.final_blocker_code" />
-        <span v-else>Нет финального блокера</span>
+        <StatusPill
+          v-if="signal.final_blocker_code"
+          :code="signal.final_blocker_code"
+          :label="humanizeCode(signal.final_blocker_code)"
+          compact
+        />
+        <span v-else>блокировки нет</span>
       </dd>
     </dl>
     <p v-if="signal.final_blocker_code" class="reason-card__explain">
-      Причина: {{ codeWithLabel(signal.final_blocker_code) }}.
+      Причина блокировки: {{ humanizeCode(signal.final_blocker_code) }}.
       <span v-if="signal.payload.explanation || signal.payload.reason">
         {{ stringifyValue(signal.payload.explanation ?? signal.payload.reason) }}
       </span>
@@ -42,7 +67,7 @@ defineProps<{
   </div>
   <EmptyState
     v-else
-    title="Текущий кандидат отсутствует"
-    detail="Нет активного signal_candidate в текущей micro-session."
+    title="Активного сигнала нет"
+    detail="В текущем часовом окне стратегия не сформировала сигнал для сделки. В data-only режиме это нормально: заявки не создаются."
   />
 </template>

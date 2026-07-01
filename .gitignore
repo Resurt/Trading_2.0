@@ -47,6 +47,7 @@ Thumbs.db
 logs/
 tmp/
 temp/
+.local/
 .tmp-chrome-profile*/
 
 # Docker local volumes / generated data
