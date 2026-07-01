@@ -1051,7 +1051,6 @@ function degradedFlagLabel(flag: string): string {
               <span class="quote-card__source">{{ sourceLabel(instrument.last_price_source) }}</span>
               <span class="quote-card__freshness">{{ quoteFreshness(instrument) }}</span>
               <span class="quote-card__meta">
-                <small>bid/ask {{ formatDecimal(instrument.best_bid, 2) }} / {{ formatDecimal(instrument.best_ask, 2) }}</small>
                 <small>спред {{ formatSpread(instrument) }}</small>
                 <small>стакан {{ displayQualityValue(instrument) }}</small>
               </span>
