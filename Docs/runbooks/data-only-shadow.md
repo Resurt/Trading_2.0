@@ -245,7 +245,12 @@ auto-dismiss after 10-15 seconds. Blocked/failed messages remain dismissible.
 
 Stop remains a controlled operator command. In data-only mode it stops/cancels market
 stream tasks, moves collector state to `stopped_by_operator`, and shows the result in
-the command status strip.
+the command status strip. It does not wait for intraday, summary, calibration, or
+other report generation. The dashboard must immediately switch the data-only logging
+panel from active collection to `Останавливается`/`Сбор логов остановлен` after the
+operator command is accepted, then reconcile with `/runtime/data-shadow/status`.
+If the runtime is inside the readonly order-book polling fallback, it checks Stop
+between instruments and must not wait for a full universe polling batch to finish.
 
 One accepted Start creates a daily collection intent. For a weekday trading date,
 the runtime collects the morning window, pauses as `paused_until_next_window` at
@@ -471,8 +476,8 @@ Trade-core starts only the minimal data-only stream set (`order_book`,
 `last_prices`, `trading_status`). If streams are silent but preflight allowed
 collection and readonly `GetOrderBook` works, a bounded polling fallback writes
 `market_microstructure_snapshot` through the same pipeline. This fallback is
-readonly, stops on operator Stop, and must not call `PostOrder`/`CancelOrder` or
-create trading entities.
+readonly, checks operator Stop between instrument requests, and must not call
+`PostOrder`/`CancelOrder` or create trading entities.
 
 While data-only collection is running, trade-core also skips runtime position
 snapshots. Operator balance diagnostics remain available through explicit

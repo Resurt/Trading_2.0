@@ -8,6 +8,7 @@ import type {
   SessionSnapshotResponse,
   SignalResponse,
 } from "../api/types";
+import { useMarketStore } from "../stores/market";
 import { useRobotStore } from "../stores/robot";
 
 const apiClientMock = vi.hoisted(() => ({
@@ -172,16 +173,23 @@ describe("robot store", () => {
 
   it("shows stop command result", async () => {
     apiClientMock.stopRobot.mockResolvedValue(commandFixture("stop", "requested"));
+    apiClientMock.dataShadowStatus.mockResolvedValue(dataShadowStatusFixture("stopped_by_operator"));
     apiClientMock.robotStatus.mockResolvedValue(statusFixture());
     apiClientMock.currentSession.mockResolvedValue(sessionFixture());
     apiClientMock.currentSignals.mockResolvedValue([]);
     const robot = useRobotStore();
+    const market = useMarketStore();
+    market.$patch({ dataShadowStatus: dataShadowStatusFixture("collecting") });
 
     await robot.stopRobot();
 
     expect(apiClientMock.stopRobot).toHaveBeenCalledTimes(1);
     expect(robot.lastCommandStatus).toBe("requested");
     expect(robot.lastCommandMessage).toBe("Сбор логов остановлен.");
+    expect(market.dataShadowStatus.collector_state).toBe("stopped_by_operator");
+    expect(market.dataShadowStatus.effective_logging_state).toBe("stopped");
+    expect(market.dataShadowStatus.reason_code).toBe("data_only_collection_stopped");
+    expect(market.dataShadowStatus.stream_alive).toBe(false);
   });
 });
 
@@ -313,15 +321,24 @@ function commandFixture(command: string, status: string): RobotCommandResponse {
 }
 
 function dataShadowStatusFixture(collectorState: string) {
+  const stoppedByOperator = collectorState === "stopped_by_operator";
+  const blocked = collectorState === "preflight_blocked";
   return {
     enabled: true,
     collector_state: collectorState,
+    data_shadow_collector_state: collectorState,
+    effective_logging_state: stoppedByOperator ? "stopped" : collectorState,
+    command_status: stoppedByOperator ? "applied" : null,
     strategy_trading_disabled: true,
     real_orders_disabled: true,
-    market_open: collectorState !== "preflight_blocked",
-    market_closed_expected: collectorState === "preflight_blocked",
-    reason_code: collectorState === "preflight_blocked" ? "market_closed_expected" : "market_open",
-    next_session_at: collectorState === "preflight_blocked" ? "2026-06-21T10:00:00+03:00" : null,
+    market_open: !blocked,
+    market_closed_expected: blocked,
+    reason_code: blocked
+      ? "market_closed_expected"
+      : stoppedByOperator
+        ? "data_only_collection_stopped"
+        : "market_open",
+    next_session_at: blocked ? "2026-06-21T10:00:00+03:00" : null,
     stream_alive: collectorState === "collecting",
     last_message_age_seconds: null,
     candles_received: null,
@@ -334,8 +351,12 @@ function dataShadowStatusFixture(collectorState: string) {
     started_at: null,
     stopped_at: null,
     last_command_id: "command-1",
-    last_command_status: collectorState === "preflight_blocked" ? "rejected" : "applied",
-    last_command_reason_code: collectorState === "preflight_blocked" ? "market_closed_expected" : "market_open",
+    last_command_status: blocked ? "rejected" : "applied",
+    last_command_reason_code: blocked
+      ? "market_closed_expected"
+      : stoppedByOperator
+        ? "data_only_collection_stopped"
+        : "market_open",
     instruments: ["MOEX:SBER"],
     stream_batches: [],
     warnings: [],

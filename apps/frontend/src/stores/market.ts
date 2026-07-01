@@ -482,6 +482,55 @@ export const useMarketStore = defineStore("market", () => {
     }
   }
 
+  function markDataShadowStopping(): void {
+    dataShadowStatus.value = {
+      ...dataShadowStatus.value,
+      collector_state: "stopping",
+      data_shadow_collector_state: "stopping",
+      current_window_state: "stopping",
+      effective_logging_state: "stopping",
+      command_status: "stop_requested",
+      preflight_phase: null,
+      start_in_progress: false,
+      daily_collection_active: false,
+      collector_left_running: false,
+      reason_code: "controlled_stop_requested",
+      stream_alive: false,
+      last_command_status: "stop_requested",
+      last_command_reason_code: "controlled_stop_requested",
+      warnings: dataShadowStatus.value.warnings.filter(
+        (warning) => warning !== "collector_no_recent_samples",
+      ),
+    };
+  }
+
+  function markDataShadowStopped(commandId?: string | null): void {
+    const stoppedAt = new Date().toISOString();
+    dataShadowStatus.value = {
+      ...dataShadowStatus.value,
+      collector_state: "stopped_by_operator",
+      data_shadow_collector_state: "stopped_by_operator",
+      day_collection_state: "cancelled_by_operator",
+      daily_collection_active: false,
+      current_window_state: "stopped_by_operator",
+      effective_logging_state: "stopped",
+      command_status: "applied",
+      preflight_phase: null,
+      start_in_progress: false,
+      collector_left_running: false,
+      reason_code: "data_only_collection_stopped",
+      stream_alive: false,
+      stopped_at: stoppedAt,
+      last_stop_reason: "data_only_collection_stopped",
+      last_command_id: commandId ?? dataShadowStatus.value.last_command_id,
+      last_command_status: "applied",
+      last_command_reason_code: "data_only_collection_stopped",
+      warnings: dataShadowStatus.value.warnings.filter(
+        (warning) => warning !== "collector_no_recent_samples",
+      ),
+    };
+  }
+
   async function connectMarketSocket(): Promise<void> {
     if (marketSocket && marketSocket.readyState < WebSocket.CLOSING) {
       return;
@@ -657,6 +706,8 @@ export const useMarketStore = defineStore("market", () => {
     applyDashboardFeedSnapshot,
     applyOverview,
     fetchDataShadowStatus,
+    markDataShadowStopping,
+    markDataShadowStopped,
     connectMarketSocket,
     startDashboardFeed,
     stopDashboardFeed,

@@ -315,6 +315,8 @@ Command progress is read from `/robot/status` and `/runtime/data-shadow/status`:
 - `preflight_pending`: `Запуск сбора логов запрошен. Проверяю сессию...`;
 - `preflight_retrying`: `Брокер временно не ответил, повторяю проверку...`;
 - `collecting`: `Сбор логов запущен.`;
+- `stopping`: `Останавливаю сбор логов.`;
+- `stopped_by_operator`/`stopped`/`idle`: `Сбор логов остановлен.`;
 - `preflight_blocked`: `Сбор логов не запущен: <reason>. Следующая сессия: <time>.`.
 
 Command messages must be short, dismissible and auto-dismiss after 10-15 seconds:
@@ -329,6 +331,13 @@ Command messages must be short, dismissible and auto-dismiss after 10-15 seconds
   `Не удалось отправить команду Start. Проверьте API.`
 
 Do not show long technical command payloads in the operator banner.
+
+Stop must clear stale collecting copy immediately after the operator click. The
+frontend first marks data-only logging as `stopping`, then, after `/robot/stop`
+accepts the command, shows `Сбор логов остановлен.` while polling
+`/runtime/data-shadow/status` for the authoritative `stopped_by_operator`
+confirmation. The data-only panel must not keep showing
+`data_only_collection_started` or `Идёт сбор` after an accepted Stop command.
 
 ## Safety Invariants
 

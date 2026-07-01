@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -214,10 +214,16 @@ class RecordingStreamGateway(SafeNoopBrokerGateway):
 
 
 class PollingOrderBookGateway(RecordingStreamGateway):
-    def __init__(self, *, now: datetime | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        now: datetime | None = None,
+        on_order_book_request: Callable[[InstrumentRef], None] | None = None,
+    ) -> None:
         super().__init__(now=now)
         self.order_book_requests: list[InstrumentRef] = []
         self.position_requests: list[PositionsRequest] = []
+        self.on_order_book_request = on_order_book_request
 
     async def get_positions(
         self,
@@ -235,6 +241,8 @@ class PollingOrderBookGateway(RecordingStreamGateway):
         del metadata
         instrument = request.instrument
         self.order_book_requests.append(instrument)
+        if self.on_order_book_request is not None:
+            self.on_order_book_request(instrument)
         now = self.now or msk(2026, 6, 28, 14)
         return BrokerUnaryResponse(
             method_name="GetOrderBook",
@@ -601,6 +609,102 @@ def test_data_only_start_probe_fallback_polls_order_book_and_writes_microstructu
         assert gateway.position_requests == []
         assert gateway.post_order_calls == []
         assert gateway.cancel_order_calls == []
+        await runtime.shutdown()
+
+    asyncio.run(run())
+
+
+def test_data_only_stop_interrupts_order_book_polling_batch(tmp_path: Path) -> None:
+    stop_enqueued = False
+    runtime_holder: dict[str, TradeCoreRuntime] = {}
+
+    def enqueue_stop_once(_: InstrumentRef) -> None:
+        nonlocal stop_enqueued
+        if stop_enqueued:
+            return
+        stop_enqueued = True
+        runtime = runtime_holder["runtime"]
+        with runtime.database.session_scope() as session:
+            RobotCommandRepository(session).create(
+                command_type="stop",
+                requested_by="desk-operator",
+                requested_role="operator",
+                requested_at=datetime.now(tz=UTC),
+                payload={
+                    "mode": "data_shadow",
+                    "trading_disabled": True,
+                    "data_only_shadow": True,
+                },
+            )
+
+    gateway = PollingOrderBookGateway(now=msk(2026, 6, 28, 14, 30))
+    config = replace(
+        runtime_config(tmp_path),
+        data_only_shadow_enabled=True,
+        data_only_order_book_poll_interval_seconds=1,
+    )
+    runtime = TradeCoreRuntime(
+        config=config,
+        launch_policy=LaunchModePolicy.from_mode(RuntimeMode.SHADOW),
+        database=DatabaseService(config.database_url or ""),
+        broker_gateway=cast(BrokerGateway, gateway),
+        report_job_dispatcher=noop_report_job_dispatcher(),
+    )
+    runtime_holder["runtime"] = runtime
+    original_process_order_book = runtime.process_order_book
+
+    async def process_order_book_and_enqueue_stop(
+        order_book: OrderBookSnapshot,
+    ) -> None:
+        await original_process_order_book(order_book)
+        enqueue_stop_once(runtime.config.instruments[0])
+
+    runtime.process_order_book = process_order_book_and_enqueue_stop  # type: ignore[method-assign]
+
+    async def run() -> None:
+        await runtime.start()
+        with runtime.database.session_scope() as session:
+            RobotCommandRepository(session).create(
+                command_type="start",
+                requested_by="desk-operator",
+                requested_role="operator",
+                requested_at=datetime.now(tz=UTC),
+                payload={
+                    "mode": "data_shadow",
+                    "trading_disabled": True,
+                    "data_only_shadow": True,
+                    "preflight_result": {
+                        "now_msk": "2026-06-28T14:30:00+03:00",
+                        "session_type": "weekend",
+                        "session_phase": "continuous_trading",
+                        "market_open": True,
+                        "market_window_open": True,
+                        "market_closed_expected": False,
+                        "official_exchange_open": False,
+                        "official_exchange_closed": False,
+                        "venue_type": "broker_status_fallback_time_rules",
+                        "quote_source_allowed_for_data_collection": True,
+                        "data_only_collection_allowed": True,
+                        "streams_for_calibration_allowed": True,
+                        "reason_code": "market_open",
+                    },
+                },
+            )
+
+        assert await runtime.process_robot_commands_async() == 1
+        assert runtime.stats.collector_state == "collecting"
+        await runtime.run_cycle(now=msk(2026, 6, 28, 14, 30))
+
+        assert stop_enqueued is True
+        assert runtime.stats.collector_state == "stopped_by_operator"
+        assert len(gateway.order_book_requests) == 1
+        assert gateway.position_requests == []
+        assert gateway.post_order_calls == []
+        assert gateway.cancel_order_calls == []
+        with runtime.database.session_factory() as session:
+            assert session.scalar(select(func.count()).select_from(SignalCandidate)) == 0
+            assert session.scalar(select(func.count()).select_from(OrderIntent)) == 0
+            assert session.scalar(select(func.count()).select_from(BrokerOrder)) == 0
         await runtime.shutdown()
 
     asyncio.run(run())

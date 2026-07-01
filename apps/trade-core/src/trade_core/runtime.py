@@ -1143,6 +1143,9 @@ class TradeCoreRuntime:
         successful = 0
         failed = 0
         for instrument in self.config.instruments:
+            await self.process_robot_commands_async()
+            if self.stats.collector_state != "collecting":
+                break
             try:
                 response = await self.broker_gateway.get_order_book(
                     OrderBookRequest(instrument=instrument, depth=10)
@@ -1161,6 +1164,9 @@ class TradeCoreRuntime:
                 order_book = order_book_from_mapping(payload, received_at=received_at)
                 await self.process_order_book(order_book)
                 successful += 1
+                await self.process_robot_commands_async()
+                if self.stats.collector_state != "collecting":
+                    break
             except Exception as exc:
                 failed += 1
                 log_event(

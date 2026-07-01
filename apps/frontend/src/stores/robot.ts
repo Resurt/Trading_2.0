@@ -295,6 +295,8 @@ export const useRobotStore = defineStore("robot", () => {
   async function stopRobot(): Promise<void> {
     stopLoading.value = true;
     commandPhase.value = "stop_command";
+    const market = useMarketStore();
+    market.markDataShadowStopping();
     setCommandState({
       status: "stop_requesting",
       message: "Останавливаю сбор логов.",
@@ -306,8 +308,14 @@ export const useRobotStore = defineStore("robot", () => {
         ...response,
         message: response.message || "Сбор логов остановлен.",
       });
+      if (response.accepted) {
+        market.markDataShadowStopped(response.command_id);
+      } else {
+        void market.fetchDataShadowStatus();
+      }
       void pollDataShadowStatusUntilSettled();
     } catch (unknownError) {
+      void market.fetchDataShadowStatus();
       setCommandState({
         status: "stop_failed",
         message: `Сбор логов не остановлен: ${errorMessage(unknownError)}`,
@@ -542,6 +550,8 @@ export const useRobotStore = defineStore("robot", () => {
       if (
         state === "collecting" ||
         state === "stopped_by_operator" ||
+        state === "stopped" ||
+        state === "idle" ||
         state === "preflight_blocked" ||
         state === "degraded"
       ) {
@@ -550,6 +560,17 @@ export const useRobotStore = defineStore("robot", () => {
             status: "collecting",
             message: "Сбор логов запущен.",
             reasonCode: market.dataShadowStatus.reason_code,
+            autoDismissMs: COMMAND_AUTO_DISMISS_MS,
+          });
+        } else if (
+          state === "stopped_by_operator" ||
+          state === "stopped" ||
+          state === "idle"
+        ) {
+          setCommandState({
+            status: state,
+            message: "Сбор логов остановлен.",
+            reasonCode: market.dataShadowStatus.reason_code ?? "data_only_collection_stopped",
             autoDismissMs: COMMAND_AUTO_DISMISS_MS,
           });
         } else if (state === "preflight_blocked") {
