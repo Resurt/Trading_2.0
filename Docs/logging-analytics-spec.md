@@ -93,8 +93,12 @@ Data-only exchange timestamp semantics:
   dual-freshness calibration requires exchange-timestamp-confirmed rows.
 
 Data-only trade tape persistence stores real broker market-trade events in
-`market_trade_sample`. Empty `GetLastTrades` responses or missing stream trades
-produce explicit status/reason diagnostics and must not create fake trade rows.
+`market_trade_sample`. Stream events are preferred; if they do not produce
+samples, the data-only collector may use bounded readonly `GetLastTrades`
+polling inside the allowed collection window. Empty `GetLastTrades` responses or
+missing stream trades produce explicit status/reason diagnostics and must not
+create fake trade rows. Fallback rows remain `include_in_calibration=false` by
+default.
 Daily trend and summary reports expose `trade_tape_sample_count` and
 `tape_confirmed_candidate_count`; on one-day diagnostics, missing tape means
 windows are order-book/mid confirmed only.

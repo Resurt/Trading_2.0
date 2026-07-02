@@ -391,6 +391,12 @@ class DataShadowStatusResponse(BaseModel):
     candles_received: int | None = None
     order_book_snapshots: int
     market_microstructure_snapshots: int
+    trade_collection_enabled: bool = False
+    trade_sample_count: int = 0
+    trade_samples_seen: int = 0
+    last_trade_sample_at: datetime | None = None
+    last_data_only_trade_poll_at: datetime | None = None
+    trade_collection_reason: str | None = None
     avg_spread_bps: Decimal | None = None
     p95_spread_bps: Decimal | None = None
     avg_market_quality_score: Decimal | None = None

@@ -64,6 +64,7 @@ from trading_common.db.models import (
     MarketCandle,
     MarketMicrostructureSnapshot,
     MarketRegimeSnapshot,
+    MarketTradeSample,
     OrderBookSummary,
     OrderIntent,
     PositionSnapshot,
@@ -864,6 +865,12 @@ class BffReadService:
             .order_by(MarketMicrostructureSnapshot.ts_utc.desc())
             .limit(1)
         ).scalar_one_or_none()
+        trade_sample_count, last_trade_sample_at = self._session.execute(
+            select(
+                func.count(MarketTradeSample.market_trade_sample_id),
+                func.max(MarketTradeSample.received_ts),
+            )
+        ).one()
         enabled = _bool_env(os.environ.get("TRADING_DATA_ONLY_SHADOW"))
         command = self._latest_robot_command()
         result_payload = command.result_payload if command is not None else {}
@@ -972,6 +979,12 @@ class BffReadService:
             if collector_stopped and not collector_paused
             else None
         )
+        trade_collection_env = os.environ.get("DATA_SHADOW_COLLECT_TRADES")
+        trade_collection_enabled = (
+            bool(lifecycle_payload.get("trade_collection_enabled", True))
+            if trade_collection_env is None
+            else _bool_env(trade_collection_env)
+        )
         return DataShadowStatusResponse(
             enabled=enabled,
             collector_state=collector_state,
@@ -1039,6 +1052,23 @@ class BffReadService:
             candles_received=None,
             order_book_snapshots=int(count or 0),
             market_microstructure_snapshots=int(count or 0),
+            trade_collection_enabled=trade_collection_enabled,
+            trade_sample_count=int(trade_sample_count or 0),
+            trade_samples_seen=_int_payload_value(
+                lifecycle_payload,
+                "trade_samples_seen",
+            ),
+            last_trade_sample_at=last_trade_sample_at
+            if int(trade_sample_count or 0) > 0
+            else None,
+            last_data_only_trade_poll_at=_datetime_payload_value(
+                lifecycle_payload,
+                "last_data_only_trade_poll_at",
+            ),
+            trade_collection_reason=_str_payload_value(
+                lifecycle_payload,
+                "trade_collection_reason",
+            ),
             avg_spread_bps=_decimal_or_none(avg_spread),
             p95_spread_bps=None,
             avg_market_quality_score=_decimal_or_none(avg_quality),
@@ -1202,6 +1232,7 @@ class BffReadService:
             "data_only_shadow_collection_resume_failed",
             "data_only_shadow_preflight_started",
             "data_only_shadow_preflight_retrying",
+            "data_only_trade_poll_completed",
             "robot_command_blocked_preflight",
         }
         filters: list[ColumnElement[bool]] = [AuditEvent.action.in_(lifecycle_actions)]

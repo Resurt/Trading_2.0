@@ -492,6 +492,9 @@ The data-shadow status payload includes observable supervisor fields:
 - `paused_at`, `completed_for_day_at`, `last_window_completed_at`;
 - `last_stop_reason`, `last_pause_reason`, `last_resume_at`;
 - `collector_left_running`.
+- `trade_collection_enabled`, `trade_sample_count`, `trade_samples_seen`,
+  `last_trade_sample_at`, `last_data_only_trade_poll_at`, and
+  `trade_collection_reason` for persisted trade-tape observability.
 
 When the collector is intentionally stopped or preflight-blocked,
 `supervisor_state=stopped`. If the implementation is not configured,

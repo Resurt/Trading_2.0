@@ -351,6 +351,12 @@ export interface DataShadowStatusResponse {
   candles_received: number | null;
   order_book_snapshots: number;
   market_microstructure_snapshots: number;
+  trade_collection_enabled?: boolean;
+  trade_sample_count?: number;
+  trade_samples_seen?: number;
+  last_trade_sample_at?: string | null;
+  last_data_only_trade_poll_at?: string | null;
+  trade_collection_reason?: string | null;
   avg_spread_bps: string | null;
   p95_spread_bps: string | null;
   avg_market_quality_score: string | null;

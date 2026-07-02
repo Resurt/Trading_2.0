@@ -75,13 +75,17 @@ from trade_core.market_data import (
     MarketReadModelStore,
     MarketState,
     MarketStateCalculator,
+    MarketTrade,
     OrderBookSnapshot,
     StreamGapRecoveryService,
     Timeframe,
 )
 from trade_core.market_data.persistence import SqlAlchemyMarketDataStore
 from trade_core.market_data.recovery import GapRecoveryRequest
-from trade_core.market_data.subscriptions import order_book_from_mapping
+from trade_core.market_data.subscriptions import (
+    market_trade_from_mapping,
+    order_book_from_mapping,
+)
 from trade_core.portfolio import PositionService
 from trade_core.session import (
     BrokerTradingStatus,
@@ -189,6 +193,10 @@ class TradeCoreRuntimeConfig:
         "market_trades",
     )
     data_only_order_book_poll_interval_seconds: float = 15.0
+    data_only_collect_trades: bool = True
+    data_only_trades_poll_seconds: float = 5.0
+    data_only_trades_lookback_seconds: int = 60
+    data_only_trades_max_per_instrument: int = 100
     dividend_sync_enabled: bool = False
     dividend_sync_lookback_days: int = 730
     dividend_sync_lookahead_days: int = 365
@@ -247,6 +255,19 @@ class TradeCoreRuntimeConfig:
             ),
             data_only_order_book_poll_interval_seconds=float(
                 env.get("TRADING_DATA_ONLY_ORDER_BOOK_POLL_INTERVAL_SECONDS", "15")
+            ),
+            data_only_collect_trades=_bool_env(
+                env.get("DATA_SHADOW_COLLECT_TRADES"),
+                default=True,
+            ),
+            data_only_trades_poll_seconds=float(
+                env.get("DATA_SHADOW_TRADES_POLL_SECONDS", "5")
+            ),
+            data_only_trades_lookback_seconds=int(
+                env.get("DATA_SHADOW_TRADES_LOOKBACK_SECONDS", "60")
+            ),
+            data_only_trades_max_per_instrument=int(
+                env.get("DATA_SHADOW_TRADES_MAX_PER_INSTRUMENT", "100")
             ),
             dividend_sync_enabled=_bool_env(
                 env.get("TRADING_DIVIDEND_SYNC_ENABLED"),
@@ -330,6 +351,12 @@ class TradeCoreRuntimeStats:
     data_only_order_book_polls: int = 0
     data_only_order_book_poll_errors: int = 0
     last_data_only_order_book_poll_at: datetime | None = None
+    data_only_trade_polls: int = 0
+    data_only_trade_poll_errors: int = 0
+    data_only_trade_samples_seen: int = 0
+    last_data_only_trade_poll_at: datetime | None = None
+    last_trade_sample_at: datetime | None = None
+    trade_collection_reason: str = "not_started"
     daily_collection_active: bool = False
     day_collection_state: str = "inactive"
     current_window_state: str = "stopped"
@@ -711,6 +738,7 @@ class TradeCoreRuntime:
         self._data_only_preflight_payload: JsonPayload | None = None
         self._data_only_session_context: SessionEventContext | None = None
         self._last_data_only_order_book_poll_at: datetime | None = None
+        self._last_data_only_trade_poll_at: datetime | None = None
         self._last_data_only_lifecycle_check_at: datetime | None = None
         self._latest_market_states: dict[str, MarketState] = {}
         self._latest_closed_bars: dict[str, dict[Timeframe, Bar]] = {}
@@ -1051,6 +1079,7 @@ class TradeCoreRuntime:
                 observed_at=observed_at,
             )
         await self._poll_data_only_order_books_if_due(now=observed_at)
+        await self._poll_data_only_trades_if_due(now=observed_at)
         self.flush_domain_events()
         self.dispatch_report_jobs()
         return result.snapshot
@@ -1157,6 +1186,19 @@ class TradeCoreRuntime:
         )
         self.flush_domain_events()
 
+    async def process_market_trade(self, trade: MarketTrade) -> None:
+        """Test/replay helper: send a market trade through the live pipeline."""
+
+        await self.market_event_bus.publish(
+            MarketDataEvent(
+                event_type=MarketEventType.MARKET_TRADE,
+                payload=trade,
+                ts_utc=trade.received_ts,
+                instrument_id=trade.instrument_id,
+            )
+        )
+        self.flush_domain_events()
+
     async def _poll_data_only_order_books_if_due(self, *, now: datetime) -> None:
         if not self.config.data_only_shadow_enabled:
             return
@@ -1223,6 +1265,118 @@ class TradeCoreRuntime:
                 "real_orders_disabled": True,
                 "strategy_trading_disabled": True,
                 "include_in_calibration": calibration_allowed,
+            },
+        )
+
+    async def _poll_data_only_trades_if_due(self, *, now: datetime) -> None:
+        if not self.config.data_only_shadow_enabled:
+            return
+        if not self.config.data_only_collect_trades:
+            self.stats.trade_collection_reason = "disabled"
+            return
+        if self.stats.collector_state != "collecting":
+            return
+        if not self._data_only_collection_window_open(now=now):
+            return
+        interval = max(1.0, self.config.data_only_trades_poll_seconds)
+        now_utc = now.astimezone(UTC)
+        last_poll = self._last_data_only_trade_poll_at
+        if last_poll is not None and (now_utc - last_poll).total_seconds() < interval:
+            return
+        self._last_data_only_trade_poll_at = now_utc
+        self.stats.last_data_only_trade_poll_at = now_utc
+        lookback = max(1, self.config.data_only_trades_lookback_seconds)
+        max_per_instrument = max(1, self.config.data_only_trades_max_per_instrument)
+        from_ts = now_utc - timedelta(seconds=lookback)
+        successful_instruments = 0
+        empty_instruments = 0
+        failed = 0
+        samples_seen = 0
+        for instrument in self.config.instruments:
+            await self.process_robot_commands_async()
+            if self.stats.collector_state != "collecting":
+                break
+            try:
+                response = await self.broker_gateway.get_last_trades(
+                    LastTradesRequest(
+                        instrument=instrument,
+                        from_=from_ts,
+                        to=now_utc,
+                        trade_source="all",
+                    )
+                )
+                raw_trades = response.data.get("trades")
+                if not isinstance(raw_trades, list) or not raw_trades:
+                    empty_instruments += 1
+                    continue
+                successful_instruments += 1
+                for raw_trade in raw_trades[:max_per_instrument]:
+                    if not isinstance(raw_trade, Mapping):
+                        continue
+                    payload = {
+                        **dict(raw_trade),
+                        "instrument_id": str(
+                            raw_trade.get("instrument_id")
+                            or instrument.instrument_uid
+                            or instrument.instrument_id
+                        ),
+                        "instrument_uid": raw_trade.get("instrument_uid")
+                        or instrument.instrument_uid,
+                        "figi": raw_trade.get("figi") or instrument.figi,
+                        "source": raw_trade.get("source")
+                        or "tbank_get_last_trades_polling_fallback",
+                        "trade_source": raw_trade.get("trade_source") or "all",
+                        "venue_type": raw_trade.get("venue_type") or "official_exchange",
+                        "include_in_calibration": bool(
+                            raw_trade.get("include_in_calibration", False)
+                        ),
+                    }
+                    trade = market_trade_from_mapping(payload, received_at=now_utc)
+                    await self.process_market_trade(trade)
+                    samples_seen += 1
+                    self.stats.last_trade_sample_at = now_utc
+                await self.process_robot_commands_async()
+                if self.stats.collector_state != "collecting":
+                    break
+            except Exception as exc:
+                failed += 1
+                log_event(
+                    logger=LOGGER,
+                    level="WARNING",
+                    event_type="data_only_trade_poll_failed",
+                    component="runtime.data_only_trade_polling",
+                    instrument_id=instrument.instrument_id,
+                    error_code=type(exc).__name__,
+                    error_message=str(exc),
+                )
+        self.stats.data_only_trade_polls += successful_instruments
+        self.stats.data_only_trade_poll_errors += failed
+        self.stats.data_only_trade_samples_seen += samples_seen
+        if samples_seen:
+            reason = "trade_samples_persisted"
+        elif failed:
+            reason = "trade_poll_errors"
+        elif empty_instruments:
+            reason = "no_market_trades_samples"
+        else:
+            reason = "trade_poll_not_run"
+        self.stats.trade_collection_reason = reason
+        self._write_audit_event(
+            action="data_only_trade_poll_completed",
+            severity="info" if samples_seen or empty_instruments else "warning",
+            payload={
+                **self._data_only_lifecycle_payload(),
+                "successful_instruments": successful_instruments,
+                "empty_instruments": empty_instruments,
+                "failed_instruments": failed,
+                "samples_seen": samples_seen,
+                "instrument_count": len(self.config.instruments),
+                "lookback_seconds": lookback,
+                "max_per_instrument": max_per_instrument,
+                "readonly_calls_only": True,
+                "real_orders_disabled": True,
+                "strategy_trading_disabled": True,
+                "trade_collection_reason": reason,
             },
         )
 
@@ -1299,6 +1453,7 @@ class TradeCoreRuntime:
             )
             self._data_only_session_context = None
             self._last_data_only_order_book_poll_at = None
+            self._last_data_only_trade_poll_at = None
             self.stats.collector_stopped_at = None
             self._write_audit_event(
                 action="data_only_shadow_collection_paused_until_next_window",
@@ -1331,6 +1486,7 @@ class TradeCoreRuntime:
         self._data_only_preflight_payload = None
         self._data_only_session_context = None
         self._last_data_only_order_book_poll_at = None
+        self._last_data_only_trade_poll_at = None
         final_stop_payload = {
             **self._data_only_lifecycle_payload(),
             "runtime_id": str(self.runtime_id),
@@ -1444,6 +1600,7 @@ class TradeCoreRuntime:
             observed_at=now_msk,
         )
         self._last_data_only_order_book_poll_at = None
+        self._last_data_only_trade_poll_at = None
         await self._start_market_streams(
             account_id=None,
             market_stream_names=self.config.data_only_stream_names,
@@ -1769,6 +1926,20 @@ class TradeCoreRuntime:
             "collector_started_at": _iso_or_none(self.stats.collector_started_at),
             "last_command_error": self.stats.last_command_error,
             "next_retry_at": _iso_or_none(self.stats.next_retry_at),
+            "trade_collection_enabled": self.config.data_only_collect_trades,
+            "trade_samples_seen": self.stats.data_only_trade_samples_seen,
+            "trade_poll_count": self.stats.data_only_trade_polls,
+            "trade_poll_error_count": self.stats.data_only_trade_poll_errors,
+            "last_data_only_trade_poll_at": _iso_or_none(
+                self.stats.last_data_only_trade_poll_at
+            ),
+            "last_trade_sample_at": _iso_or_none(self.stats.last_trade_sample_at),
+            "trade_collection_reason": self.stats.trade_collection_reason,
+            "trade_poll_interval_seconds": self.config.data_only_trades_poll_seconds,
+            "trade_poll_lookback_seconds": self.config.data_only_trades_lookback_seconds,
+            "trade_poll_max_per_instrument": (
+                self.config.data_only_trades_max_per_instrument
+            ),
             "readonly_calls_only": True,
             "real_orders_disabled": True,
             "strategy_trading_disabled": True,
@@ -2434,6 +2605,7 @@ class TradeCoreRuntime:
             observed_at=now.astimezone(MSK),
         )
         self._last_data_only_order_book_poll_at = None
+        self._last_data_only_trade_poll_at = None
         await self._start_market_streams(
             account_id=None,
             market_stream_names=self.config.data_only_stream_names,
@@ -2447,6 +2619,7 @@ class TradeCoreRuntime:
         self.stats.collector_started_at = now
         self.stats.collector_stopped_at = None
         self.stats.last_data_only_order_book_poll_at = None
+        self.stats.last_data_only_trade_poll_at = None
         self._write_audit_event(
             action="data_only_shadow_collection_started",
             payload={
@@ -2462,6 +2635,12 @@ class TradeCoreRuntime:
                 "polling_fallback_enabled": True,
                 "order_book_poll_interval_seconds": (
                     self.config.data_only_order_book_poll_interval_seconds
+                ),
+                "trade_collection_enabled": self.config.data_only_collect_trades,
+                "trade_poll_interval_seconds": self.config.data_only_trades_poll_seconds,
+                "trade_poll_lookback_seconds": self.config.data_only_trades_lookback_seconds,
+                "trade_poll_max_per_instrument": (
+                    self.config.data_only_trades_max_per_instrument
                 ),
                 "preflight_result": self._data_only_preflight_payload,
             },
@@ -2481,6 +2660,12 @@ class TradeCoreRuntime:
                 "polling_fallback_enabled": True,
                 "order_book_poll_interval_seconds": (
                     self.config.data_only_order_book_poll_interval_seconds
+                ),
+                "trade_collection_enabled": self.config.data_only_collect_trades,
+                "trade_poll_interval_seconds": self.config.data_only_trades_poll_seconds,
+                "trade_poll_lookback_seconds": self.config.data_only_trades_lookback_seconds,
+                "trade_poll_max_per_instrument": (
+                    self.config.data_only_trades_max_per_instrument
                 ),
             },
         )
@@ -2518,6 +2703,7 @@ class TradeCoreRuntime:
         self._data_only_preflight_payload = None
         self._data_only_session_context = None
         self._last_data_only_order_book_poll_at = None
+        self._last_data_only_trade_poll_at = None
         self._write_audit_event(
             action="data_only_shadow_collection_stopped",
             payload={

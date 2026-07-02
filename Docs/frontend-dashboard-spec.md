@@ -216,11 +216,13 @@ Quote cards and selected details use readonly broker trading status to classify
 fresh books as live vs display-only. Empty or partial refreshes may preserve the
 last fresh selected ladder/trade tape for display continuity, but this cache is
 never written into calibration tables.
-Persistent calibration evidence is separate: data-only collection stores real
-broker tape samples in `market_trade_sample` only when market-trade stream events
-arrive. The dashboard may display readonly `GetLastTrades` rows, but display-only
+Persistent tape evidence is separate: data-only collection stores real broker
+tape samples in `market_trade_sample` from market-trade stream events or the
+bounded readonly `GetLastTrades` fallback running inside an allowed collection
+window. The dashboard may display readonly `GetLastTrades` rows, but display-only
 rows are not calibration rows and must not be counted as tape-confirmed windows
-unless they were persisted by the data-only pipeline.
+unless they were persisted by the data-only pipeline. Persisted fallback rows
+default to `include_in_calibration=false`.
 Supported status values include:
 
 - `live`
@@ -335,6 +337,12 @@ The backend/trade-core fresh preflight decides whether collector startup is allo
 - `strategy_trading_disabled=true`.
 
 Command progress is read from `/robot/status` and `/runtime/data-shadow/status`:
+
+`/runtime/data-shadow/status` may also expose trade-tape collection fields:
+`trade_collection_enabled`, `trade_sample_count`, `trade_samples_seen`,
+`last_trade_sample_at`, `last_data_only_trade_poll_at`, and
+`trade_collection_reason`. The dashboard treats them as status/diagnostics; it
+must not infer live trading or order activity from these fields.
 
 - `preflight_pending`: `Запуск сбора логов запрошен. Проверяю сессию...`;
 - `preflight_retrying`: `Брокер временно не ответил, повторяю проверку...`;

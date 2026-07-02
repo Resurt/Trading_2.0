@@ -38,11 +38,21 @@ The collector writes `market_microstructure_snapshot` with:
 - session context: `trading_date`, `session_type`, `session_phase`, `micro_session_id`;
 - `source=data_only_shadow`.
 
-The collector also persists real market tape samples in `market_trade_sample`
-when broker market-trade stream events arrive. It must never create fake tape
-rows. Missing trades are reported as status/reason diagnostics, not as samples.
-Dashboard-only `GetLastTrades` rows are display data unless the data-only
-collector persists them through the market data pipeline.
+The collector also persists real market tape samples in `market_trade_sample`.
+It first uses broker market-trade stream events when they arrive; when the stream
+does not yield samples during an allowed collection window, the bounded readonly
+`GetLastTrades` fallback can persist real broker rows through the same market
+data pipeline. It must never create fake tape rows. Missing trades are reported
+as status/reason diagnostics, not as samples. Fallback rows default to
+`include_in_calibration=false` unless a future policy explicitly promotes them.
+
+Trade polling is controlled by `DATA_SHADOW_COLLECT_TRADES=true`,
+`DATA_SHADOW_TRADES_POLL_SECONDS=5`,
+`DATA_SHADOW_TRADES_LOOKBACK_SECONDS=60`, and
+`DATA_SHADOW_TRADES_MAX_PER_INSTRUMENT=100`.
+`/runtime/data-shadow/status` exposes `trade_collection_enabled`,
+`trade_sample_count`, `trade_samples_seen`, `last_trade_sample_at`,
+`last_data_only_trade_poll_at`, and `trade_collection_reason`.
 
 `exchange_ts` must never be fabricated from `received_ts`. If historical rows do
 not contain an exchange timestamp and no matching broker/order-book payload

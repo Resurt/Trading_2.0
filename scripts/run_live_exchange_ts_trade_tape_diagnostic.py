@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -37,7 +38,12 @@ from trade_core.broker_gateway import (
     OrderBookRequest,
     TradingStatusRequest,
 )
-from trade_core.infra.tbank import TBankBrokerConfig, TBankBrokerGateway, load_tbank_tokens
+from trade_core.infra.tbank import (
+    TBankBrokerConfig,
+    TBankBrokerGateway,
+    TBankEnvironment,
+    load_tbank_tokens,
+)
 from trading_common.db.config import build_database_url_from_env
 from trading_common.db.models import (
     MarketMicrostructureSnapshot,
@@ -115,7 +121,14 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
 
 async def _broker_probe(*, instruments: tuple[str, ...], minutes: float) -> dict[str, Any]:
     tokens = load_tbank_tokens()
-    gateway = TBankBrokerGateway(config=TBankBrokerConfig(), tokens=tokens)
+    raw_environment = os.getenv(
+        "TBANK_READONLY_ENVIRONMENT",
+        os.getenv("TBANK_ENVIRONMENT", TBankEnvironment.LIVE.value),
+    )
+    config = TBankBrokerConfig.from_env().with_environment(
+        TBankEnvironment(raw_environment)
+    )
+    gateway = TBankBrokerGateway(config=config, tokens=tokens)
     resolved = await gateway.resolve_instruments(
         InstrumentResolveRequest(
             tickers=tuple(_ticker(item) for item in instruments),

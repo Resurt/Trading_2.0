@@ -21,6 +21,7 @@ from trade_core.broker_gateway import (
     DividendsRequest,
     InstrumentRef,
     InstrumentResolveRequest,
+    LastTradesRequest,
     OrderBookRequest,
     PositionsRequest,
     RequestMetadata,
@@ -52,6 +53,7 @@ from trading_common.db.models import (
     CandidateStageResult,
     InstrumentRegistry,
     MarketMicrostructureSnapshot,
+    MarketTradeSample,
     OrderIntent,
     PositionSnapshot,
     RobotCommand,
@@ -115,10 +117,18 @@ def test_runtime_config_enables_data_only_shadow_from_env() -> None:
         {
             LOCAL_SQLITE_ENV: "1",
             "TRADING_DATA_ONLY_SHADOW": "true",
+            "DATA_SHADOW_COLLECT_TRADES": "true",
+            "DATA_SHADOW_TRADES_POLL_SECONDS": "7",
+            "DATA_SHADOW_TRADES_LOOKBACK_SECONDS": "45",
+            "DATA_SHADOW_TRADES_MAX_PER_INSTRUMENT": "3",
         }
     )
 
     assert config.data_only_shadow_enabled is True
+    assert config.data_only_collect_trades is True
+    assert config.data_only_trades_poll_seconds == 7
+    assert config.data_only_trades_lookback_seconds == 45
+    assert config.data_only_trades_max_per_instrument == 3
 
 
 def test_default_runtime_instruments_have_no_placeholder_uid() -> None:
@@ -223,6 +233,7 @@ class PollingOrderBookGateway(RecordingStreamGateway):
     ) -> None:
         super().__init__(now=now)
         self.order_book_requests: list[InstrumentRef] = []
+        self.last_trade_requests: list[LastTradesRequest] = []
         self.position_requests: list[PositionsRequest] = []
         self.on_order_book_request = on_order_book_request
 
@@ -255,6 +266,50 @@ class PollingOrderBookGateway(RecordingStreamGateway):
                 "exchange_ts": now.astimezone(UTC).isoformat(),
                 "bids": [{"price": "100.00", "quantity_lots": "12"}],
                 "asks": [{"price": "100.10", "quantity_lots": "8"}],
+            },
+            headers={},
+        )
+
+    async def get_last_trades(
+        self,
+        request: LastTradesRequest,
+        metadata: object | None = None,
+    ) -> BrokerUnaryResponse:
+        del metadata
+        self.last_trade_requests.append(request)
+        instrument = request.instrument
+        now = self.now or msk(2026, 6, 28, 14)
+        instrument_id = instrument.instrument_uid or instrument.instrument_id
+        return BrokerUnaryResponse(
+            method_name="GetLastTrades",
+            data={
+                "instrument_id": instrument_id,
+                "trades": [
+                    {
+                        "instrument_id": instrument_id,
+                        "instrument_uid": instrument.instrument_uid,
+                        "figi": instrument.figi,
+                        "price": "100.04",
+                        "quantity_lots": "3",
+                        "side": "buy",
+                        "exchange_ts": (now - timedelta(seconds=10))
+                        .astimezone(UTC)
+                        .isoformat(),
+                        "trade_id": f"{instrument_id}:trade-1",
+                    },
+                    {
+                        "instrument_id": instrument_id,
+                        "instrument_uid": instrument.instrument_uid,
+                        "figi": instrument.figi,
+                        "price": "100.06",
+                        "quantity_lots": "1",
+                        "side": "sell",
+                        "exchange_ts": (now - timedelta(seconds=5))
+                        .astimezone(UTC)
+                        .isoformat(),
+                        "trade_id": f"{instrument_id}:trade-2",
+                    },
+                ],
             },
             headers={},
         )
@@ -608,6 +663,87 @@ def test_data_only_start_probe_fallback_polls_order_book_and_writes_microstructu
 
         assert gateway.order_book_requests
         assert gateway.position_requests == []
+        assert gateway.post_order_calls == []
+        assert gateway.cancel_order_calls == []
+        await runtime.shutdown()
+
+    asyncio.run(run())
+
+
+def test_data_only_trade_polling_fallback_persists_samples_without_trading_entities(
+    tmp_path: Path,
+) -> None:
+    gateway = PollingOrderBookGateway(now=msk(2026, 6, 28, 14, 30))
+    config = replace(
+        runtime_config(tmp_path),
+        data_only_shadow_enabled=True,
+        data_only_order_book_poll_interval_seconds=1,
+        data_only_trades_poll_seconds=1,
+        data_only_trades_lookback_seconds=60,
+        data_only_trades_max_per_instrument=1,
+    )
+    runtime = TradeCoreRuntime(
+        config=config,
+        launch_policy=LaunchModePolicy.from_mode(RuntimeMode.SHADOW),
+        database=DatabaseService(config.database_url or ""),
+        broker_gateway=cast(BrokerGateway, gateway),
+        report_job_dispatcher=noop_report_job_dispatcher(),
+    )
+
+    async def run() -> None:
+        await runtime.start()
+        with runtime.database.session_scope() as session:
+            RobotCommandRepository(session).create(
+                command_type="start",
+                requested_by="desk-operator",
+                requested_role="operator",
+                requested_at=datetime.now(tz=UTC),
+                payload={
+                    "mode": "data_shadow",
+                    "trading_disabled": True,
+                    "data_only_shadow": True,
+                    "preflight_result": {
+                        "now_msk": "2026-06-28T14:30:00+03:00",
+                        "session_type": "weekend",
+                        "session_phase": "continuous_trading",
+                        "market_open": True,
+                        "market_window_open": True,
+                        "market_closed_expected": False,
+                        "official_exchange_open": False,
+                        "official_exchange_closed": False,
+                        "venue_type": "broker_status_fallback_time_rules",
+                        "quote_source_allowed_for_data_collection": True,
+                        "data_only_collection_allowed": True,
+                        "streams_for_calibration_allowed": True,
+                        "reason_code": "market_open",
+                    },
+                },
+            )
+
+        assert await runtime.process_robot_commands_async() == 1
+        await runtime.run_cycle(now=msk(2026, 6, 28, 14, 30))
+        await runtime.run_cycle(now=msk(2026, 6, 28, 14, 30) + timedelta(seconds=2))
+
+        with runtime.database.session_factory() as session:
+            samples = list(
+                session.execute(
+                    select(MarketTradeSample).order_by(MarketTradeSample.instrument_id)
+                ).scalars()
+            )
+            assert len(samples) == 2
+            assert {sample.source for sample in samples} == {
+                "tbank_get_last_trades_polling_fallback"
+            }
+            assert all(sample.exchange_ts is not None for sample in samples)
+            assert all(sample.received_ts is not None for sample in samples)
+            assert all(sample.include_in_calibration is False for sample in samples)
+            assert session.scalar(select(func.count()).select_from(SignalCandidate)) == 0
+            assert session.scalar(select(func.count()).select_from(OrderIntent)) == 0
+            assert session.scalar(select(func.count()).select_from(BrokerOrder)) == 0
+
+        assert len(gateway.last_trade_requests) >= 2
+        assert runtime.stats.data_only_trade_samples_seen >= 2
+        assert runtime.stats.trade_collection_reason == "trade_samples_persisted"
         assert gateway.post_order_calls == []
         assert gateway.cancel_order_calls == []
         await runtime.shutdown()

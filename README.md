@@ -295,8 +295,10 @@ when the broker/source payload provides it; `received_ts` is local receive/write
 time and must never be copied into `exchange_ts`. Rows without exchange time are
 marked `freshness_basis=received_ts_only` and are partial diagnostics, not strict
 dual-freshness calibration. Real market tape samples collected by data-only are
-persisted in `market_trade_sample`; dashboard-only `GetLastTrades` display rows
-are not calibration rows.
+persisted in `market_trade_sample` from market-trade stream events or the
+bounded readonly `GetLastTrades` fallback inside an allowed collection window.
+Fallback rows default to `include_in_calibration=false`; dashboard-only
+`GetLastTrades` display rows are not calibration rows.
 
 Before using the dashboard Start button or a live data-only smoke, run session preflight.
 Closed market is reported as `market_closed_expected` with `next_session_at` and is not
