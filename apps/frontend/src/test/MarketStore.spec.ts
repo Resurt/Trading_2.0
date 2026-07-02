@@ -1,8 +1,8 @@
 import { createPinia, setActivePinia } from "pinia";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { DashboardMarketFeedSnapshot, MarketInstrumentOverview } from "../api/types";
-import { useMarketStore } from "../stores/market";
+import { SELECTED_INSTRUMENT_ACTIVE_REFRESH_MS, useMarketStore } from "../stores/market";
 
 const apiClientMock = vi.hoisted(() => ({
   dashboardMarketFeedSnapshot: vi.fn(),
@@ -165,6 +165,10 @@ describe("market store", () => {
     vi.stubGlobal("WebSocket", FakeWebSocket);
   });
 
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("starts with eight core instruments and selects SBER by default", () => {
     const market = useMarketStore();
 
@@ -298,6 +302,207 @@ describe("market store", () => {
       }),
     );
     expect(market.currentInstrument?.best_bid).toBe("144.18");
+  });
+
+  it("uses a two-second active cadence for selected instrument refreshes", () => {
+    expect(SELECTED_INSTRUMENT_ACTIVE_REFRESH_MS).toBe(2_000);
+  });
+
+  it("does not let a pending previous trade request block the newly selected instrument tape", async () => {
+    const market = useMarketStore();
+    const now = new Date().toISOString();
+    const sber = instrument({ instrument_id: "MOEX:SBER", ticker: "SBER", last_price: "301.91" });
+    const ozon = instrument({ instrument_id: "MOEX:OZON", ticker: "OZON", last_price: "3298.50" });
+    let resolveSberTrades: (snapshot: DashboardMarketFeedSnapshot) => void = () => undefined;
+    const pendingSberTrades = new Promise<DashboardMarketFeedSnapshot>((resolve) => {
+      resolveSberTrades = resolve;
+    });
+    apiClientMock.dashboardMarketFeedSnapshot.mockImplementation((query) => {
+      if (query.selected_instrument === "MOEX:SBER" && query.include_trades === true) {
+        return pendingSberTrades;
+      }
+      if (query.selected_instrument === "MOEX:OZON" && query.include_trades === true) {
+        return Promise.resolve(
+          feedSnapshot(
+            [
+              instrument({
+                ...ozon,
+                recent_market_trades: [
+                  {
+                    price: "3298.50",
+                    exchange_ts: now,
+                    quantity_lots: "2",
+                    side: "buy",
+                  },
+                ],
+                market_trades_source: "persisted_data_only_trade_tape",
+                trade_tape_source: "persisted_data_only_trade_tape",
+                trade_tape_status: "live",
+                trade_tape_reason: "fresh",
+                persisted_trade_tape_available: true,
+                dashboard_trade_tape_fallback: "persisted",
+              }),
+            ],
+            "MOEX:OZON",
+          ),
+        );
+      }
+      return Promise.resolve(feedSnapshot([query.selected_instrument === "MOEX:OZON" ? ozon : sber], query.selected_instrument));
+    });
+    market.applyOverview({ generated_at: now, instruments: [sber, ozon] });
+
+    void market.refreshSelectedInstrumentDetails();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    market.selectedInstrumentId = "MOEX:OZON";
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(apiClientMock.dashboardMarketFeedSnapshot).toHaveBeenCalledWith(
+      expect.objectContaining({
+        selected_instrument: "MOEX:OZON",
+        include_order_book: false,
+        include_trades: true,
+      }),
+    );
+    expect(market.currentInstrument?.instrument_id).toBe("MOEX:OZON");
+    expect(market.currentInstrument?.recent_market_trades).toHaveLength(1);
+    resolveSberTrades(feedSnapshot([sber], "MOEX:SBER"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(market.currentInstrument?.instrument_id).toBe("MOEX:OZON");
+  });
+
+  it("starts a new selected details request when a previous instrument details request is still pending", async () => {
+    const market = useMarketStore();
+    const now = new Date().toISOString();
+    const sber = instrument({ instrument_id: "MOEX:SBER", ticker: "SBER", last_price: "301.91" });
+    const ydex = instrument({ instrument_id: "MOEX:YDEX", ticker: "YDEX", last_price: "3493.50" });
+    let resolveSberDetails: (snapshot: DashboardMarketFeedSnapshot) => void = () => undefined;
+    const pendingSberDetails = new Promise<DashboardMarketFeedSnapshot>((resolve) => {
+      resolveSberDetails = resolve;
+    });
+    apiClientMock.dashboardMarketFeedSnapshot.mockImplementation((query) => {
+      if (query.selected_instrument === "MOEX:SBER" && query.include_order_book === true) {
+        return pendingSberDetails;
+      }
+      if (query.selected_instrument === "MOEX:YDEX" && query.include_order_book === true) {
+        return Promise.resolve(
+          feedSnapshot(
+            [
+              instrument({
+                ...ydex,
+                best_bid: "3493.00",
+                best_ask: "3493.50",
+                order_book_summary: {
+                  bids: [{ price: "3493.00", quantity_lots: "2" }],
+                  asks: [{ price: "3493.50", quantity_lots: "3" }],
+                },
+              }),
+            ],
+            "MOEX:YDEX",
+          ),
+        );
+      }
+      if (query.selected_instrument === "MOEX:YDEX" && query.include_trades === true) {
+        return Promise.resolve(
+          feedSnapshot(
+            [
+              instrument({
+                ...ydex,
+                recent_market_trades: [
+                  { price: "3493.50", exchange_ts: now, quantity_lots: "7", side: "buy" },
+                ],
+                market_trades_source: "persisted_data_only_trade_tape",
+                trade_tape_source: "persisted_data_only_trade_tape",
+                trade_tape_status: "stale",
+                trade_tape_reason: "trade_exchange_ts_too_old",
+                persisted_trade_tape_available: true,
+                dashboard_trade_tape_fallback: "persisted",
+              }),
+            ],
+            "MOEX:YDEX",
+          ),
+        );
+      }
+      return Promise.resolve(feedSnapshot([query.selected_instrument === "MOEX:YDEX" ? ydex : sber], query.selected_instrument));
+    });
+    market.applyOverview({ generated_at: now, instruments: [sber, ydex] });
+
+    void market.refreshSelectedInstrumentDetails();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    market.selectedInstrumentId = "MOEX:YDEX";
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(apiClientMock.dashboardMarketFeedSnapshot).toHaveBeenCalledWith(
+      expect.objectContaining({
+        selected_instrument: "MOEX:YDEX",
+        include_order_book: true,
+        include_trades: false,
+      }),
+    );
+    expect(apiClientMock.dashboardMarketFeedSnapshot).toHaveBeenCalledWith(
+      expect.objectContaining({
+        selected_instrument: "MOEX:YDEX",
+        include_order_book: false,
+        include_trades: true,
+      }),
+    );
+    expect(market.currentInstrument?.instrument_id).toBe("MOEX:YDEX");
+    expect(market.currentInstrument?.best_bid).toBe("3493.00");
+    expect(market.currentInstrument?.recent_market_trades).toHaveLength(1);
+
+    resolveSberDetails(feedSnapshot([{ ...sber, best_bid: "301.90", best_ask: "301.91" }], "MOEX:SBER"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(market.currentInstrument?.instrument_id).toBe("MOEX:YDEX");
+    expect(market.currentInstrument?.best_bid).toBe("3493.00");
+  });
+
+  it("applies the current instrument trade-only response after a newer details request starts", async () => {
+    const market = useMarketStore();
+    const now = new Date().toISOString();
+    const sber = instrument({ instrument_id: "MOEX:SBER", ticker: "SBER", last_price: "301.91" });
+    let resolveTrades: (snapshot: DashboardMarketFeedSnapshot) => void = () => undefined;
+    const pendingTrades = new Promise<DashboardMarketFeedSnapshot>((resolve) => {
+      resolveTrades = resolve;
+    });
+    apiClientMock.dashboardMarketFeedSnapshot.mockImplementation((query) => {
+      if (query.include_trades === true) {
+        return pendingTrades;
+      }
+      return Promise.resolve(feedSnapshot([sber], "MOEX:SBER"));
+    });
+    market.applyOverview({ generated_at: now, instruments: [sber] });
+
+    void market.refreshSelectedInstrumentDetails();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    void market.refreshSelectedInstrumentDetails();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    resolveTrades(
+      feedSnapshot(
+        [
+          instrument({
+            ...sber,
+            recent_market_trades: [
+              { price: "301.91", exchange_ts: now, quantity_lots: "4", side: "buy" },
+            ],
+            market_trades_source: "persisted_data_only_trade_tape",
+            trade_tape_source: "persisted_data_only_trade_tape",
+            trade_tape_status: "stale",
+            trade_tape_reason: "trade_exchange_ts_too_old",
+            persisted_trade_tape_available: true,
+            dashboard_trade_tape_fallback: "persisted",
+          }),
+        ],
+        "MOEX:SBER",
+      ),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(market.currentInstrument?.instrument_id).toBe("MOEX:SBER");
+    expect(market.currentInstrument?.recent_market_trades).toHaveLength(1);
+    expect(market.currentInstrument?.recent_market_trades[0]?.price).toBe("301.91");
   });
 
   it("does not revert selected instrument when an old details response arrives late", () => {
@@ -617,6 +822,49 @@ describe("market store", () => {
     expect(market.currentInstrument?.trade_tape_status).toBe("stale");
   });
 
+  it("keeps persisted delayed trade tape for the operator display window", () => {
+    const market = useMarketStore();
+    const now = new Date().toISOString();
+    const delayedTradeTs = new Date(Date.now() - 2 * 60_000).toISOString();
+    market.applyOverview({
+      generated_at: now,
+      instruments: [
+        instrument({
+          recent_market_trades: [
+            { price: "3298.00", exchange_ts: delayedTradeTs, quantity_lots: "2", side: "sell" },
+          ],
+          market_trades_source: "persisted_data_only_trade_tape",
+          trade_tape_source: "persisted_data_only_trade_tape",
+          market_trades_age_ms: 120_000,
+          trade_tape_status: "stale",
+          trade_tape_reason: "trade_exchange_ts_too_old",
+          persisted_trade_tape_available: true,
+          dashboard_trade_tape_fallback: "persisted",
+        }),
+      ],
+    });
+
+    market.applyOverview({
+      generated_at: now,
+      instruments: [
+        instrument({
+          market_trades_source: "no_market_trades_samples",
+          market_trades_age_ms: null,
+          trade_tape_status: "no_market_trades_samples",
+          trade_tape_reason: "no_market_trades_samples",
+          persisted_trade_tape_available: false,
+          dashboard_trade_tape_fallback: null,
+        }),
+      ],
+    });
+
+    expect(market.currentInstrument?.recent_market_trades).toHaveLength(1);
+    expect(market.currentInstrument?.recent_market_trades[0]?.price).toBe("3298.00");
+    expect(market.currentInstrument?.market_trades_source).toBe("persisted_data_only_trade_tape");
+    expect(market.currentInstrument?.trade_tape_status).toBe("stale");
+    expect(market.currentInstrument?.dashboard_trade_tape_fallback).toBe("persisted");
+  });
+
   it("keeps fresh trade tape when an intermittent no-samples snapshot arrives", () => {
     const market = useMarketStore();
     const now = new Date().toISOString();
@@ -650,6 +898,32 @@ describe("market store", () => {
     expect(market.currentInstrument?.recent_market_trades).toHaveLength(1);
     expect(market.currentInstrument?.market_trades_source).toBe("market_trades_stream");
     expect(market.currentInstrument?.trade_tape_status).toBe("live");
+  });
+
+  it("exposes only ten selected trade tape rows for display", () => {
+    const market = useMarketStore();
+    const now = new Date().toISOString();
+    market.applyOverview({
+      generated_at: now,
+      instruments: [
+        instrument({
+          recent_market_trades: Array.from({ length: 14 }, (_, index) => ({
+            price: `${301 + index}`,
+            exchange_ts: new Date(Date.now() - index).toISOString(),
+            quantity_lots: "1",
+            side: "buy",
+          })),
+          market_trades_source: "tbank_get_last_trades",
+          market_trades_age_ms: 500,
+          trade_tape_status: "live",
+          trade_tape_reason: "fresh",
+        }),
+      ],
+    });
+
+    expect(market.recentTrades).toHaveLength(10);
+    expect(market.recentTrades[0]?.price).toBe("301");
+    expect(market.recentTrades[9]?.price).toBe("310");
   });
 
   it("keeps a full fresh order book when a weaker top-of-book snapshot arrives", () => {

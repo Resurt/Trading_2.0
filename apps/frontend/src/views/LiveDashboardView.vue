@@ -110,6 +110,8 @@ const collectorMessages = computed(() => {
 const MIN_SELECTED_ORDER_BOOK_SIDE_LEVELS = 5;
 const MSK_OFFSET_MS = 3 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
+const MICRO_SESSION_ACTIVE_TOLERANCE_MS = 5_000;
+const MARKET_TAPE_DISPLAY_ROWS = 10;
 
 type MicroSessionWindow = {
   startMs: number;
@@ -723,10 +725,11 @@ function collectorMicroSessionWindow(): MicroSessionWindow | null {
   if (market.dataShadowStatus.collector_state !== "collecting") {
     return null;
   }
-  return (
-    microSessionWindowFromId(robot.status.micro_session_id ?? robot.session.micro_session_id) ??
-    microSessionWindowFromClock()
-  );
+  const idWindow = microSessionWindowFromId(robot.status.micro_session_id ?? robot.session.micro_session_id);
+  if (idWindow && microSessionWindowContainsNow(idWindow)) {
+    return idWindow;
+  }
+  return microSessionWindowFromClock() ?? idWindow;
 }
 
 function collectorMicroSessionStartedAtLabel(): string {
@@ -771,6 +774,13 @@ function microSessionWindowFromId(microSessionId: string | null | undefined): Mi
   const startMs = mskDateUtcMs(year, month, day, hour);
   const endMs = microSessionEndMs(startMs);
   return { startMs, endMs };
+}
+
+function microSessionWindowContainsNow(window: MicroSessionWindow): boolean {
+  return (
+    nowTick.value >= window.startMs - MICRO_SESSION_ACTIVE_TOLERANCE_MS &&
+    nowTick.value < window.endMs + MICRO_SESSION_ACTIVE_TOLERANCE_MS
+  );
 }
 
 function microSessionWindowFromClock(): MicroSessionWindow | null {
@@ -885,26 +895,8 @@ function displayQualityScore(instrument: MarketInstrumentOverview | null): strin
   return Number.isFinite(Number(score)) ? String(score) : null;
 }
 
-function selectedBidAskValue(instrument: MarketInstrumentOverview | null): string {
-  if (!hasRealOrderBook(instrument)) {
-    return "Стакан загружается";
-  }
-  return `${formatDecimal(instrument?.best_bid, 2)} / ${formatDecimal(instrument?.best_ask, 2)}`;
-}
-
-function selectedMidValue(instrument: MarketInstrumentOverview | null): string {
-  return hasRealOrderBook(instrument) ? formatDecimal(instrument?.mid_price, 2) : "Нет стакана";
-}
-
 function selectedSpreadValue(instrument: MarketInstrumentOverview | null): string {
   return hasRealOrderBook(instrument) ? formatSpread(instrument) : "Нет стакана";
-}
-
-function selectedDepthValue(instrument: MarketInstrumentOverview | null): string {
-  if (!hasRealOrderBook(instrument)) {
-    return "Нет полного ladder";
-  }
-  return `${formatLots(instrument?.bid_depth_lots)} / ${formatLots(instrument?.ask_depth_lots)}`;
 }
 
 function selectedImbalanceValue(instrument: MarketInstrumentOverview | null): string {
@@ -935,19 +927,6 @@ function displayQualityTone(instrument: MarketInstrumentOverview | null): "good"
     return "warn";
   }
   return Number(score) >= 0.7 ? "good" : "warn";
-}
-
-function calibrationQualityLabel(instrument: MarketInstrumentOverview | null): string {
-  if (!instrument) {
-    return "Нет данных";
-  }
-  if (!hasRealOrderBook(instrument)) {
-    return "display-only";
-  }
-  if (!instrument.quote_allowed_for_data_collection) {
-    return "не для калибровки";
-  }
-  return formatPercentRatio(instrument.calibration_market_quality_score);
 }
 
 function selectedInstrumentTitle(): string {
@@ -1205,13 +1184,23 @@ function degradedFlagLabel(flag: string): string {
               :detail="selectedInstrument ? `${sourceLabel(selectedInstrument.last_price_source)} / ${quoteFreshness(selectedInstrument)}` : 'Нет инструмента'"
               :tone="selectedInstrument?.quote_status === 'live' ? 'good' : 'warn'"
             />
-            <MetricTile label="Bid / Ask" :value="selectedBidAskValue(selectedInstrument)" />
-            <MetricTile label="Mid" :value="selectedMidValue(selectedInstrument)" :detail="hasRealOrderBook(selectedInstrument) ? formatBps(selectedInstrument?.spread_bps) : 'ожидаю полный стакан'" />
             <MetricTile label="Спред" :value="selectedSpreadValue(selectedInstrument)" detail="bps / ₽" tone="info" />
-            <MetricTile label="Глубина" :value="selectedDepthValue(selectedInstrument)" />
             <MetricTile label="Имбаланс" :value="selectedImbalanceValue(selectedInstrument)" />
-            <MetricTile label="Качество стакана" :value="displayQualityValue(selectedInstrument)" :detail="displayQualityDetail(selectedInstrument)" :tone="displayQualityTone(selectedInstrument)" />
-            <MetricTile label="Калибровка" :value="calibrationQualityLabel(selectedInstrument)" :detail="selectedInstrument?.quote_allowed_for_data_collection ? 'можно использовать' : 'display-only'" tone="warn" />
+            <div class="metric-tile-with-tooltip" tabindex="0" aria-describedby="quality-tile-tooltip">
+              <MetricTile
+                label="Качество стакана"
+                :value="displayQualityValue(selectedInstrument)"
+                :detail="displayQualityDetail(selectedInstrument)"
+                :tone="displayQualityTone(selectedInstrument)"
+              />
+              <div id="quality-tile-tooltip" class="metric-tooltip" role="tooltip">
+                <strong>Качество стакана</strong>
+                <span>Оценивает, насколько текущий стакан пригоден для диагностики и калибровки: свежесть, bid/ask, глубина, спред и полнота ladder.</span>
+                <span>80 % и выше: хороший стакан, можно использовать как материал для data-only калибровки.</span>
+                <span>60-79 %: пограничное качество; подходит для диагностики, но выводы лучше проверять осторожно.</span>
+                <span>Ниже 60 % или display-only: не использовать для калибровки и решений по стратегии.</span>
+              </div>
+            </div>
             <MetricTile label="Источник" :value="venueLabel(selectedInstrument?.venue_type)" :detail="selectedInstrument ? sourceLabel(selectedInstrument.quote_source) : 'Нет данных'" />
             <MetricTile label="Статус стакана" :value="orderBookStatusValue(selectedInstrument)" :detail="orderBookReason()" />
           </div>
@@ -1234,7 +1223,7 @@ function degradedFlagLabel(flag: string): string {
                   <span>объем</span>
                   <span>сторона</span>
                 </div>
-                <div v-for="(trade, index) in market.recentTrades.slice(0, 18)" :key="index" class="market-tape-row">
+                <div v-for="(trade, index) in market.recentTrades.slice(0, MARKET_TAPE_DISPLAY_ROWS)" :key="index" class="market-tape-row">
                   <span>{{ tradeTime(trade) }}</span>
                   <strong :class="tradeToneClass(trade)">{{ tradePrice(trade) }}</strong>
                   <span>{{ tradeQty(trade) }}</span>

@@ -1241,15 +1241,21 @@ New structured events/payloads:
 - `dashboard_market_feed_snapshot`: readonly display feed refresh for the Live
   Dashboard. It may include `GetLastPrices` for the quote board and `GetOrderBook` /
   last trades only for the selected instrument. Payload should include
-  `selected_instrument`, `quote_rows_count`, `order_book_available`,
-  `trade_tape_status`, `trade_tape_reason`, `last_refresh_at`, `warnings`, and
-  `errors`. It must distinguish `received_ts` from `exchange_ts` and expose
+  `selected_instrument`, `include_order_book`, `include_trades`, `quote_rows_count`,
+  `order_book_available`, `trade_tape_status`, `trade_tape_reason`,
+  `trade_tape_source`, `market_trades_source`, `persisted_trade_tape_available`,
+  `latest_persisted_trade_ts`, `dashboard_trade_tape_fallback`,
+  `last_refresh_at`, `warnings`, and `errors`. It must distinguish `received_ts`
+  from `exchange_ts` and expose
   `received_age_ms`, `exchange_age_ms`, `stale_by_exchange_time`,
   `freshness_status`, and `freshness_reason`. This event is display-only and must
   not write `market_microstructure_snapshot` calibration logs.
   `order_book_available=true` requires actual selected `bids[]` and `asks[]`
   arrays with at least five levels per side; a one-row top-of-book snapshot or
   `depth_levels` metadata alone is a partial/loading state.
+  When `include_order_book=false&include_trades=true`, the snapshot is the
+  selected trade-only fast path: it may be satisfied by recent persisted
+  data-only tape and must not fan out through the full quote-board refresh.
 - `market_instrument_details_read`: local/BFF selected-instrument read for
   `/market/instruments/{instrument_id}/details`. Payload should include
   `instrument_id`, `quote_source`, `quote_status`, `order_book_source`,
@@ -1260,10 +1266,12 @@ New structured events/payloads:
   not return `market_open=true` and `data_only_collection_allowed=true`; payload
   includes `reason_code` and `preflight_result`.
 - `data_only_shadow_collection_started`: trade-core applied Start in data-only mode and
-  started the minimal data-only market stream set after `market_open=true` and
+  started the data-only market stream set after `market_open=true` and
   `data_only_collection_allowed=true` preflight. `trading_allowed` remains false.
-  Payload includes `polling_fallback_enabled` and
-  `order_book_poll_interval_seconds`.
+  Payload includes `stream_names` (`order_book`, `last_prices`, `trading_status`,
+  `market_trades`), `polling_fallback_enabled`,
+  `order_book_poll_interval_seconds`, `trade_collection_enabled`,
+  `trade_poll_seconds`, and `trade_poll_lookback_seconds`.
 - `data_only_order_book_poll_completed`: bounded readonly polling fallback wrote or
   attempted current order-book samples while data-only collector was running. Payload
   includes `successful_instruments`, `failed_instruments`, `readonly_calls_only`,
@@ -1388,6 +1396,9 @@ If dashboard selected details fall back to persisted data-only trade samples, th
 source fields must be `persisted_data_only_trade_tape` and
 `dashboard_trade_tape_fallback=persisted`; this fallback is read-only and must
 not create `market_trade_sample` rows or trading entities.
+Operator-facing analytics should report both the raw tape status and persisted
+fallback availability so `no_market_trades_samples` from a transient live broker
+call is not confused with missing persisted data-only tape.
 
 Data-shadow runtime status exposes supervisor observability separately from
 analytics facts: `supervisor_enabled`, `supervisor_state`,

@@ -18,6 +18,7 @@ const props = defineProps<{
 }>();
 
 const MIN_LADDER_SIDE_LEVELS = 5;
+const DISPLAY_LADDER_SIDE_LEVELS = 10;
 
 const bids = computed(() => levelsFromSummary("bids", "bid"));
 const asks = computed(() => levelsFromSummary("asks", "ask"));
@@ -66,7 +67,7 @@ function levelsFromSummary(
   if (parsed.length > 0) {
     return parsed.sort((left, right) =>
       side === "bid" ? right.price - left.price : left.price - right.price,
-    );
+    ).slice(0, DISPLAY_LADDER_SIDE_LEVELS);
   }
   return [];
 }

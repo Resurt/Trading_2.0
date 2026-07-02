@@ -146,6 +146,10 @@ This document started as the bootstrap schema description. The current schema ma
 - `market_special_day` for dividend gap and special-day classification.
 - `dividend_sync_run` for T-Bank dividend sync status and readiness.
 - `market_microstructure_snapshot` for data-only shadow spread/depth/imbalance/freshness facts.
+- `market_trade_sample` for persisted data-only trade tape samples. Rows come only
+  from real broker `market_trades` stream events or bounded readonly
+  `GetLastTrades` polling inside an allowed collection window; dashboard display
+  fallback must not write this table.
 - `historical_data_quality_report` for coverage and OHLC quality.
 - `calibration_report` for calibration evidence and recommendations.
 - `intraday_session_analytics` for current-day session/hour/instrument analytics.

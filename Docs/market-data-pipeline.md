@@ -3,12 +3,20 @@
 ## Broker Display Refresh
 
 The BFF separates fast quote refresh from selected-instrument detail refresh.
-Universe refresh uses readonly last prices and must stay fast. Order book and
+Universe refresh is read-model first and must stay fast. Full order-book and
 recent trade tape refresh are limited to the selected instrument to avoid
 overloading the broker SDK/threadpool and to keep `/market/overview` responsive.
+Selected details are split: `include_order_book=true&include_trades=false`
+loads the selected ladder from persisted read-model rows before considering a
+readonly broker fallback, while `include_order_book=false&include_trades=true`
+may update the tape without waiting for the order-book refresh.
 
 Broker OTC/indicative quote and trade rows are tagged as display-only and are
 excluded from calibration by default.
+If live `GetLastTrades` is transiently empty or stale, the dashboard may display
+recent persisted data-only rows from `market_trade_sample` with
+`trade_tape_source=persisted_data_only_trade_tape`. That fallback is readonly UI
+data and never writes DB rows.
 
 Этот документ фиксирует реализацию шага 06. Он дополняет `Docs/architecture.md`,
 `Docs/broker-gateway.md`, `Docs/session-manager.md` и `Docs/logging-analytics-spec.md`.
@@ -50,6 +58,7 @@ MarketEventBus
                market_candle
                market_status_snapshot
                order_book_summary
+               market_trade_sample
 ```
 
 ## Historical Candle Backfill
@@ -187,6 +196,8 @@ backfill не должен плодить факты для аналитики.
 - `market_candle` - закрытые свечи и бары с UTC/exchange timestamps;
 - `market_status_snapshot` - нормализованный status/info snapshot;
 - `order_book_summary` - lightweight book summary.
+- `market_trade_sample` - persisted data-only trade tape samples from
+  `market_trades` stream events or bounded readonly `GetLastTrades` polling.
 
 Полный стакан на каждый тик не хранится в PostgreSQL. В БД попадают агрегаты:
 best bid/ask, depth, spread, imbalance, quality score и payload для расширенного
@@ -236,7 +247,10 @@ When `TRADING_DATA_ONLY_SHADOW=true`, `trade-core` still runs session management
 `MarketEventBus`, `BarEngine` and market persistence, but closed bars do not enter strategy
 evaluation. `LiveMarketDataCollector` subscribes to market events and writes
 `market_microstructure_snapshot` with top-of-book, spread, depth, imbalance, freshness and market
-quality.
+quality. Market trade events are persisted as real broker samples in
+`market_trade_sample`; if stream samples are absent and the collection window is
+open, bounded readonly `GetLastTrades` polling may persist real rows. Empty trade
+responses produce status/reason only and never fake rows.
 
 This mode is for data collection only:
 

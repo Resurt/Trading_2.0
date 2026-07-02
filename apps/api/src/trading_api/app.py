@@ -411,7 +411,14 @@ def create_fastapi_app(
         include_trades: Annotated[bool, Query()] = True,
     ) -> dict[str, object]:
         require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
-        preflight = await _dashboard_preflight_or_none(request)
+        preflight = (
+            await _dashboard_preflight_or_none(request)
+            if _dashboard_feed_requires_preflight(
+                include_order_book=include_order_book,
+                include_trades=include_trades,
+            )
+            else None
+        )
         return await _dashboard_market_feed_snapshot(
             request,
             service=service,
@@ -433,7 +440,14 @@ def create_fastapi_app(
         include_trades: Annotated[bool, Query()] = True,
     ) -> dict[str, object]:
         require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
-        preflight = await _dashboard_preflight_or_none(request)
+        preflight = (
+            await _dashboard_preflight_or_none(request)
+            if _dashboard_feed_requires_preflight(
+                include_order_book=include_order_book,
+                include_trades=include_trades,
+            )
+            else None
+        )
         return await _dashboard_market_feed_snapshot(
             request,
             service=service,
@@ -2725,14 +2739,25 @@ async def _dashboard_market_feed_snapshot(
     preflight: SessionPreflightResponse | None = None,
 ) -> dict[str, object]:
     del service
-    base_overview, refs = await asyncio.to_thread(
-        _dashboard_market_feed_base_and_refs,
-        cast(FastAPI, request.app),
-        instruments=instruments,
-        selected_instrument=selected_instrument,
-        full_selected_details=full_selected_details,
-        preflight=preflight,
-    )
+    if (
+        ((include_trades and not include_order_book) or (include_order_book and not include_trades))
+        and full_selected_details
+    ):
+        base_overview, refs = await asyncio.to_thread(
+            _dashboard_market_feed_selected_base_and_refs,
+            cast(FastAPI, request.app),
+            selected_instrument=selected_instrument,
+            preflight=preflight,
+        )
+    else:
+        base_overview, refs = await asyncio.to_thread(
+            _dashboard_market_feed_base_and_refs,
+            cast(FastAPI, request.app),
+            instruments=instruments,
+            selected_instrument=selected_instrument,
+            full_selected_details=full_selected_details,
+            preflight=preflight,
+        )
     feed = _dashboard_market_feed(request.app)
     timeout_seconds = float(os.environ.get("DASHBOARD_MARKET_FEED_SNAPSHOT_TIMEOUT_SECONDS", "6"))
     try:
@@ -2767,15 +2792,33 @@ async def _dashboard_market_feed_snapshot_from_app(
     full_selected_details: bool = True,
 ) -> dict[str, object]:
     database = _database_service_from_app(app)
-    preflight = await _dashboard_preflight_or_none_from_app(app, database)
-    base_overview, refs = await asyncio.to_thread(
-        _dashboard_market_feed_base_and_refs,
-        app,
-        instruments=instruments,
-        selected_instrument=selected_instrument,
-        full_selected_details=full_selected_details,
-        preflight=preflight,
+    preflight = (
+        await _dashboard_preflight_or_none_from_app(app, database)
+        if _dashboard_feed_requires_preflight(
+            include_order_book=include_order_book,
+            include_trades=include_trades,
+        )
+        else None
     )
+    if (
+        ((include_trades and not include_order_book) or (include_order_book and not include_trades))
+        and full_selected_details
+    ):
+        base_overview, refs = await asyncio.to_thread(
+            _dashboard_market_feed_selected_base_and_refs,
+            app,
+            selected_instrument=selected_instrument,
+            preflight=preflight,
+        )
+    else:
+        base_overview, refs = await asyncio.to_thread(
+            _dashboard_market_feed_base_and_refs,
+            app,
+            instruments=instruments,
+            selected_instrument=selected_instrument,
+            full_selected_details=full_selected_details,
+            preflight=preflight,
+        )
     feed = _dashboard_market_feed(app)
     timeout_seconds = float(os.environ.get("DASHBOARD_MARKET_FEED_SNAPSHOT_TIMEOUT_SECONDS", "6"))
     try:
@@ -2797,6 +2840,14 @@ async def _dashboard_market_feed_snapshot_from_app(
             base_overview=base_overview,
             selected_instrument=selected_instrument,
         )
+
+
+def _dashboard_feed_requires_preflight(
+    *,
+    include_order_book: bool,
+    include_trades: bool,
+) -> bool:
+    return include_order_book and include_trades
 
 
 def _dashboard_market_feed_timeout_snapshot(
@@ -2858,6 +2909,32 @@ def _dashboard_market_feed_timeout_snapshot(
             "warnings": warnings[:8],
         },
     }
+
+
+def _dashboard_market_feed_selected_base_and_refs(
+    app: FastAPI,
+    *,
+    selected_instrument: str | None,
+    preflight: SessionPreflightResponse | None,
+) -> tuple[MarketOverviewResponse, list[Any]]:
+    """Build a low-latency selected-instrument read model for selected-detail clicks."""
+
+    database = _database_service_from_app(app)
+    selected_id = _canonical_ws_instrument(selected_instrument or "MOEX:SBER")
+    with database.session_scope() as session:
+        service = BffReadService(session)
+        selected_details = service.market_instrument_details(
+            selected_id,
+            preflight=preflight,
+        )
+    refs = _instrument_refs_for_preflight(database, selected_id)
+    return (
+        MarketOverviewResponse(
+            generated_at=datetime.now(tz=UTC),
+            instruments=[selected_details],
+        ),
+        refs,
+    )
 
 
 def _dashboard_market_feed_base_and_refs(

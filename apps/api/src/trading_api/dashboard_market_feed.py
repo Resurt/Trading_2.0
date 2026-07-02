@@ -19,6 +19,8 @@ from trading_api.schemas import MarketInstrumentOverview, MarketOverviewResponse
 GatewayFactory = Callable[[], Any]
 _READONLY_BROKER_EXECUTOR: ThreadPoolExecutor | None = None
 PERSISTED_TRADE_TAPE_SOURCE = "persisted_data_only_trade_tape"
+DASHBOARD_ORDER_BOOK_DISPLAY_LEVELS = 10
+DASHBOARD_TRADE_TAPE_DISPLAY_ROWS = 10
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,6 +195,44 @@ class DashboardMarketFeedService:
         self._selected_instrument = selected_id
         overview = _limit_overview(base_overview, self.config.max_instruments)
 
+        if include_trades and not include_order_book:
+            trade_only_overview = _merge_overviews(overview, self._overview)
+            selected = next(
+                (
+                    row
+                    for row in trade_only_overview.instruments
+                    if row.instrument_id == selected_id
+                ),
+                None,
+            )
+            if selected is not None and _selected_trade_tape_fast_path_ready(selected):
+                self._selected_details[selected_id] = selected
+                return self._snapshot_payload(trade_only_overview, selected_id)
+
+        if include_order_book and not include_trades and not force:
+            base_selected = next(
+                (row for row in overview.instruments if row.instrument_id == selected_id),
+                None,
+            )
+            selected_book_overview = _merge_overviews(overview, self._overview)
+            cached_selected = next(
+                (
+                    row
+                    for row in selected_book_overview.instruments
+                    if row.instrument_id == selected_id
+                ),
+                None,
+            )
+            selected = (
+                base_selected
+                if base_selected is not None and _selected_order_book_available(base_selected)
+                else cached_selected
+            )
+            if selected is not None and _selected_order_book_available(selected):
+                selected_book_overview = _replace_instrument(selected_book_overview, selected)
+                self._selected_details[selected_id] = selected
+                return self._snapshot_payload(selected_book_overview, selected_id)
+
         if self._refresh_lock.locked() and _selected_snapshot_cache_satisfies_request(
             self._selected_details.get(selected_id),
             include_order_book=include_order_book,
@@ -228,13 +268,19 @@ class DashboardMarketFeedService:
             overview = _merge_overviews(overview, self._overview)
             return self._snapshot_payload(overview, selected_id)
         if self.config.enabled:
-            overview = await self._refresh_quotes_if_needed(
-                overview=overview,
-                refs=refs,
-                gateway_factory=gateway_factory,
-                force=force,
-                exclude_order_book_instruments={selected_id} if include_order_book else set(),
-            )
+            read_model_first_refresh = (
+                include_trades and not include_order_book
+            ) or (include_order_book and not include_trades)
+            if read_model_first_refresh or not (include_order_book or include_trades):
+                overview = _merge_overviews(overview, self._overview)
+            else:
+                overview = await self._refresh_quotes_if_needed(
+                    overview=overview,
+                    refs=refs,
+                    gateway_factory=gateway_factory,
+                    force=force,
+                    exclude_order_book_instruments={selected_id} if include_order_book else set(),
+                )
             if include_order_book or include_trades:
                 selected = await self._refresh_selected_if_needed(
                     overview=overview,
@@ -269,6 +315,8 @@ class DashboardMarketFeedService:
             else cached_selected
         )
         selected_details = _with_explicit_trade_tape_status(selected_details)
+        if selected_details is not None:
+            self._selected_details[selected_id] = selected_details
         session_row = selected_details or (
             overview.instruments[0] if overview.instruments else None
         )
@@ -529,6 +577,14 @@ class DashboardMarketFeedService:
                 or cached_age_ms >= refresh_before_ms
             ):
                 should_refresh_book = True
+        if (
+            include_order_book
+            and not include_trades
+            and should_refresh_book
+            and _selected_order_book_available(current)
+        ):
+            should_refresh_book = False
+            self._last_details_refresh_at[selected_instrument] = now
         if not should_refresh_book and not should_refresh_trades:
             return current
 
@@ -560,6 +616,14 @@ class DashboardMarketFeedService:
         )
         current = current.model_copy(update=trade_update)
         recent_trades = cast(list[dict[str, object]], trade_update["recent_market_trades"])
+        if (
+            include_trades
+            and not include_order_book
+            and persisted_trade_update is not None
+            and _trade_update_display_ready(persisted_trade_update)
+        ):
+            should_refresh_trades = False
+            self._last_trades_refresh_at[selected_instrument] = now
         if should_refresh_trades and not _has_stream_trade_rows(current):
             fetched_trades = await self._get_last_trades(
                 gateway=gateway,
@@ -792,7 +856,7 @@ class DashboardMarketFeedService:
         raw_trades = response.data.get("trades")
         if not isinstance(raw_trades, list):
             return []
-        limit = max(1, _env_int("DASHBOARD_TRADES_LIMIT", 20))
+        limit = DASHBOARD_TRADE_TAPE_DISPLAY_ROWS
         venue_type = "official_exchange" if instrument.official_exchange_open else "broker_otc"
         source = "tbank_get_last_trades"
         normalized: list[dict[str, object]] = []
@@ -1156,11 +1220,11 @@ def _order_book_overview_payload(
             "depth_levels": len(bids) + len(asks),
             "bids": [
                 {"price": str(price), "quantity_lots": str(quantity)}
-                for price, quantity in bids[:20]
+                for price, quantity in bids[:DASHBOARD_ORDER_BOOK_DISPLAY_LEVELS]
             ],
             "asks": [
                 {"price": str(price), "quantity_lots": str(quantity)}
-                for price, quantity in asks[:20]
+                for price, quantity in asks[:DASHBOARD_ORDER_BOOK_DISPLAY_LEVELS]
             ],
             "best_bid_qty_lots": str(best_bid_qty),
             "best_ask_qty_lots": str(best_ask_qty),
@@ -1265,7 +1329,7 @@ def _prefer_live_row(
     if cached_priority == base_priority and _row_data_timestamp(base) > _row_data_timestamp(cached):
         return base
     if cached_priority >= base_priority:
-        return base.model_copy(
+        preferred = base.model_copy(
             update=cached.model_dump(
                 exclude={
                     "instrument_id",
@@ -1279,6 +1343,7 @@ def _prefer_live_row(
                 }
             )
         )
+        return _preserve_visible_trade_tape(preferred, base)
     return base
 
 
@@ -1353,7 +1418,7 @@ def _selected_snapshot_cache_satisfies_request(
         return False
     if include_order_book and not _selected_order_book_available(selected):
         return False
-    return not (include_trades and not _selected_trade_tape_state_available(selected))
+    return not (include_trades and not _selected_trade_tape_fast_path_ready(selected))
 
 
 def _selected_trade_tape_state_available(row: MarketInstrumentOverview) -> bool:
@@ -1362,16 +1427,49 @@ def _selected_trade_tape_state_available(row: MarketInstrumentOverview) -> bool:
     return bool(row.trade_tape_status and row.trade_tape_reason)
 
 
+def _selected_trade_tape_display_ready(row: MarketInstrumentOverview) -> bool:
+    if not row.recent_market_trades:
+        return False
+    source = (
+        row.market_trades_source
+        or row.trade_tape_source
+        or _market_trades_source(row.recent_market_trades)
+    )
+    update = _visible_trade_tape_update(row.recent_market_trades, source=source)
+    return _trade_update_display_ready(update)
+
+
+def _selected_trade_tape_fast_path_ready(row: MarketInstrumentOverview) -> bool:
+    source = (
+        row.market_trades_source
+        or row.trade_tape_source
+        or _market_trades_source(row.recent_market_trades)
+    )
+    if not (source == PERSISTED_TRADE_TAPE_SOURCE or source.startswith("tbank_get_last_trades")):
+        return False
+    return _selected_trade_tape_display_ready(row)
+
+
 def _with_explicit_trade_tape_status(
     row: MarketInstrumentOverview | None,
 ) -> MarketInstrumentOverview | None:
     if row is None:
         return None
+    if row.recent_market_trades:
+        source = row.market_trades_source or row.trade_tape_source or _market_trades_source(
+            row.recent_market_trades
+        )
+        return row.model_copy(
+            update=_visible_trade_tape_update(row.recent_market_trades, source=source)
+        )
     if row.trade_tape_status and row.trade_tape_reason:
         return row
-    trades = row.recent_market_trades or []
-    source = row.market_trades_source or _market_trades_source(trades)
-    return row.model_copy(update=_visible_trade_tape_update(trades, source=source))
+    return row.model_copy(
+        update=_visible_trade_tape_update(
+            [],
+            source=row.market_trades_source or "no_market_trades_samples",
+        )
+    )
 
 
 def _preserve_fresh_selected_ladder(
@@ -1680,7 +1778,11 @@ def _visible_trade_tape_update(
     stale_source: str | None = None,
     dashboard_trade_tape_fallback: str | None = None,
 ) -> dict[str, object]:
-    normalized = [dict(item) for item in trades or [] if isinstance(item, dict)]
+    normalized = [
+        dict(item)
+        for item in list(trades or [])[:DASHBOARD_TRADE_TAPE_DISPLAY_ROWS]
+        if isinstance(item, dict)
+    ]
     age_ms = _market_trades_age_ms(normalized)
     status = _trade_tape_status(normalized, age_ms)
     reason = _trade_tape_reason(normalized, age_ms)
@@ -1688,7 +1790,7 @@ def _visible_trade_tape_update(
     latest_persisted_trade_ts = _latest_trade_ts(normalized) if persisted_available else None
     fallback = (
         dashboard_trade_tape_fallback
-        or ("persisted" if persisted_available and status == "live" else None)
+        or ("persisted" if persisted_available and normalized else None)
     )
     read_model_source = source == "order_book_summary_payload" or source.startswith(
         "market_trades_stream"
@@ -1750,6 +1852,11 @@ def _is_live_trade_update(update: dict[str, object]) -> bool:
     )
 
 
+def _trade_update_display_ready(update: dict[str, object]) -> bool:
+    trades = update.get("recent_market_trades")
+    return isinstance(trades, list) and bool(trades)
+
+
 def _is_persisted_trade_update(update: dict[str, object]) -> bool:
     return update.get("market_trades_source") == PERSISTED_TRADE_TAPE_SOURCE
 
@@ -1768,18 +1875,15 @@ def _persisted_trade_state_from_current(
     current: MarketInstrumentOverview,
 ) -> dict[str, object]:
     trades = current.recent_market_trades or []
+    update = _visible_trade_tape_update(trades, source=PERSISTED_TRADE_TAPE_SOURCE)
     return {
-        "recent_market_trades": trades,
-        "market_trades_source": PERSISTED_TRADE_TAPE_SOURCE,
-        "market_trades_age_ms": _market_trades_age_ms(trades)
-        if trades
-        else current.market_trades_age_ms,
-        "trade_tape_source": PERSISTED_TRADE_TAPE_SOURCE,
-        "trade_tape_status": current.trade_tape_status or "stale",
-        "trade_tape_reason": current.trade_tape_reason or "trade_exchange_ts_too_old",
+        **update,
         "persisted_trade_tape_available": True,
-        "latest_persisted_trade_ts": current.latest_persisted_trade_ts,
-        "dashboard_trade_tape_fallback": current.dashboard_trade_tape_fallback,
+        "latest_persisted_trade_ts": update.get("latest_persisted_trade_ts")
+        or current.latest_persisted_trade_ts,
+        "dashboard_trade_tape_fallback": (
+            "persisted" if trades else current.dashboard_trade_tape_fallback
+        ),
     }
 
 
@@ -1791,7 +1895,10 @@ def _can_display_delayed_trade_rows(
 ) -> bool:
     if not trades or age_ms is None:
         return False
-    if not source.startswith("tbank_get_last_trades"):
+    if not (
+        source.startswith("tbank_get_last_trades")
+        or source == PERSISTED_TRADE_TAPE_SOURCE
+    ):
         return False
     live_age_ms = int(_env_float("DASHBOARD_TRADES_MAX_EXCHANGE_AGE_SECONDS", 15.0) * 1000)
     delayed_age_ms = int(_env_float("DASHBOARD_TRADES_DELAYED_DISPLAY_SECONDS", 300.0) * 1000)

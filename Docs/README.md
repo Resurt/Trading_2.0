@@ -1,6 +1,6 @@
 # Documentation Index
 
-Status: current, updated 2026-06-30.
+Status: current, updated 2026-07-02.
 
 This directory contains current source-of-truth docs, runbooks, ADRs, research notes
 and archived historical material.
@@ -37,6 +37,14 @@ For current operator behavior:
 - Dashboard market display works without Start through `/ws/market-feed` (`/ws/market`
   remains a compatibility alias).
 - Start controls only persistent daily data-only logging.
+- Data-only logging uses `order_book`, `last_prices`, `trading_status`, and
+  `market_trades`; persisted trade tape lives in `market_trade_sample`.
+- Selected dashboard trade tape has a selected-only fast path and may display
+  recent persisted data-only tape as `persisted_data_only_trade_tape` when live
+  broker `GetLastTrades` is transiently empty/stale.
+- The selected Instrument summary grid intentionally contains last price, spread,
+  imbalance, order-book quality, source, and order-book status only; the order-book
+  quality tooltip explains depth/calibration readiness.
 - One accepted data-only Start is a daily intent that rolls morning -> main -> evening.
 - Manual Stop cancels auto-resume.
 - Known-invalid primary market-data rows are purged with manifest/audit metadata, not

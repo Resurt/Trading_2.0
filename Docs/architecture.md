@@ -247,6 +247,13 @@ PostgreSQL хранит доменные сущности:
 - `market_candle`
 - `market_status_snapshot`
 - `order_book_summary`
+- `market_microstructure_snapshot`
+- `market_trade_sample`
+- `intraday_session_analytics`
+- `historical_data_quality_report`
+- `calibration_report`
+- `rolling_performance_cube`
+- `calibration_diagnostic_run`
 - `strategy_state_event`
 - `hourly_report`
 - `daily_report`

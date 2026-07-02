@@ -17,6 +17,8 @@ Acceptance-контур не меняет торговую логику и не 
 
 | Scenario | Что проверяет |
 | --- | --- |
+| `data_only_microstructure_tape` | `market_microstructure_snapshot` and `market_trade_sample` grow only after allowed data-only Start; `exchange_ts` is never fabricated and no trading entities are created. |
+| `dashboard_selected_trade_tape` | Selected dashboard tape distinguishes live broker rows from `persisted_data_only_trade_tape` fallback and never writes DB rows from display refresh. |
 | `blocked_candidate` | `signal_candidate -> candidate_stage_result -> blocker_event`, финальный blocker содержит `measured_value` и `threshold_value`. |
 | `broker_reject` | `order_intent -> broker_order -> order_state_event` с broker reject reason и correlation IDs. |
 | `canceled_limit_order` | Отменённая лимитная заявка имеет `cancel_reason_code` и получает `counterfactual_result`. |
@@ -39,6 +41,18 @@ Acceptance-контур не меняет торговую логику и не 
 | `stream_reconnect_gap_recovery` | Разрыв market stream сопровождается событием recovery после gap fill. |
 | `weekend_session_scenario` | Weekend-сценарий присутствует и отделён от weekday trading day. |
 | `no_raw_secrets_in_logs` | Audit payloads не содержат raw token/password/secret/Bearer values; redacted credential fields допустимы. |
+
+Additional data-only acceptance checks:
+
+- `data_only_no_trading_entities`: data-only collection may create market-data facts only;
+  `signal_candidate`, `order_intent`, `broker_order`, `order_state_event`,
+  `PostOrder`, and `CancelOrder` stay at zero.
+- `trade_tape_source_truthful`: empty broker `GetLastTrades` is represented by
+  status/reason; persisted fallback rows are labeled
+  `persisted_data_only_trade_tape` and are not reported as live broker tape.
+- `exchange_ts_not_fabricated`: `exchange_ts` is populated only from broker/source
+  exchange timestamps; missing exchange time uses `freshness_basis=received_ts_only`
+  and strict dual freshness is false.
 
 ## Local Commands
 

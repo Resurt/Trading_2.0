@@ -235,6 +235,69 @@ describe("LiveDashboardView", () => {
     expect(wrapper.text()).not.toContain("01.07, 23:40:40");
   });
 
+  it("falls back to the current hourly window when robot micro-session id is stale", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-02T11:05:30Z"));
+    const wrapper = mountWithStores();
+    const robot = useRobotStore();
+    const market = useMarketStore();
+    robot.status = {
+      ...robot.status,
+      micro_session_id: "2026-07-02:weekday_main:20260702T1200",
+      collector_started_at: "2026-07-02T09:41:06.143200Z",
+    };
+    robot.session = {
+      ...robot.session,
+      micro_session_id: "2026-07-02:weekday_main:20260702T1200",
+    };
+    robot.lastSessionPreflight = {
+      market_open: true,
+      market_closed_expected: false,
+      now_msk: "2026-07-02T14:05:30+03:00",
+      trading_date: "2026-07-02",
+      calendar_date: "2026-07-02",
+      session_type: "weekday_main",
+      session_phase: "continuous_trading",
+      broker_trading_status: "normal_trading",
+      api_trade_available: true,
+      official_exchange_open: true,
+      official_exchange_closed: false,
+      official_exchange_reason_code: null,
+      official_exchange_source: "local_moex_calendar_rules",
+      broker_stream_available: true,
+      broker_otc_or_indicative_available: false,
+      api_trade_available_raw: true,
+      api_trade_available_for_exchange: true,
+      quote_source_allowed_for_data_collection: true,
+      data_only_collection_allowed: true,
+      streams_for_display_allowed: true,
+      streams_for_calibration_allowed: true,
+      venue_type: "official_exchange",
+      trading_mode: "standard_exchange",
+      broker_availability_ignored_because_official_exchange_closed: false,
+      next_session_at: "2026-07-02T19:00:00+03:00",
+      next_session_type: "weekday_evening",
+      current_window_start_at: "2026-07-02T10:00:00+03:00",
+      current_window_end_at: "2026-07-02T19:00:00+03:00",
+      reason_code: "market_open",
+      source: "test",
+      instruments_checked: ["MOEX:SBER"],
+      per_instrument_status: {},
+      warnings: [],
+    };
+    market.dataShadowStatus = {
+      ...market.dataShadowStatus,
+      collector_state: "collecting",
+    };
+    await nextTick();
+
+    const collectorPanel = wrapper.find(".collector-panel").text();
+    expect(collectorPanel).toContain("02.07, 14:00:00");
+    expect(collectorPanel).not.toContain("02.07, 12:00:00");
+    expect(collectorPanel).toMatch(/00.*05.*30/);
+    expect(collectorPanel).not.toMatch(/01.*00.*00/);
+  });
+
   it("does not duplicate open-market text in the session ribbon", () => {
     const wrapper = mountWithStores();
     const sessionRibbon = wrapper.find('[data-testid="session-ribbon"]').text();
@@ -459,7 +522,7 @@ describe("LiveDashboardView", () => {
     await nextTick();
 
     expect(wrapper.text()).toContain("Стакан пока не получен");
-    expect(wrapper.text()).toContain("Стакан загружается");
+    expect(wrapper.text()).toContain("Полный стакан ещё загружается");
     expect(wrapper.find(".quote-card").text()).toContain("качество стакана");
     expect(wrapper.find(".quote-card").text()).toContain("92");
     expect(wrapper.find(".quote-card").text()).not.toContain("качество стакана нет");

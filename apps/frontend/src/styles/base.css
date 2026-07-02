@@ -513,6 +513,53 @@ code {
   border-color: rgba(98, 168, 216, 0.42);
 }
 
+.metric-tile-with-tooltip {
+  position: relative;
+  min-width: 0;
+  outline: none;
+}
+
+.metric-tile-with-tooltip:focus-visible .metric-tile {
+  border-color: rgba(98, 168, 216, 0.72);
+  box-shadow: 0 0 0 2px rgba(98, 168, 216, 0.22);
+}
+
+.metric-tooltip {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 10px);
+  z-index: 30;
+  display: grid;
+  width: min(340px, calc(100vw - 32px));
+  gap: 6px;
+  padding: var(--space-3);
+  border: 1px solid rgba(98, 168, 216, 0.38);
+  border-radius: var(--radius-control);
+  background: rgba(13, 20, 28, 0.98);
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(4px);
+  transition:
+    opacity 0.12s ease,
+    transform 0.12s ease;
+  box-shadow: 0 14px 32px rgba(0, 0, 0, 0.32);
+}
+
+.metric-tooltip strong {
+  color: var(--color-text-primary);
+  font-size: 13px;
+}
+
+.metric-tile-with-tooltip:hover .metric-tooltip,
+.metric-tile-with-tooltip:focus-visible .metric-tooltip,
+.metric-tile-with-tooltip:focus-within .metric-tooltip {
+  opacity: 1;
+  transform: translateY(0);
+}
+
 .dashboard-layout {
   display: grid;
   grid-template-columns: minmax(0, 1.55fr) minmax(320px, 0.75fr);

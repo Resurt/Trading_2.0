@@ -29,8 +29,10 @@ const TRANSIENT_DASHBOARD_FEED_ERRORS = new Set([
   "request_timeout",
   "dashboard_market_feed_timeout",
 ]);
+export const SELECTED_INSTRUMENT_ACTIVE_REFRESH_MS = 2_000;
 const LIVE_TRADE_TAPE_MAX_AGE_MS = 15 * 1000;
 const DELAYED_TRADE_TAPE_DISPLAY_MAX_AGE_MS = 5 * 60 * 1000;
+const SELECTED_TRADE_TAPE_DISPLAY_ROWS = 10;
 const SELECTED_ORDER_BOOK_MIN_SIDE_LEVELS = 5;
 const SELECTED_ORDER_BOOK_RETRY_LIMIT = 30;
 const SELECTED_ORDER_BOOK_RETRY_MS = 1000;
@@ -134,7 +136,8 @@ export const useMarketStore = defineStore("market", () => {
   let dashboardFeedInFlight = false;
   let quoteRefreshInFlight = false;
   let selectedDetailsInFlight = false;
-  let selectedTradesInFlight = false;
+  let selectedDetailsInFlightFor: string | null = null;
+  let selectedTradesInFlightFor: string | null = null;
   let dataShadowStatusInFlight = false;
   let selectedDetailsRequestId = 0;
   let selectedOrderBookRetryCount = 0;
@@ -176,7 +179,9 @@ export const useMarketStore = defineStore("market", () => {
     })),
   );
 
-  const recentTrades = computed<JsonPayload[]>(() => currentInstrument.value?.recent_market_trades ?? []);
+  const recentTrades = computed<JsonPayload[]>(() =>
+    (currentInstrument.value?.recent_market_trades ?? []).slice(0, SELECTED_TRADE_TAPE_DISPLAY_ROWS),
+  );
 
   const quoteRows = computed(() => sortInstrumentRows(overview.value.instruments));
 
@@ -270,8 +275,8 @@ export const useMarketStore = defineStore("market", () => {
   }
 
   async function refreshSelectedInstrumentDetails(): Promise<void> {
-    if (selectedDetailsInFlight) {
-      const pendingInstrumentId = selectedInstrumentId.value ?? currentInstrument.value?.instrument_id;
+    const pendingInstrumentId = selectedInstrumentId.value ?? currentInstrument.value?.instrument_id;
+    if (selectedDetailsInFlight && pendingInstrumentId === selectedDetailsInFlightFor) {
       if (pendingInstrumentId && shouldRetrySelectedOrderBook(currentInstrument.value)) {
         scheduleSelectedOrderBookRetry(pendingInstrumentId);
       }
@@ -284,14 +289,17 @@ export const useMarketStore = defineStore("market", () => {
     }
     const requestId = ++selectedDetailsRequestId;
     selectedDetailsInFlight = true;
+    selectedDetailsInFlightFor = instrumentId;
     selectedDetailsLoading.value = true;
     lastSelectedDetailsFetchAt = Date.now();
     try {
-      const snapshot = await apiClient.dashboardMarketFeedSnapshot({
+      const detailsSnapshotPromise = apiClient.dashboardMarketFeedSnapshot({
         selected_instrument: instrumentId,
         include_order_book: true,
         include_trades: false,
       });
+      void refreshSelectedInstrumentTrades(instrumentId, requestId);
+      const snapshot = await detailsSnapshotPromise;
       if (requestId === selectedDetailsRequestId && selectedInstrumentId.value === instrumentId) {
         clearWarning("selected_instrument_details_unavailable");
         applyDashboardFeedSnapshot(snapshot, instrumentId);
@@ -302,7 +310,6 @@ export const useMarketStore = defineStore("market", () => {
           selectedOrderBookRetryCount = 0;
           clearSelectedOrderBookRetry();
         }
-        void refreshSelectedInstrumentTrades(instrumentId, requestId);
       } else if (snapshot.selected_details) {
         applyOverview({ generated_at: snapshot.generated_at, instruments: [snapshot.selected_details] });
       }
@@ -320,31 +327,38 @@ export const useMarketStore = defineStore("market", () => {
       if (requestId === selectedDetailsRequestId) {
         selectedDetailsLoading.value = false;
         selectedDetailsInFlight = false;
+        selectedDetailsInFlightFor = null;
+        const latestInstrumentId = selectedInstrumentId.value ?? currentInstrument.value?.instrument_id;
+        if (latestInstrumentId && latestInstrumentId !== instrumentId) {
+          void refreshSelectedInstrumentDetails();
+        }
       }
     }
   }
 
   async function refreshSelectedInstrumentTrades(
     instrumentId: string,
-    requestId: number,
+    _requestId: number,
   ): Promise<void> {
-    if (selectedTradesInFlight || selectedInstrumentId.value !== instrumentId) {
+    if (selectedInstrumentId.value !== instrumentId || selectedTradesInFlightFor === instrumentId) {
       return;
     }
-    selectedTradesInFlight = true;
+    selectedTradesInFlightFor = instrumentId;
     try {
       const snapshot = await apiClient.dashboardMarketFeedSnapshot({
         selected_instrument: instrumentId,
         include_order_book: false,
         include_trades: true,
       });
-      if (requestId === selectedDetailsRequestId && selectedInstrumentId.value === instrumentId) {
+      if (selectedInstrumentId.value === instrumentId) {
         applyDashboardFeedSnapshot(snapshot, instrumentId);
       }
     } catch {
       recordWarning("selected_market_trades_unavailable");
     } finally {
-      selectedTradesInFlight = false;
+      if (selectedTradesInFlightFor === instrumentId) {
+        selectedTradesInFlightFor = null;
+      }
     }
   }
 
@@ -540,8 +554,8 @@ export const useMarketStore = defineStore("market", () => {
       const requestedInstrumentId = selectedInstrumentId.value ?? DEFAULT_SELECTED_INSTRUMENT_ID;
       const query = new URLSearchParams({
         selected_instrument: requestedInstrumentId,
-        include_order_book: "true",
-        include_trades: "true",
+        include_order_book: "false",
+        include_trades: "false",
       });
       marketSocket = await openAuthenticatedWebSocket(`/ws/market-feed?${query.toString()}`);
     } catch (unknownError) {
@@ -582,7 +596,7 @@ export const useMarketStore = defineStore("market", () => {
 
   function startDashboardFeed(
     intervalMs = 3_000,
-    selectedActiveIntervalMs = 10_000,
+    selectedActiveIntervalMs = SELECTED_INSTRUMENT_ACTIVE_REFRESH_MS,
     selectedIdleIntervalMs = 15_000,
   ): void {
     if (marketPollTimer !== null) {
@@ -629,7 +643,7 @@ export const useMarketStore = defineStore("market", () => {
 
   function startMarketPolling(
     intervalMs = 5_000,
-    selectedActiveIntervalMs = 10_000,
+    selectedActiveIntervalMs = SELECTED_INSTRUMENT_ACTIVE_REFRESH_MS,
     selectedIdleIntervalMs = 15_000,
   ): void {
     startDashboardFeed(intervalMs, selectedActiveIntervalMs, selectedIdleIntervalMs);
@@ -885,7 +899,8 @@ function isTradeTapeStillFresh(instrument: MarketInstrumentOverview): boolean {
   if (
     instrument.trade_tape_status === "stale" &&
     instrument.trade_tape_reason === "trade_exchange_ts_too_old" &&
-    instrument.market_trades_source === "tbank_get_last_trades"
+    (instrument.market_trades_source === "tbank_get_last_trades" ||
+      instrument.market_trades_source === "persisted_data_only_trade_tape")
   ) {
     return ageMs !== null && ageMs <= DELAYED_TRADE_TAPE_DISPLAY_MAX_AGE_MS;
   }

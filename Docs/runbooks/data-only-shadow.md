@@ -485,6 +485,22 @@ read-only dashboard fallback. Expected fields are
 `dashboard_trade_tape_fallback=persisted`. Do not treat this as live broker tape,
 do not backfill/fabricate trades, and do not write any rows from the dashboard
 feed path.
+For selected-instrument debugging, call the split selected routes before blaming
+the whole dashboard refresh:
+
+```text
+GET /dashboard/market-feed/snapshot?selected_instrument=MOEX:OZON&include_order_book=true&include_trades=false
+GET /dashboard/market-feed/snapshot?selected_instrument=MOEX:OZON&include_order_book=false&include_trades=true
+```
+
+These paths are selected-only: they do not refresh the whole quote board and do
+not run a fresh session preflight. The order-book split loads the selected
+detailed read model first and must not wait for synchronous broker
+`GetOrderBook` when a fresh complete persisted ladder exists. The trade split may
+return persisted data-only tape rows immediately when they are still inside the
+delayed display window, instead of blocking the selected card on a synchronous
+live `GetLastTrades` poll. They are readonly display logic and must not write
+`order_book_summary` or `market_trade_sample`.
 Data-only collector stream names must include `market_trades`; otherwise the
 dashboard can only report `no_market_trades_samples`/stale diagnostics and cannot
 show a true live tape.
@@ -524,11 +540,17 @@ not fall back to stale candle rows immediately after a live broker refresh.
 
 Operator dashboard polling while open:
 
-- `/dashboard/market-feed/snapshot` quote board: every 2 seconds;
-- compact quote-board `GetOrderBook` refresh: default every 5 seconds, bounded
-  concurrency, API cache only;
-- `/dashboard/market-feed/snapshot` selected instrument details: every 1 second while
-  dashboard feed sees `market_open=true`, otherwise every 5 seconds;
+- `/dashboard/market-feed/snapshot` quote board: every 2 seconds, read-model
+  first, no broad synchronous `GetOrderBook` fan-out on the normal UI path;
+- `/ws/market-feed`: lightweight quote/status/selection channel with
+  `include_order_book=false&include_trades=false`;
+- `/dashboard/market-feed/snapshot?include_order_book=true&include_trades=false`
+  selected order-book refresh: every 2 seconds while the dashboard feed sees
+  `market_open=true`, otherwise every 15 seconds, using selected read-model rows
+  first;
+- `/dashboard/market-feed/snapshot?include_order_book=false&include_trades=true`
+  selected trade-only refresh: in parallel for the current selected instrument, so
+  the tape can update without waiting for the order-book refresh lock;
 - selected broker trading status inside the dashboard feed: every 5 seconds;
 - `/runtime/data-shadow/status`: every 2-5 seconds;
 - `/market/quotes/refresh`: explicit readonly diagnostic/operator action, not an
@@ -546,11 +568,14 @@ MOEX window, broker `GetTradingStatus` or readonly `GetLastPrices`/`GetOrderBook
 probe success can allow collection with fallback warnings. `trading_allowed=false`
 always remains enforced in data-only mode.
 
-Trade-core starts only the minimal data-only stream set (`order_book`,
-`last_prices`, `trading_status`). If streams are silent but preflight allowed
-collection and readonly `GetOrderBook` works, a bounded polling fallback writes
-`market_microstructure_snapshot` through the same pipeline. This fallback is
-readonly, checks operator Stop between instrument requests, and must not call
+Trade-core starts only the data-only market stream set (`order_book`,
+`last_prices`, `trading_status`, `market_trades`). If streams are silent but
+preflight allowed collection and readonly `GetOrderBook` works, a bounded polling
+fallback writes `market_microstructure_snapshot` through the same pipeline. When
+`DATA_SHADOW_COLLECT_TRADES=true`, real market-trade stream events or bounded
+readonly `GetLastTrades` polling persist rows into `market_trade_sample`; empty
+trade responses create status/reason only, never fake rows. These fallbacks are
+readonly, check operator Stop between instrument requests, and must not call
 `PostOrder`/`CancelOrder` or create trading entities.
 
 While data-only collection is running, trade-core also skips runtime position

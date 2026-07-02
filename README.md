@@ -332,12 +332,15 @@ with `reason_code=broker_status_and_market_data_unavailable`. In data-only mode
 operator-facing session state; stale runtime `session_run` rows are marked with
 `session_stale`/`stale_reason` and must not make a closed market look active.
 
-After Start is accepted, trade-core uses the minimal data-only stream set
-(`order_book`, `last_prices`, `trading_status`). If stream order books are silent
-but readonly `GetOrderBook` remains available, a bounded polling fallback writes
-`market_microstructure_snapshot` through the same calculation pipeline. The fallback
-is disabled by Stop and never calls `PostOrder`, `CancelOrder`, or creates trading
-entities.
+After Start is accepted, trade-core uses the data-only market stream set
+(`order_book`, `last_prices`, `trading_status`, `market_trades`). If stream order
+books are silent but readonly `GetOrderBook` remains available, a bounded polling
+fallback writes `market_microstructure_snapshot` through the same calculation
+pipeline. If market-trade stream samples are unavailable and
+`DATA_SHADOW_COLLECT_TRADES=true`, bounded readonly `GetLastTrades` polling may
+persist real broker tape rows in `market_trade_sample`; empty broker responses are
+status/reason only and never fake trades. The fallback is disabled by Stop and
+never calls `PostOrder`, `CancelOrder`, or creates trading entities.
 
 One operator Start is a daily data-only collection intent, not a single-session
 toggle. If Start is clicked before the first same-day collection window and that
@@ -404,17 +407,27 @@ Dashboard Live Feed. This feed is independent from the Start button: it can disp
 last prices, selected-instrument order book and trade-tape status while the
 data-only collector is stopped. Start controls only persistent data-only log writing.
 
-The feed is exposed primarily through WebSocket `/ws/market-feed`; `/ws/market`
-is kept as a compatible alias for the same DashboardMarketFeed snapshot. REST
-`/dashboard/market-feed/status` and `/dashboard/market-feed/snapshot` are fallback
-and diagnostic endpoints. `GET /market/overview` is the cheap quote-board read-model
-backed by the feed cache first, then stored `order_book_summary`, `market_candle`
-and previous-close fallbacks. It always returns one row per core instrument and
-may use bounded readonly compact `GetOrderBook` refreshes for quote-card
-bid/ask/spread/depth/quality while the data-only collector is stopped.
-Selected-instrument full bid/ask ladder and trade tape come through the selected
-snapshot/details fields; the frontend sends `market.select` over the WebSocket
-when the operator switches instruments.
+The feed is exposed through a lightweight WebSocket `/ws/market-feed`; `/ws/market`
+is kept as a compatible alias for the same DashboardMarketFeed snapshot. The
+normal socket/polling path carries quote-board status and selection messages and
+does not fetch full selected ladders or tape. REST `/dashboard/market-feed/status`
+and `/dashboard/market-feed/snapshot` are fallback and diagnostic endpoints.
+`GET /market/overview` is the cheap quote-board read-model backed by the feed
+cache first, then stored `order_book_summary`, `market_candle` and
+previous-close fallbacks. It always returns one row per core instrument and must
+not block the operator board on broad synchronous broker order-book fan-out.
+Selected-instrument full bid/ask ladder and trade tape come through split
+selected snapshots; the frontend sends `market.select` over the WebSocket when
+the operator switches instruments, then requests the ladder with
+`include_order_book=true&include_trades=false` and the tape with
+`include_order_book=false&include_trades=true` in parallel. The selected ladder
+path uses persisted read-model rows first when a fresh complete
+`order_book_summary` is available and skips synchronous `GetOrderBook` in that
+case. The trade-only path is selected-only, skips broad quote-board refresh, and
+can return recent persisted `market_trade_sample` rows as
+`persisted_data_only_trade_tape` immediately when they are still inside the
+delayed display window, instead of blocking the selected card on a synchronous
+live `GetLastTrades` poll.
 Stored `order_book_summary` rows may use broker `instrument_uid`/`figi` while the
 operator UI requests canonical `MOEX:*`; the BFF resolves these aliases so fresh
 collector books can populate quote cards. Stale `GetLastPrices` responses must not
@@ -438,12 +451,14 @@ the dashboard. Dashboard feed calls are readonly and must not write calibration 
 create trading entities, or call `PostOrder`/`CancelOrder`.
 
 Dashboard polling is intentionally split: quote board every 2 seconds, selected
-instrument every 1 second while the feed sees the market open and every 5 seconds
-when closed/stale, selected broker trading status every 5 seconds for the session
-ribbon, data-only status every 2-5 seconds, and broker balance refresh every
-60 seconds. Polling is silent and must not clear the last good balance or quote rows
-on timeout. Empty or partial `/ws/market` snapshots are merged into the existing board
-and never delete missing core-universe rows.
+order-book split refresh every 2 seconds while the feed sees the market open and
+every 15 seconds when closed/stale, selected trade-only refresh in parallel for
+the currently selected instrument, selected broker trading status every 5 seconds
+for the session ribbon, data-only status every 2-5 seconds, and broker balance
+refresh every 60 seconds. Polling is silent and must not clear the last good
+balance or quote rows on timeout. Empty or partial `/ws/market` snapshots are
+merged into the existing board and never delete missing core-universe rows or
+overwrite the split selected ladder/tape with stale selected details.
 
 Dashboard freshness uses both BFF receipt time and exchange data time. For live
 order-book snapshots, `received_ts` is the operator-display freshness signal:
@@ -499,6 +514,12 @@ Spread units are explicit: `spread_abs`/`spread_abs_rub` are RUB, while
 `spread_bps = (best_ask - best_bid) / mid_price * 10000`. Market quality is split into
 display quality and calibration quality. Display quality describes the visible book;
 calibration quality is zero/not applicable when the venue is not `official_exchange`.
+The selected Instrument panel intentionally shows only administrator-facing tiles:
+last price, spread, imbalance, order-book quality, source, and order-book status.
+Duplicate Bid/Ask, duplicate Mid, separate Depth, and separate Calibration tiles are
+not rendered. The order-book quality tile owns the tooltip that explains freshness,
+bid/ask availability, depth, spread, ladder completeness, and the practical score
+bands: 80%+ good, 60-79% borderline, below 60% or display-only not calibration-ready.
 
 The frontend uses `/ws/market-feed` as the primary live market update path
 (`/ws/market` remains an alias) and REST polling as a fallback. Failed refreshes

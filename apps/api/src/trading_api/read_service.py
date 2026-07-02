@@ -78,8 +78,11 @@ from trading_common.db.models import (
 )
 
 TERMINAL_ORDER_STATUSES = frozenset({"filled", "cancelled", "rejected"})
+MARKET_FEED_ORDER_BOOK_DISPLAY_LEVELS = 10
+MARKET_FEED_TRADE_TAPE_DISPLAY_ROWS = 10
 DEFAULT_ANALYTICS_LIMIT = 50
 DEFAULT_DASHBOARD_UNIVERSE = ("SBER", "GAZP", "LKOH", "YDEX", "TATN", "GMKN", "OZON", "VTBR")
+DASHBOARD_TRADE_TAPE_DISPLAY_ROWS = 10
 
 
 @dataclass(slots=True)
@@ -580,8 +583,8 @@ class BffReadService:
                 "quote_allowed_for_data_collection": quote_allowed_for_data_collection,
                 "include_in_calibration": quote_allowed_for_data_collection,
                 "depth_levels": summary.depth_levels,
-                "bids": bids[:20],
-                "asks": asks[:20],
+                "bids": bids[:MARKET_FEED_ORDER_BOOK_DISPLAY_LEVELS],
+                "asks": asks[:MARKET_FEED_ORDER_BOOK_DISPLAY_LEVELS],
                 "best_bid_qty_lots": _optional_str(summary.best_bid_qty_lots),
                 "best_ask_qty_lots": _optional_str(summary.best_ask_qty_lots),
                 "bid_depth_lots": str(summary.bid_depth_lots),
@@ -633,10 +636,13 @@ class BffReadService:
         )
         if persisted_market_trades and _latest_market_trade_ts(
             persisted_market_trades
-        ) > _latest_market_trade_ts(recent_market_trades):
+        ) >= _latest_market_trade_ts(recent_market_trades):
             recent_market_trades = persisted_market_trades
             market_trades_source = "persisted_data_only_trade_tape"
+        recent_market_trades = _visible_market_trade_rows(recent_market_trades)
         market_trades_age_ms = _market_trade_rows_age_ms(recent_market_trades, now=now)
+        trade_tape_status = _trade_tape_status(recent_market_trades, market_trades_age_ms)
+        trade_tape_reason = _trade_tape_reason(recent_market_trades, market_trades_age_ms)
 
         return {
             "instrument_id": instrument_id,
@@ -708,8 +714,16 @@ class BffReadService:
             "market_trades_source": market_trades_source,
             "market_trades_age_ms": market_trades_age_ms,
             "trade_tape_source": market_trades_source,
+            "trade_tape_status": trade_tape_status,
+            "trade_tape_reason": trade_tape_reason,
             "persisted_trade_tape_available": bool(persisted_market_trades),
             "latest_persisted_trade_ts": latest_persisted_trade_ts,
+            "dashboard_trade_tape_fallback": (
+                "persisted"
+                if market_trades_source == "persisted_data_only_trade_tape"
+                and bool(recent_market_trades)
+                else None
+            ),
             "reason_code": (
                 official_decision.reason_code
                 if official_exchange_closed
@@ -773,7 +787,7 @@ class BffReadService:
         instrument_id: str,
         *,
         registry: InstrumentRegistry | None = None,
-        limit: int = 20,
+        limit: int = MARKET_FEED_TRADE_TAPE_DISPLAY_ROWS,
     ) -> list[JsonPayload]:
         aliases = _instrument_storage_aliases(instrument_id, registry)
         rows = (
@@ -792,7 +806,7 @@ class BffReadService:
             .scalars()
             .all()
         )
-        return [_market_trade_sample_payload(row) for row in rows]
+        return [_market_trade_sample_payload(row, instrument_id=instrument_id) for row in rows]
 
     def _latest_market_candle(self, instrument_id: str) -> MarketCandle | None:
         try:
@@ -2609,7 +2623,7 @@ def _compact_order_book_summary(summary: JsonPayload) -> JsonPayload:
 def _age_seconds(value: datetime | None, *, now: datetime) -> int | None:
     if value is None:
         return None
-    return max(0, int((now - value.astimezone(UTC)).total_seconds()))
+    return max(0, int((now - _ensure_utc_datetime(value)).total_seconds()))
 
 
 def _is_price_stale(
@@ -3269,12 +3283,16 @@ def _microstructure_snapshot_response(
     )
 
 
-def _market_trade_sample_payload(row: MarketTradeSample) -> JsonPayload:
+def _market_trade_sample_payload(
+    row: MarketTradeSample,
+    *,
+    instrument_id: str | None = None,
+) -> JsonPayload:
     exchange_ts = _ensure_utc_datetime(row.exchange_ts) if row.exchange_ts is not None else None
     received_ts = _ensure_utc_datetime(row.received_ts)
     payload = row.payload if isinstance(row.payload, dict) else {}
     return {
-        "instrument_id": row.instrument_id,
+        "instrument_id": instrument_id or row.instrument_id,
         "price": str(row.price),
         "quantity_lots": str(row.quantity_lots) if row.quantity_lots is not None else None,
         "side": row.side,
@@ -3305,11 +3323,38 @@ def _latest_market_trade_ts(rows: list[JsonPayload]) -> datetime:
     return latest or datetime.min.replace(tzinfo=UTC)
 
 
+def _visible_market_trade_rows(rows: list[JsonPayload]) -> list[JsonPayload]:
+    sorted_rows = sorted(
+        rows,
+        key=lambda row: _latest_market_trade_ts([row]),
+        reverse=True,
+    )
+    return sorted_rows[:DASHBOARD_TRADE_TAPE_DISPLAY_ROWS]
+
+
 def _market_trade_rows_age_ms(rows: list[JsonPayload], *, now: datetime) -> int | None:
     latest = _latest_market_trade_ts(rows)
     if latest == datetime.min.replace(tzinfo=UTC):
         return None
     return max(0, int((now - latest).total_seconds() * 1000))
+
+
+def _trade_tape_status(rows: list[JsonPayload], age_ms: int | None) -> str:
+    if not rows:
+        return "no_market_trades_samples"
+    if age_ms is None:
+        return "stale"
+    max_age_ms = int(_env_float("DASHBOARD_TRADES_MAX_EXCHANGE_AGE_SECONDS", 15.0) * 1000)
+    return "live" if age_ms <= max_age_ms else "stale"
+
+
+def _trade_tape_reason(rows: list[JsonPayload], age_ms: int | None) -> str:
+    if not rows:
+        return "no_market_trades_samples"
+    if age_ms is None:
+        return "missing_trade_exchange_ts"
+    max_age_ms = int(_env_float("DASHBOARD_TRADES_MAX_EXCHANGE_AGE_SECONDS", 15.0) * 1000)
+    return "fresh" if age_ms <= max_age_ms else "trade_exchange_ts_too_old"
 
 
 def _datetime_or_none(value: object) -> datetime | None:

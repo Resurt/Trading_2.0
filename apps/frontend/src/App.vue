@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted } from "vue";
+import { computed, onMounted, onUnmounted } from "vue";
 import { RouterLink, RouterView } from "vue-router";
 import {
   Activity,
@@ -33,6 +33,32 @@ const navItems = [
   { to: "/settings", label: "Settings", icon: Settings },
   { to: "/diagnostics", label: "Logs/Diagnostics", icon: FileTerminal },
 ];
+
+const lastUiSyncAt = computed(() =>
+  newestIsoTimestamp([
+    robot.lastDashboardMessageAt,
+    robot.lastRuntimeStatusAt,
+    market.dashboardFeedStatus.last_refresh_at,
+    market.lastQuoteRefreshAt,
+    market.lastDetailsRefreshAt,
+  ]),
+);
+
+function newestIsoTimestamp(values: Array<string | null | undefined>): string | null {
+  let newestValue: string | null = null;
+  let newestMs = Number.NEGATIVE_INFINITY;
+  for (const value of values) {
+    if (!value) {
+      continue;
+    }
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed) && parsed > newestMs) {
+      newestMs = parsed;
+      newestValue = value;
+    }
+  }
+  return newestValue;
+}
 
 function connectionText(label: string, state: string): string {
   const states: Record<string, string> = {
@@ -127,6 +153,7 @@ onMounted(() => {
   void bootstrapDashboard();
   void market.fetchDataShadowStatus();
   void robot.connectDashboardSocket();
+  robot.startStatusPolling();
   void market.connectMarketSocket();
   void portfolio.connectOrdersSocket();
   robot.startBalancePolling();
@@ -135,6 +162,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   robot.stopBalancePolling();
+  robot.stopStatusPolling();
   market.stopDashboardFeed();
 });
 </script>
@@ -158,7 +186,7 @@ onUnmounted(() => {
       </div>
 
       <div class="top-actions">
-        <span class="last-sync">{{ compactDateTime(robot.lastDashboardMessageAt) }}</span>
+        <span class="last-sync">{{ compactDateTime(lastUiSyncAt) }}</span>
         <button
           class="icon-button icon-button--good"
           :class="{ 'icon-button--working': robot.startLoading }"

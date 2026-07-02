@@ -1,6 +1,6 @@
 # Frontend Dashboard Spec
 
-Status: current source of truth, updated 2026-07-01.
+Status: current source of truth, updated 2026-07-02.
 
 Legacy historical content was moved to
 `Docs/archive/2026-06-30/frontend-dashboard-spec-legacy.md`. Do not use archived
@@ -31,7 +31,10 @@ REST endpoints remain fallback and diagnostic paths:
 - `GET /market/instruments/{instrument_id}/details`
 
 The dashboard opens `/ws/market-feed` on page mount. It must not wait for Start.
-The first WebSocket snapshot must include:
+The WebSocket channel is intentionally lightweight: it carries quote-board
+read-model/status updates and selected-instrument change messages, while the
+full selected order book and selected trade tape are requested through split
+selected REST snapshots. The first WebSocket snapshot must include:
 
 - quote rows for the core universe;
 - selected instrument id;
@@ -128,23 +131,39 @@ Default freshness thresholds are backend-configurable:
 ## Order Book
 
 The dashboard order-book display is independent from data-only collection. The
-quote board may run bounded readonly `GetOrderBook` refreshes for the core
-universe so quote cards stay live when the data-only collector is stopped. This
-is display-only broker I/O: it must not create `market_microstructure_snapshot`,
-`order_book_summary`, `signal_candidate`, `order_intent`, or `broker_order`
-rows. Quote-board refresh stores only a short API cache and compact
-top-of-book/quality fields; it must not start runtime streams or data-only
-collection.
+normal quote-board path is read-model first and must not block on fresh dashboard
+preflight or broad broker `GetOrderBook` fan-out. Explicit fallback/manual
+refresh may run bounded readonly broker I/O, but it must not create
+`market_microstructure_snapshot`, `order_book_summary`, `signal_candidate`,
+`order_intent`, or `broker_order` rows and must not start runtime streams or
+data-only collection.
 
 The selected instrument remains the only place that renders the full depth
-ladder. Quote cards may show bid/ask, spread, depth, quality and freshness from
-the readonly feed cache or the stored `order_book_summary` read-model produced
-by data-only collection.
+ladder. Quote cards may show compact bid/ask, spread, depth, quality and freshness
+from the readonly feed cache or the stored `order_book_summary` read-model
+produced by data-only collection.
+Selected full-ladder display is read-model first. Requests with
+`include_order_book=true&include_trades=false` must load only the selected
+instrument's detailed read-model row. If the data-only collector has already
+persisted a fresh complete `order_book_summary` for the selected instrument, the
+dashboard must render that ladder immediately and must not wait for synchronous
+broker `GetOrderBook`. A later broker fallback must not blank the selected
+ladder while fresh persisted levels are available.
 When `/market/overview` includes `display_market_quality_score`, every quote card
 must show that as `качество стакана N %`. Do not replace an available quality
 score with `нет стакана` just because full `bids[]`/`asks[]` ladder levels are
 missing from the overview payload; full ladder levels are required only for the
 selected order-book widget.
+The selected Instrument summary tiles are intentionally compact and administrator
+facing: `Последняя цена`, `Спред`, `Имбаланс`, `Качество стакана`, `Источник`,
+and `Статус стакана`. Do not add separate Bid/Ask, duplicate Mid, Depth, or
+Calibration tiles back into that grid. Depth remains available inside the order
+book widget and quality tooltip; calibration readiness is explained by the
+`Качество стакана` tooltip rather than a separate percentage tile.
+The `Качество стакана` tile must expose a hover/focus tooltip explaining that the
+score combines freshness, bid/ask availability, depth, spread and ladder
+completeness. Operator guidance: 80%+ is good, 60-79% is borderline diagnostics,
+below 60% or display-only is not calibration-ready.
 Quote cards should not show raw day-change `change_bps` values; trend/change
 analytics belong in dedicated reports, not in the compact operator quote board.
 The selected order-book refresh interval must stay below the order-book freshness
@@ -157,6 +176,9 @@ must preserve the requested selected instrument and refresh the corresponding
 details. When broker order-book levels are returned, the API/UI must render
 `best_bid`, `best_ask`, `mid_price`, `spread_abs`, `spread_bps`,
 bid/ask depth, `book_imbalance`, and `order_book_summary.bids[]`/`.asks[]`.
+The selected ladder display is capped to 10 bid rows and 10 ask rows. The BFF
+and frontend both enforce this cap so stale cache/read-model responses cannot
+make the ladder jump between 10 and 20 visible rows.
 If no broker book is returned or the call times out, the selected panel must show
 an explicit status/reason; `no_order_book_samples` is not a successful open-market
 book without raw broker evidence.
@@ -212,6 +234,9 @@ Selected details must include either recent trades or explicit trade tape status
 The dashboard tape is an operator display surface and uses readonly all-source
 market-trades calls/stream samples where needed; it must not write calibration or
 trading entities.
+The selected tape display is capped to 10 rows. The BFF trims live broker rows,
+persisted read-model rows and cached rows to 10, and the frontend applies the
+same display cap defensively.
 Quote cards and selected details use readonly broker trading status to classify
 fresh books as live vs display-only. Empty or partial refreshes may preserve the
 last fresh selected ladder/trade tape for display continuity, but this cache is
@@ -237,7 +262,15 @@ Supported status values include:
 Absence of trades must not hide quotes or order-book status. The UI must show the
 status/reason plainly.
 
-Readonly `GetLastTrades` uses a short primary lookback first and then a bounded fallback lookback when the short window returns an empty broker response. This is only for operator visibility: delayed rows are marked `stale` when outside the live freshness budget, remain visible for up to `DASHBOARD_TRADES_DELAYED_DISPLAY_SECONDS=300`, and are never treated as calibration rows or trading evidence.
+Full selected refresh may use readonly `GetLastTrades` with a short primary
+lookback first and then a bounded fallback lookback when the short window returns
+an empty broker response. The selected trade-only UI path is read-model first: if
+persisted data-only tape rows are still inside the display budget, the API may
+return them immediately instead of blocking the selected quote card on broker
+polling. This is only for operator visibility: delayed rows are marked `stale`
+when outside the live freshness budget, remain visible for up to
+`DASHBOARD_TRADES_DELAYED_DISPLAY_SECONDS=300`, and are never treated as
+calibration rows or trading evidence.
 
 Trade rows from the collector stream must be keyed by canonical `MOEX:*`
 `instrument_id`, not only by broker UID/FIGI. The original broker identifier may
@@ -260,15 +293,33 @@ or `no_market_trades_samples` refresh only while the newest trade exchange
 timestamp remains inside the trade freshness budget. Once that budget expires, or
 when the selected instrument changes, old rows must be dropped and the panel must
 show the explicit status/reason instead of implying live trades.
+Stale persisted tape is a delayed fallback only. It may satisfy the selected
+trade-only fast path so the table does not disappear while the collector is
+writing rows, but it must not block the full selected-instrument order-book
+refresh and must not be labeled as live. If a full live refresh returns newer
+`GetLastTrades` rows, live rows replace persisted fallback.
 
 Selected details distinguish live broker trades from persisted data-only tape.
 When live `GetLastTrades` is empty/stale but persisted rows are fresh, the UI may
 show the persisted rows with `trade_tape_source=persisted_data_only_trade_tape`,
 `persisted_trade_tape_available=true`, `latest_persisted_trade_ts`, and
 `dashboard_trade_tape_fallback=persisted`. The badge/source text must make that
-fallback visible and must not say the rows are a live broker tape. If the
-persisted rows are stale, the table stays empty and the stale status/reason is
-shown instead.
+fallback visible and must not say the rows are a live broker tape. If persisted
+rows are stale but still inside `DASHBOARD_TRADES_DELAYED_DISPLAY_SECONDS`, they
+may remain visible only with `trade_tape_status=stale` and
+`trade_tape_reason=trade_exchange_ts_too_old`; beyond that budget the table is
+hidden behind explicit status/reason text.
+When the operator selects another quote card, the frontend starts two split
+selected snapshots in parallel: `include_order_book=true&include_trades=false`
+for the full ladder and `include_order_book=false&include_trades=true` for the
+tape. The WebSocket subscription for normal dashboard updates uses
+`include_order_book=false&include_trades=false`; it is a lightweight status/quote
+channel and must not overwrite the split selected ladder or tape with a slower
+combined snapshot. Each selected request is tracked per selected instrument, not
+by a global in-flight flag, so a stale request for SBER must not block an
+immediate OZON/GAZP request. Late responses may update only the matching
+instrument row and must not replace the current selected instrument's order book
+or trade tape.
 
 Acceptance is covered by
 `scripts/run_selected_orderbook_trade_tape_acceptance.py --instruments MOEX:SBER,MOEX:GAZP,MOEX:VTBR`.

@@ -69,6 +69,7 @@ export const useRobotStore = defineStore("robot", () => {
   const snapshotWarnings = ref<string[]>([]);
   const liveConnection = ref<ConnectionState>("idle");
   const lastDashboardMessageAt = ref<string | null>(null);
+  const lastRuntimeStatusAt = ref<string | null>(null);
   const lastCommandStatus = ref<string | null>(null);
   const lastCommandMessage = ref<string | null>(null);
   const lastCommandReasonCode = ref<string | null>(null);
@@ -82,8 +83,10 @@ export const useRobotStore = defineStore("robot", () => {
   const lastSessionPreflight = ref<SessionPreflightResponse | null>(null);
   let dashboardSocket: WebSocket | null = null;
   let balancePollTimer: number | null = null;
+  let statusPollTimer: number | null = null;
   let commandDismissTimer: number | null = null;
   let snapshotInFlight = false;
+  let statusSnapshotInFlight = false;
 
   const currentSignal = computed(() => signals.value[0] ?? null);
   const currentBlockerCode = computed(() => currentSignal.value?.final_blocker_code ?? null);
@@ -150,6 +153,41 @@ export const useRobotStore = defineStore("robot", () => {
     error.value = snapshotWarnings.value.length ? snapshotWarnings.value.join("; ") : null;
     loading.value = false;
     snapshotInFlight = false;
+  }
+
+  async function fetchRuntimeStatusSnapshot(): Promise<void> {
+    if (statusSnapshotInFlight || snapshotInFlight) {
+      return;
+    }
+    statusSnapshotInFlight = true;
+    const previousWarnings = snapshotWarnings.value.filter(
+      (warning) =>
+        !warning.startsWith("robot_status_unavailable:") &&
+        !warning.startsWith("session_snapshot_unavailable:"),
+    );
+    try {
+      const [statusResult, sessionResult] = await Promise.allSettled([
+        apiClient.robotStatus(),
+        apiClient.currentSession(),
+      ]);
+      const nextWarnings = [...previousWarnings];
+      if (statusResult.status === "fulfilled") {
+        status.value = statusResult.value;
+        lastRuntimeStatusAt.value = new Date().toISOString();
+      } else {
+        nextWarnings.push(`robot_status_unavailable: ${errorMessage(statusResult.reason)}`);
+      }
+      if (sessionResult.status === "fulfilled") {
+        session.value = sessionResult.value;
+        lastRuntimeStatusAt.value = new Date().toISOString();
+      } else {
+        nextWarnings.push(`session_snapshot_unavailable: ${errorMessage(sessionResult.reason)}`);
+      }
+      snapshotWarnings.value = nextWarnings;
+      error.value = nextWarnings.length ? nextWarnings.join("; ") : null;
+    } finally {
+      statusSnapshotInFlight = false;
+    }
   }
 
   async function connectDashboardSocket(): Promise<void> {
@@ -383,6 +421,24 @@ export const useRobotStore = defineStore("robot", () => {
     balancePollTimer = null;
   }
 
+  function startStatusPolling(intervalMs = 5_000): void {
+    if (statusPollTimer !== null) {
+      return;
+    }
+    void fetchRuntimeStatusSnapshot();
+    statusPollTimer = window.setInterval(() => {
+      void fetchRuntimeStatusSnapshot();
+    }, intervalMs);
+  }
+
+  function stopStatusPolling(): void {
+    if (statusPollTimer === null) {
+      return;
+    }
+    window.clearInterval(statusPollTimer);
+    statusPollTimer = null;
+  }
+
   function applyPortfolioSummary(summary: PortfolioSummaryResponse): void {
     status.value = {
       ...status.value,
@@ -596,6 +652,7 @@ export const useRobotStore = defineStore("robot", () => {
     snapshotWarnings,
     liveConnection,
     lastDashboardMessageAt,
+    lastRuntimeStatusAt,
     lastSessionPreflight,
     lastCommandStatus,
     lastCommandMessage,
@@ -611,6 +668,7 @@ export const useRobotStore = defineStore("robot", () => {
     currentBlockerCode,
     degraded,
     fetchInitialSnapshot,
+    fetchRuntimeStatusSnapshot,
     connectDashboardSocket,
     applyDashboardSnapshot,
     startRobot,
@@ -619,5 +677,7 @@ export const useRobotStore = defineStore("robot", () => {
     dismissCommand,
     startBalancePolling,
     stopBalancePolling,
+    startStatusPolling,
+    stopStatusPolling,
   };
 });

@@ -82,6 +82,34 @@ describe("robot store", () => {
     expect(robot.error).toContain("session_snapshot_unavailable");
   });
 
+  it("refreshes runtime status through the read-only polling fallback", async () => {
+    apiClientMock.robotStatus.mockResolvedValue({
+      ...statusFixture(),
+      micro_session_id: "2026-07-02:weekday_main:20260702T1400",
+    });
+    apiClientMock.currentSession.mockResolvedValue({
+      ...sessionFixture(),
+      micro_session_id: "2026-07-02:weekday_main:20260702T1400",
+    });
+    const robot = useRobotStore();
+    robot.status = {
+      ...statusFixture(),
+      micro_session_id: "2026-07-02:weekday_main:20260702T1200",
+    };
+    robot.session = {
+      ...sessionFixture(),
+      micro_session_id: "2026-07-02:weekday_main:20260702T1200",
+    };
+
+    await robot.fetchRuntimeStatusSnapshot();
+
+    expect(apiClientMock.robotStatus).toHaveBeenCalledTimes(1);
+    expect(apiClientMock.currentSession).toHaveBeenCalledTimes(1);
+    expect(robot.status.micro_session_id).toBe("2026-07-02:weekday_main:20260702T1400");
+    expect(robot.session.micro_session_id).toBe("2026-07-02:weekday_main:20260702T1400");
+    expect(robot.lastRuntimeStatusAt).not.toBeNull();
+  });
+
   it("queues start command even when advisory preflight says closed", async () => {
     apiClientMock.sessionPreflightFast.mockResolvedValue(preflightFixture(false));
     apiClientMock.startRobot.mockResolvedValue(commandFixture("start", "preflight_pending"));

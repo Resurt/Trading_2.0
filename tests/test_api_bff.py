@@ -303,6 +303,7 @@ class FakeDashboardFeedGateway(FakeQuoteGateway):
 class FakeCoreDashboardFeedGateway(FakeDashboardFeedGateway):
     def __init__(self) -> None:
         self.order_book_calls: list[str] = []
+        self.last_trade_calls: list[str] = []
 
     async def get_last_prices(
         self,
@@ -361,7 +362,9 @@ class FakeCoreDashboardFeedGateway(FakeDashboardFeedGateway):
         request: object,
         metadata: object = None,
     ) -> BrokerUnaryResponse:
-        del request, metadata
+        del metadata
+        ref = request.instrument  # type: ignore[attr-defined]
+        self.last_trade_calls.append(str(getattr(ref, "instrument_id", "")))
         return BrokerUnaryResponse(method_name="GetLastTrades", data={"trades": []})
 
 
@@ -414,12 +417,17 @@ class FakeOneLevelOrderBookGateway(FakeDashboardFeedGateway):
 
 
 class FakeOldFirstTradesGateway(FakeDashboardFeedGateway):
+    def __init__(self) -> None:
+        self.last_trade_calls: list[str] = []
+
     async def get_last_trades(
         self,
         request: object,
         metadata: object = None,
     ) -> BrokerUnaryResponse:
-        del request, metadata
+        del metadata
+        ref = request.instrument  # type: ignore[attr-defined]
+        self.last_trade_calls.append(str(getattr(ref, "instrument_id", "")))
         now = datetime.now(tz=UTC)
         return BrokerUnaryResponse(
             method_name="GetLastTrades",
@@ -441,6 +449,32 @@ class FakeOldFirstTradesGateway(FakeDashboardFeedGateway):
                         "side": "buy",
                         "ts_utc": (now - timedelta(seconds=1)).isoformat(),
                     },
+                ]
+            },
+        )
+
+
+class FakeManyTradesGateway(FakeDashboardFeedGateway):
+    async def get_last_trades(
+        self,
+        request: object,
+        metadata: object = None,
+    ) -> BrokerUnaryResponse:
+        del request, metadata
+        now = datetime.now(tz=UTC)
+        return BrokerUnaryResponse(
+            method_name="GetLastTrades",
+            data={
+                "trades": [
+                    {
+                        "instrument_uid": "uid-sber",
+                        "figi": "figi-sber",
+                        "price": str(Decimal("314.00") + Decimal(index) / Decimal("100")),
+                        "quantity_lots": str(index + 1),
+                        "side": "buy" if index % 2 == 0 else "sell",
+                        "ts_utc": (now - timedelta(milliseconds=index)).isoformat(),
+                    }
+                    for index in range(15)
                 ]
             },
         )
@@ -1882,7 +1916,7 @@ def test_dashboard_market_feed_timeout_snapshot_is_retry_warning() -> None:
     assert snapshot["quote_rows"][0]["quote_status"] == "live"
 
 
-def test_market_overview_falls_back_when_dashboard_feed_gateway_unavailable(
+def test_market_overview_uses_read_model_when_dashboard_gateway_unavailable(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1905,7 +1939,7 @@ def test_market_overview_falls_back_when_dashboard_feed_gateway_unavailable(
 
     assert len(market["instruments"]) == 8
     assert {row["instrument_id"] for row in market["instruments"]} >= {"MOEX:SBER", "MOEX:GAZP"}
-    assert "dashboard_gateway_unavailable" in feed_status["errors"] or feed_status["errors"]
+    assert feed_status["errors"] == []
 
 
 def test_market_overview_filter_and_selected_details_endpoint(tmp_path: Path) -> None:
@@ -1978,7 +2012,7 @@ def test_dashboard_market_feed_snapshot_does_not_require_collector_or_write_db(
     assert before == after
 
 
-def test_dashboard_quote_board_refreshes_order_books_without_collector_or_db_writes(
+def test_dashboard_quote_board_uses_read_model_without_collector_or_db_writes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1987,7 +2021,6 @@ def test_dashboard_quote_board_refreshes_order_books_without_collector_or_db_wri
 
     gateway = FakeCoreDashboardFeedGateway()
     monkeypatch.setenv("DASHBOARD_MARKET_FEED_ENABLED", "true")
-    monkeypatch.setenv("DASHBOARD_QUOTE_ORDER_BOOK_REFRESH_SECONDS", "0.1")
     force_exchange_open(monkeypatch)
     monkeypatch.setattr(app_module, "_readonly_tbank_gateway", lambda: gateway)
     database = DatabaseService(f"sqlite+pysqlite:///{tmp_path / 'dashboard-board-feed.db'}")
@@ -2027,14 +2060,11 @@ def test_dashboard_quote_board_refreshes_order_books_without_collector_or_db_wri
     assert before == after
     assert snapshot["data_only_collection_required"] is False
     assert len(snapshot["quote_rows"]) == 8
-    assert set(gateway.order_book_calls) == {f"MOEX:{ticker}" for ticker in CORE_TEST_TICKERS}
-    for row in snapshot["quote_rows"]:
-        assert row["quote_status"] == "live"
-        assert row["order_book_stale"] is False
-        assert row["last_price_source"] == "live_order_book_mid"
-        assert row["order_book_source"] == "live_order_book_mid"
-        assert row["order_book_summary"]["bids"]
-        assert row["order_book_summary"]["asks"]
+    assert gateway.order_book_calls == []
+    assert gateway.last_trade_calls == []
+    sber = next(row for row in snapshot["quote_rows"] if row["instrument_id"] == "MOEX:SBER")
+    assert sber["last_price_source"] == "live_exchange_order_book"
+    assert sber["order_book_source"] == "live_exchange_order_book"
 
 
 def test_dashboard_market_feed_sorts_last_trades_newest_first(
@@ -2241,6 +2271,130 @@ def test_dashboard_market_feed_uses_persisted_trade_tape_when_live_empty(
     assert snapshot["status"]["dashboard_trade_tape_fallback"] == "persisted"
 
 
+def test_dashboard_market_feed_trade_only_skips_quote_board_order_books(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app_module = importlib.import_module("trading_api.app")
+
+    gateway = FakeCoreDashboardFeedGateway()
+    monkeypatch.setenv("DASHBOARD_MARKET_FEED_ENABLED", "true")
+    monkeypatch.setenv("DASHBOARD_TRADES_REFRESH_SECONDS", "0")
+    force_exchange_open(monkeypatch)
+    monkeypatch.setattr(app_module, "_readonly_tbank_gateway", lambda: gateway)
+    database = DatabaseService(
+        f"sqlite+pysqlite:///{tmp_path / 'dashboard-feed-trade-only-fast.db'}"
+    )
+    Base.metadata.create_all(database.engine)
+    seed_database(database)
+    seed_core_universe_registry(database)
+    seed_persisted_trade_sample(
+        database,
+        instrument_id="uid-ozon",
+        exchange_ts=datetime.now(tz=UTC) - timedelta(seconds=2),
+        price=Decimal("3427.25"),
+    )
+    app = create_fastapi_app(database=database, report_task_client=FakeReportTaskClient())
+    client = TestClient(app)
+
+    snapshot = client.get(
+        "/dashboard/market-feed/snapshot",
+        headers={"X-API-Role": "observer"},
+        params={
+            "selected_instrument": "MOEX:OZON",
+            "include_order_book": False,
+            "include_trades": True,
+        },
+    ).json()
+
+    selected = snapshot["selected_details"]
+    assert gateway.order_book_calls == []
+    assert gateway.last_trade_calls == []
+    assert selected["instrument_id"] == "MOEX:OZON"
+    assert selected["recent_market_trades"][0]["price"] == "3427.25000000"
+    assert selected["market_trades_source"] == "persisted_data_only_trade_tape"
+    assert selected["trade_tape_status"] == "live"
+    assert selected["dashboard_trade_tape_fallback"] == "persisted"
+
+
+def test_dashboard_market_feed_trade_only_returns_stale_persisted_tape_without_broker_poll(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app_module = importlib.import_module("trading_api.app")
+
+    monkeypatch.setenv("DASHBOARD_MARKET_FEED_ENABLED", "true")
+    monkeypatch.setenv("DASHBOARD_TRADES_REFRESH_SECONDS", "0")
+    monkeypatch.setenv("DASHBOARD_TRADES_MAX_EXCHANGE_AGE_SECONDS", "15")
+    force_exchange_open(monkeypatch)
+    gateway = FakeOldFirstTradesGateway()
+    monkeypatch.setattr(app_module, "_readonly_tbank_gateway", lambda: gateway)
+    database = DatabaseService(
+        f"sqlite+pysqlite:///{tmp_path / 'dashboard-feed-stale-persisted-refresh.db'}"
+    )
+    Base.metadata.create_all(database.engine)
+    seed_database(database)
+    seed_persisted_trade_sample(
+        database,
+        exchange_ts=datetime.now(tz=UTC) - timedelta(seconds=45),
+        price=Decimal("313.70"),
+    )
+    app = create_fastapi_app(database=database, report_task_client=FakeReportTaskClient())
+    client = TestClient(app)
+
+    snapshot = client.get(
+        "/dashboard/market-feed/snapshot",
+        headers={"X-API-Role": "observer"},
+        params={
+            "selected_instrument": "MOEX:SBER",
+            "include_order_book": False,
+            "include_trades": True,
+        },
+    ).json()
+
+    selected = snapshot["selected_details"]
+    assert gateway.last_trade_calls == []
+    assert selected["recent_market_trades"][0]["price"] == "313.70000000"
+    assert selected["market_trades_source"] == "persisted_data_only_trade_tape"
+    assert selected["trade_tape_status"] == "stale"
+    assert selected["trade_tape_reason"] == "trade_exchange_ts_too_old"
+    assert selected["dashboard_trade_tape_fallback"] == "persisted"
+
+
+def test_dashboard_market_feed_limits_selected_trade_tape_to_ten_rows(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app_module = importlib.import_module("trading_api.app")
+
+    monkeypatch.setenv("DASHBOARD_MARKET_FEED_ENABLED", "true")
+    monkeypatch.setenv("DASHBOARD_TRADES_REFRESH_SECONDS", "0")
+    force_exchange_open(monkeypatch)
+    monkeypatch.setattr(app_module, "_readonly_tbank_gateway", lambda: FakeManyTradesGateway())
+    database = DatabaseService(
+        f"sqlite+pysqlite:///{tmp_path / 'dashboard-feed-trades-limit.db'}"
+    )
+    Base.metadata.create_all(database.engine)
+    seed_database(database)
+    app = create_fastapi_app(database=database, report_task_client=FakeReportTaskClient())
+    client = TestClient(app)
+
+    snapshot = client.get(
+        "/dashboard/market-feed/snapshot",
+        headers={"X-API-Role": "observer"},
+        params={
+            "selected_instrument": "MOEX:SBER",
+            "include_order_book": False,
+            "include_trades": True,
+        },
+    ).json()
+
+    selected = snapshot["selected_details"]
+    assert len(selected["recent_market_trades"]) == 10
+    assert selected["recent_market_trades"][0]["price"] == "314.00"
+    assert selected["recent_market_trades"][-1]["price"] == "314.09"
+
+
 def test_dashboard_market_feed_live_trades_take_precedence_over_persisted_fallback(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -2267,7 +2421,7 @@ def test_dashboard_market_feed_live_trades_take_precedence_over_persisted_fallba
         headers={"X-API-Role": "observer"},
         params={
             "selected_instrument": "MOEX:SBER",
-            "include_order_book": False,
+            "include_order_book": True,
             "include_trades": True,
         },
     ).json()
@@ -2318,12 +2472,66 @@ def test_dashboard_market_feed_stale_persisted_trade_tape_does_not_masquerade_as
     ).json()
 
     selected = snapshot["selected_details"]
-    assert selected["recent_market_trades"] == []
+    assert selected["recent_market_trades"][0]["price"] == "313.70000000"
     assert selected["market_trades_source"] == "persisted_data_only_trade_tape"
     assert selected["trade_tape_status"] == "stale"
     assert selected["trade_tape_reason"] == "trade_exchange_ts_too_old"
     assert selected["persisted_trade_tape_available"] is True
-    assert selected["dashboard_trade_tape_fallback"] is None
+    assert selected["dashboard_trade_tape_fallback"] == "persisted"
+
+
+def test_dashboard_market_feed_keeps_persisted_trade_tape_with_selected_order_book(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app_module = importlib.import_module("trading_api.app")
+
+    monkeypatch.setenv("DASHBOARD_MARKET_FEED_ENABLED", "true")
+    monkeypatch.setenv("DASHBOARD_TRADES_REFRESH_SECONDS", "0")
+    monkeypatch.setenv("DASHBOARD_TRADES_MAX_EXCHANGE_AGE_SECONDS", "15")
+    monkeypatch.setenv("DASHBOARD_TRADES_DELAYED_DISPLAY_SECONDS", "300")
+    force_exchange_open(monkeypatch)
+    monkeypatch.setattr(
+        app_module,
+        "_readonly_tbank_gateway",
+        lambda: FakeCoreDashboardFeedGateway(),
+    )
+    database = DatabaseService(
+        f"sqlite+pysqlite:///{tmp_path / 'dashboard-feed-ozon-persisted.db'}"
+    )
+    Base.metadata.create_all(database.engine)
+    seed_database(database)
+    seed_core_universe_registry(database)
+    seed_persisted_trade_sample(
+        database,
+        instrument_id="uid-ozon",
+        exchange_ts=datetime.now(tz=UTC) - timedelta(seconds=45),
+        price=Decimal("3427.25"),
+    )
+    app = create_fastapi_app(database=database, report_task_client=FakeReportTaskClient())
+    client = TestClient(app)
+
+    snapshot = client.get(
+        "/dashboard/market-feed/snapshot",
+        headers={"X-API-Role": "observer"},
+        params={
+            "selected_instrument": "MOEX:OZON",
+            "include_order_book": True,
+            "include_trades": True,
+            "force": True,
+        },
+    ).json()
+
+    selected = snapshot["selected_details"]
+    assert selected["instrument_id"] == "MOEX:OZON"
+    assert selected["order_book_summary"]["bids"]
+    assert selected["recent_market_trades"][0]["price"] == "3427.25000000"
+    assert selected["market_trades_source"] == "persisted_data_only_trade_tape"
+    assert selected["trade_tape_status"] == "stale"
+    assert selected["trade_tape_reason"] == "trade_exchange_ts_too_old"
+    assert selected["persisted_trade_tape_available"] is True
+    assert selected["dashboard_trade_tape_fallback"] == "persisted"
+    assert snapshot["status"]["trade_tape_available"] is True
 
 
 def test_dashboard_market_feed_waits_for_selected_refresh_when_cache_incomplete() -> None:
@@ -2397,6 +2605,300 @@ def test_dashboard_market_feed_waits_for_selected_refresh_when_cache_incomplete(
     assert status["order_book_available"] is True
 
 
+def test_dashboard_market_feed_trade_only_persisted_tape_bypasses_refresh_lock() -> None:
+    feed_module = importlib.import_module("trading_api.dashboard_market_feed")
+    now = datetime.now(tz=UTC)
+    trade_ts = now - timedelta(seconds=2)
+    base_row = MarketInstrumentOverview(
+        instrument_id="MOEX:OZON",
+        ticker="OZON",
+        official_exchange_open=True,
+        quote_source="db_read_model",
+        last_price_source="db_read_model",
+        last_price=Decimal("3427.25"),
+        last_price_at=trade_ts,
+        received_ts=now,
+        exchange_ts=trade_ts,
+        stale_by_received_time=False,
+        stale_by_exchange_time=False,
+        is_price_stale=False,
+        freshness_status="fresh",
+        quote_status="live",
+        recent_market_trades=[
+            {
+                "instrument_id": "MOEX:OZON",
+                "price": "3427.25000000",
+                "quantity_lots": "4",
+                "side": "buy",
+                "exchange_ts": trade_ts.isoformat(),
+                "source": feed_module.PERSISTED_TRADE_TAPE_SOURCE,
+            }
+        ],
+        market_trades_source=feed_module.PERSISTED_TRADE_TAPE_SOURCE,
+        market_trades_age_ms=2_000,
+        trade_tape_source=feed_module.PERSISTED_TRADE_TAPE_SOURCE,
+        trade_tape_status="live",
+        trade_tape_reason="fresh",
+        persisted_trade_tape_available=True,
+        latest_persisted_trade_ts=trade_ts,
+        dashboard_trade_tape_fallback="persisted",
+    )
+    overview = MarketOverviewResponse(generated_at=now, instruments=[base_row])
+    ref = SimpleNamespace(
+        instrument_id="MOEX:OZON",
+        ticker="OZON",
+        figi="figi-ozon",
+        instrument_uid="uid-ozon",
+    )
+    gateway = FakeCoreDashboardFeedGateway()
+    feed = feed_module.DashboardMarketFeedService()
+
+    async def run() -> dict[str, object]:
+        await feed._refresh_lock.acquire()
+        try:
+            task = asyncio.create_task(
+                feed.snapshot(
+                    base_overview=overview,
+                    refs=[ref],
+                    selected_instrument="MOEX:OZON",
+                    gateway_factory=lambda: gateway,
+                    include_order_book=False,
+                    include_trades=True,
+                )
+            )
+            await asyncio.sleep(0)
+            assert task.done()
+            return await asyncio.wait_for(task, timeout=0.1)
+        finally:
+            feed._refresh_lock.release()
+
+    snapshot = asyncio.run(run())
+    selected = cast(dict[str, Any], snapshot["selected_details"])
+
+    assert gateway.order_book_calls == []
+    assert gateway.last_trade_calls == []
+    assert selected["instrument_id"] == "MOEX:OZON"
+    assert selected["recent_market_trades"][0]["price"] == "3427.25000000"
+    assert selected["trade_tape_source"] == "persisted_data_only_trade_tape"
+    assert selected["dashboard_trade_tape_fallback"] == "persisted"
+
+
+def test_dashboard_market_feed_selected_book_uses_read_model_without_broker_poll() -> None:
+    feed_module = importlib.import_module("trading_api.dashboard_market_feed")
+    now = datetime.now(tz=UTC)
+    bids = [
+        {"price": f"{100 - index * 0.01:.2f}", "quantity_lots": str(100 + index)}
+        for index in range(10)
+    ]
+    asks = [
+        {"price": f"{100.10 + index * 0.01:.2f}", "quantity_lots": str(80 + index)}
+        for index in range(10)
+    ]
+    base_row = MarketInstrumentOverview(
+        instrument_id="MOEX:LKOH",
+        ticker="LKOH",
+        official_exchange_open=True,
+        quote_source="db_read_model",
+        last_price_source="db_read_model",
+        last_price=Decimal("4252.00"),
+        last_price_at=now,
+        received_ts=now,
+        exchange_ts=now,
+        stale_by_received_time=False,
+        stale_by_exchange_time=False,
+        is_price_stale=False,
+        freshness_status="fresh",
+        quote_status="live",
+        order_book_source="live_exchange_order_book",
+        order_book_ts=now,
+        order_book_age_ms=500,
+        order_book_stale=False,
+        order_book_summary={
+            "source": "tbank_get_order_book_polling_fallback",
+            "bids": bids,
+            "asks": asks,
+        },
+    )
+    overview = MarketOverviewResponse(generated_at=now, instruments=[base_row])
+    ref = SimpleNamespace(
+        instrument_id="MOEX:LKOH",
+        ticker="LKOH",
+        figi="figi-lkoh",
+        instrument_uid="uid-lkoh",
+    )
+    gateway = FakeCoreDashboardFeedGateway()
+    feed = feed_module.DashboardMarketFeedService()
+    feed._overview = MarketOverviewResponse(
+        generated_at=now - timedelta(seconds=1),
+        instruments=[
+            base_row.model_copy(
+                update={
+                    "order_book_summary": {
+                        "source": "cached_partial_broker_book",
+                        "bids": bids[:1],
+                        "asks": asks[:1],
+                    }
+                }
+            )
+        ],
+    )
+
+    snapshot = asyncio.run(
+        feed.snapshot(
+            base_overview=overview,
+            refs=[ref],
+            selected_instrument="MOEX:LKOH",
+            gateway_factory=lambda: gateway,
+            include_order_book=True,
+            include_trades=False,
+        )
+    )
+    selected = cast(dict[str, Any], snapshot["selected_details"])
+
+    assert gateway.order_book_calls == []
+    assert len(selected["order_book_summary"]["bids"]) == 10
+    assert len(selected["order_book_summary"]["asks"]) == 10
+    assert selected["order_book_stale"] is False
+
+
+def test_dashboard_market_feed_selected_book_endpoint_skips_preflight_and_broker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app_module = importlib.import_module("trading_api.app")
+
+    monkeypatch.setenv("DASHBOARD_MARKET_FEED_ENABLED", "true")
+    force_exchange_open(monkeypatch)
+    gateway = FakeCoreDashboardFeedGateway()
+    monkeypatch.setattr(app_module, "_readonly_tbank_gateway", lambda: gateway)
+
+    async def unexpected_preflight(*args: object, **kwargs: object) -> SessionPreflightResponse:
+        del args, kwargs
+        raise AssertionError("selected order-book split endpoint must not run preflight")
+
+    monkeypatch.setattr(app_module, "_run_dashboard_session_preflight", unexpected_preflight)
+    database = DatabaseService(
+        f"sqlite+pysqlite:///{tmp_path / 'dashboard-feed-selected-fast-book.db'}"
+    )
+    Base.metadata.create_all(database.engine)
+    seed_database(database)
+    with database.session_scope() as session:
+        now = datetime.now(tz=UTC)
+        summary = (
+            session.execute(
+                select(OrderBookSummary).where(OrderBookSummary.instrument_id == "MOEX:SBER")
+            )
+            .scalars()
+            .one()
+        )
+        summary.ts_utc = now
+        summary.exchange_ts = now
+        summary.received_ts = now
+        summary.depth_levels = 10
+        summary.summary_payload = {
+            "bids": [
+                {"price": f"{100 - index * 0.01:.2f}", "quantity_lots": str(100 + index)}
+                for index in range(10)
+            ],
+            "asks": [
+                {"price": f"{100.1 + index * 0.01:.2f}", "quantity_lots": str(80 + index)}
+                for index in range(10)
+            ],
+        }
+    app = create_fastapi_app(database=database, report_task_client=FakeReportTaskClient())
+    client = TestClient(app)
+
+    snapshot = client.get(
+        "/dashboard/market-feed/snapshot",
+        headers={"X-API-Role": "observer"},
+        params={
+            "selected_instrument": "MOEX:SBER",
+            "include_order_book": True,
+            "include_trades": False,
+        },
+    ).json()
+
+    selected = snapshot["selected_details"]
+    assert gateway.order_book_calls == []
+    assert selected["instrument_id"] == "MOEX:SBER"
+    assert len(selected["order_book_summary"]["bids"]) == 10
+    assert len(selected["order_book_summary"]["asks"]) == 10
+
+
+def test_dashboard_market_feed_recomputes_cached_trade_tape_status_from_age(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    feed_module = importlib.import_module("trading_api.dashboard_market_feed")
+    monkeypatch.setenv("DASHBOARD_TRADES_MAX_EXCHANGE_AGE_SECONDS", "15")
+    now = datetime.now(tz=UTC)
+    trade_ts = now - timedelta(seconds=45)
+    row = MarketInstrumentOverview(
+        instrument_id="MOEX:SBER",
+        ticker="SBER",
+        official_exchange_open=True,
+        quote_source="db_read_model",
+        last_price_source="db_read_model",
+        last_price=Decimal("314.00"),
+        last_price_at=trade_ts,
+        received_ts=now,
+        exchange_ts=trade_ts,
+        stale_by_received_time=False,
+        stale_by_exchange_time=False,
+        is_price_stale=False,
+        freshness_status="fresh",
+        quote_status="live",
+        recent_market_trades=[
+            {
+                "instrument_id": "MOEX:SBER",
+                "price": "314.00000000",
+                "quantity_lots": "4",
+                "side": "buy",
+                "exchange_ts": trade_ts.isoformat(),
+                "source": feed_module.PERSISTED_TRADE_TAPE_SOURCE,
+            }
+        ],
+        market_trades_source=feed_module.PERSISTED_TRADE_TAPE_SOURCE,
+        market_trades_age_ms=1_000,
+        trade_tape_source=feed_module.PERSISTED_TRADE_TAPE_SOURCE,
+        trade_tape_status="live",
+        trade_tape_reason="fresh",
+        persisted_trade_tape_available=True,
+        latest_persisted_trade_ts=trade_ts,
+        dashboard_trade_tape_fallback="persisted",
+    )
+
+    updated = feed_module._with_explicit_trade_tape_status(row)
+
+    assert updated is not None
+    assert updated.trade_tape_status == "stale"
+    assert updated.trade_tape_reason == "trade_exchange_ts_too_old"
+    assert updated.market_trades_source == "persisted_data_only_trade_tape"
+    assert updated.dashboard_trade_tape_fallback == "persisted"
+
+
+def test_read_service_normalizes_visible_trade_tape_rows() -> None:
+    read_service_module = importlib.import_module("trading_api.read_service")
+    now = datetime.now(tz=UTC)
+    rows = [
+        {
+            "price": str(314 + index),
+            "exchange_ts": (now - timedelta(milliseconds=index)).isoformat(),
+            "quantity_lots": "1",
+            "source": "market_trades_stream",
+        }
+        for index in range(14)
+    ]
+
+    visible = read_service_module._visible_market_trade_rows(rows)
+    age_ms = read_service_module._market_trade_rows_age_ms(visible, now=now)
+
+    assert len(visible) == 10
+    assert visible[0]["price"] == "314"
+    assert visible[-1]["price"] == "323"
+    assert read_service_module._trade_tape_status(visible, age_ms) == "live"
+    assert read_service_module._trade_tape_reason(visible, age_ms) == "fresh"
+
+
 def test_dashboard_market_feed_keeps_full_selected_ladder_over_partial_refresh(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -2430,7 +2932,7 @@ def test_dashboard_market_feed_keeps_full_selected_ladder_over_partial_refresh(
         params=params,
     ).json()
 
-    assert gateway.order_book_calls == 2
+    assert gateway.order_book_calls == 1
     assert len(first["selected_details"]["order_book_summary"]["bids"]) == 5
     assert len(first["selected_details"]["order_book_summary"]["asks"]) == 5
     assert len(second["selected_details"]["order_book_summary"]["bids"]) == 5
@@ -2603,7 +3105,7 @@ def test_dashboard_market_feed_normalizes_live_session_label_from_broker_status(
     assert snapshot["selected_details"]["order_book_source"] == "live_order_book_mid"
 
 
-def test_market_overview_uses_dashboard_feed_with_readonly_quote_board_books(
+def test_market_overview_uses_read_model_without_readonly_quote_board_books(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -2618,10 +3120,10 @@ def test_market_overview_uses_dashboard_feed_with_readonly_quote_board_books(
     sber = next(row for row in market["instruments"] if row["instrument_id"] == "MOEX:SBER")
 
     assert len(market["instruments"]) == 8
-    assert sber["last_price"] == "313.19"
+    assert sber["last_price"] == "100.05000000"
     assert sber["last_price_source"] == "broker_quote_exchange_closed"
-    assert sber["order_book_summary"]["bids"]
-    assert sber["quote_payload"]["dashboard_live_feed"] is True
+    assert "bids" not in sber["order_book_summary"]
+    assert sber["quote_payload"].get("dashboard_live_feed") is not True
 
 
 def test_dashboard_display_endpoints_do_not_run_operator_preflight(

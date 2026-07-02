@@ -30,6 +30,8 @@ flowchart LR
 
 | Таблица | Назначение |
 | --- | --- |
+| `market_microstructure_snapshot` | Data-only spread/depth/imbalance/freshness fact written only by the data-only collector after allowed preflight. Dashboard display refresh must not write it. |
+| `market_trade_sample` | Persisted data-only trade tape sample from real broker `market_trades` stream events or bounded readonly `GetLastTrades` polling; no fake rows for empty broker responses. |
 | `session_run` | Существующий логический запуск торговой сессии/подсессии без рестарта `trade-core`. |
 | `micro_session` | Отдельная hourly micro-session как аналитический объект: статус, freeze/close time, snapshot rollover. |
 | `market_context_snapshot` | Feature snapshot рынка около кандидата, блокера или отчета: цены, spread, depth, imbalance, freshness. Для blocked opportunity дополнительно пишется `snapshot_kind=counterfactual_seed_snapshot`. |
@@ -82,6 +84,8 @@ JSONB используется только для расширяемого ко
 - `risk_payload`
 - `result_payload`
 - `report_payload`
+- `snapshot_payload`
+- `payload`
 - `audit_payload`
 
 Аналитически важные поля вынесены в отдельные колонки: `stage_seq`, `stage_name`, `stage_outcome`, `blocker_code`, `blocker_family`, `measured_value`, `threshold_value`, `commission_gross`, `commission_net`, `slippage_bp`, `pnl_gross`, `pnl_net`.
