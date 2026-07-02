@@ -294,8 +294,12 @@ class MarketInstrumentOverview(BaseModel):
     recent_market_trades: list[JsonPayload] = Field(default_factory=list)
     market_trades_source: str | None = None
     market_trades_age_ms: int | None = None
+    trade_tape_source: str | None = None
     trade_tape_status: str | None = None
     trade_tape_reason: str | None = None
+    persisted_trade_tape_available: bool = False
+    latest_persisted_trade_ts: datetime | None = None
+    dashboard_trade_tape_fallback: str | None = None
     reason_code: str | None = None
     warning: str | None = None
     order_book_summary: JsonPayload = Field(default_factory=dict)

@@ -261,6 +261,15 @@ timestamp remains inside the trade freshness budget. Once that budget expires, o
 when the selected instrument changes, old rows must be dropped and the panel must
 show the explicit status/reason instead of implying live trades.
 
+Selected details distinguish live broker trades from persisted data-only tape.
+When live `GetLastTrades` is empty/stale but persisted rows are fresh, the UI may
+show the persisted rows with `trade_tape_source=persisted_data_only_trade_tape`,
+`persisted_trade_tape_available=true`, `latest_persisted_trade_ts`, and
+`dashboard_trade_tape_fallback=persisted`. The badge/source text must make that
+fallback visible and must not say the rows are a live broker tape. If the
+persisted rows are stale, the table stays empty and the stale status/reason is
+shown instead.
+
 Acceptance is covered by
 `scripts/run_selected_orderbook_trade_tape_acceptance.py --instruments MOEX:SBER,MOEX:GAZP,MOEX:VTBR`.
 The check verifies selected switching, bid/ask rendering when broker levels are

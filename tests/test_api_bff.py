@@ -45,6 +45,7 @@ from trading_common.db.models import (
     InstrumentRegistry,
     MarketCandle,
     MarketMicrostructureSnapshot,
+    MarketTradeSample,
     OrderBookSummary,
     OrderIntent,
     PositionSnapshot,
@@ -1031,6 +1032,37 @@ def seed_database(database: DatabaseService) -> None:
                     risk_limits={"max_position_lots": 10},
                 ),
             ]
+        )
+
+
+def seed_persisted_trade_sample(
+    database: DatabaseService,
+    *,
+    exchange_ts: datetime,
+    price: Decimal = Decimal("313.70"),
+    instrument_id: str = "uid-sber",
+) -> None:
+    received_ts = exchange_ts + timedelta(milliseconds=100)
+    with database.session_scope() as session:
+        session.add(
+            MarketTradeSample(
+                **session_context(),
+                instrument_id=instrument_id,
+                exchange_ts=exchange_ts,
+                received_ts=received_ts,
+                price=price,
+                quantity_lots=Decimal("4"),
+                side="buy",
+                source="tbank_get_last_trades_polling_fallback",
+                venue_type="official_exchange",
+                trade_id=f"trade-{price}-{int(exchange_ts.timestamp())}",
+                include_in_calibration=False,
+                payload={
+                    "source": "tbank_get_last_trades_polling_fallback",
+                    "exchange_ts": exchange_ts.isoformat(),
+                    "received_ts": received_ts.isoformat(),
+                },
+            )
         )
 
 
@@ -2145,6 +2177,153 @@ def test_dashboard_market_feed_preserves_trade_tape_over_empty_get_last_trades(
     assert second["selected_details"]["recent_market_trades"][0]["price"] == "313.40"
     assert second["status"]["trade_tape_available"] is True
     assert "no_market_trades_samples" not in second["warnings"]
+
+
+def test_dashboard_market_feed_uses_persisted_trade_tape_when_live_empty(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app_module = importlib.import_module("trading_api.app")
+    from sqlalchemy import text
+
+    monkeypatch.setenv("DASHBOARD_MARKET_FEED_ENABLED", "true")
+    monkeypatch.setenv("DASHBOARD_TRADES_REFRESH_SECONDS", "0")
+    force_exchange_open(monkeypatch)
+    monkeypatch.setattr(
+        app_module,
+        "_readonly_tbank_gateway",
+        lambda: FakeCoreDashboardFeedGateway(),
+    )
+    database = DatabaseService(f"sqlite+pysqlite:///{tmp_path / 'dashboard-feed-persisted.db'}")
+    Base.metadata.create_all(database.engine)
+    seed_database(database)
+    seed_persisted_trade_sample(
+        database,
+        exchange_ts=datetime.now(tz=UTC) - timedelta(seconds=2),
+        price=Decimal("313.70"),
+    )
+    app = create_fastapi_app(database=database, report_task_client=FakeReportTaskClient())
+    client = TestClient(app)
+
+    tables = ("market_trade_sample", "signal_candidate", "order_intent", "broker_order")
+    with database.session_scope() as session:
+        before = {
+            table: session.execute(text(f"select count(*) from {table}")).scalar()
+            for table in tables
+        }
+
+    snapshot = client.get(
+        "/dashboard/market-feed/snapshot",
+        headers={"X-API-Role": "observer"},
+        params={
+            "selected_instrument": "MOEX:SBER",
+            "include_order_book": False,
+            "include_trades": True,
+        },
+    ).json()
+
+    with database.session_scope() as session:
+        after = {
+            table: session.execute(text(f"select count(*) from {table}")).scalar()
+            for table in tables
+        }
+
+    selected = snapshot["selected_details"]
+    assert before == after
+    assert selected["recent_market_trades"][0]["price"] == "313.70000000"
+    assert selected["market_trades_source"] == "persisted_data_only_trade_tape"
+    assert selected["trade_tape_source"] == "persisted_data_only_trade_tape"
+    assert selected["trade_tape_status"] == "live"
+    assert selected["trade_tape_reason"] == "fresh"
+    assert selected["persisted_trade_tape_available"] is True
+    assert selected["latest_persisted_trade_ts"] is not None
+    assert selected["dashboard_trade_tape_fallback"] == "persisted"
+    assert snapshot["status"]["dashboard_trade_tape_fallback"] == "persisted"
+
+
+def test_dashboard_market_feed_live_trades_take_precedence_over_persisted_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app_module = importlib.import_module("trading_api.app")
+
+    monkeypatch.setenv("DASHBOARD_MARKET_FEED_ENABLED", "true")
+    monkeypatch.setenv("DASHBOARD_TRADES_REFRESH_SECONDS", "0")
+    force_exchange_open(monkeypatch)
+    monkeypatch.setattr(app_module, "_readonly_tbank_gateway", lambda: FakeOldFirstTradesGateway())
+    database = DatabaseService(f"sqlite+pysqlite:///{tmp_path / 'dashboard-feed-live-wins.db'}")
+    Base.metadata.create_all(database.engine)
+    seed_database(database)
+    seed_persisted_trade_sample(
+        database,
+        exchange_ts=datetime.now(tz=UTC) - timedelta(seconds=1),
+        price=Decimal("313.70"),
+    )
+    app = create_fastapi_app(database=database, report_task_client=FakeReportTaskClient())
+    client = TestClient(app)
+
+    snapshot = client.get(
+        "/dashboard/market-feed/snapshot",
+        headers={"X-API-Role": "observer"},
+        params={
+            "selected_instrument": "MOEX:SBER",
+            "include_order_book": False,
+            "include_trades": True,
+        },
+    ).json()
+
+    selected = snapshot["selected_details"]
+    assert selected["recent_market_trades"][0]["price"] == "314.01"
+    assert selected["market_trades_source"] == "tbank_get_last_trades"
+    assert selected["trade_tape_status"] == "live"
+    assert selected["dashboard_trade_tape_fallback"] is None
+
+
+def test_dashboard_market_feed_stale_persisted_trade_tape_does_not_masquerade_as_live(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app_module = importlib.import_module("trading_api.app")
+
+    monkeypatch.setenv("DASHBOARD_MARKET_FEED_ENABLED", "true")
+    monkeypatch.setenv("DASHBOARD_TRADES_REFRESH_SECONDS", "0")
+    monkeypatch.setenv("DASHBOARD_TRADES_MAX_EXCHANGE_AGE_SECONDS", "15")
+    force_exchange_open(monkeypatch)
+    monkeypatch.setattr(
+        app_module,
+        "_readonly_tbank_gateway",
+        lambda: FakeCoreDashboardFeedGateway(),
+    )
+    database = DatabaseService(
+        f"sqlite+pysqlite:///{tmp_path / 'dashboard-feed-stale-persisted.db'}"
+    )
+    Base.metadata.create_all(database.engine)
+    seed_database(database)
+    seed_persisted_trade_sample(
+        database,
+        exchange_ts=datetime.now(tz=UTC) - timedelta(seconds=45),
+        price=Decimal("313.70"),
+    )
+    app = create_fastapi_app(database=database, report_task_client=FakeReportTaskClient())
+    client = TestClient(app)
+
+    snapshot = client.get(
+        "/dashboard/market-feed/snapshot",
+        headers={"X-API-Role": "observer"},
+        params={
+            "selected_instrument": "MOEX:SBER",
+            "include_order_book": False,
+            "include_trades": True,
+        },
+    ).json()
+
+    selected = snapshot["selected_details"]
+    assert selected["recent_market_trades"] == []
+    assert selected["market_trades_source"] == "persisted_data_only_trade_tape"
+    assert selected["trade_tape_status"] == "stale"
+    assert selected["trade_tape_reason"] == "trade_exchange_ts_too_old"
+    assert selected["persisted_trade_tape_available"] is True
+    assert selected["dashboard_trade_tape_fallback"] is None
 
 
 def test_dashboard_market_feed_waits_for_selected_refresh_when_cache_incomplete() -> None:

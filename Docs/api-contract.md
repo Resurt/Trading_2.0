@@ -425,6 +425,12 @@ display budget return an empty list with the same stale status/reason. Use
 `market_trades_source=tbank_get_last_trades` for that diagnostic source; raw
 internal names such as stale diagnostic source variants must not appear in the
 operator UI.
+When readonly `GetLastTrades` is empty or stale but the persisted data-only trade
+tape has recent rows for the same selected instrument, selected details may return
+those rows with `market_trades_source=trade_tape_source=persisted_data_only_trade_tape`,
+`persisted_trade_tape_available=true`, `latest_persisted_trade_ts`, and
+`dashboard_trade_tape_fallback=persisted`. This is a display fallback only: it
+must not be labeled as live broker feed and must not write database rows.
 Dashboard trade tape is display-only. It may use T-Bank all-source market trades
 to avoid an empty exchange-only tape, but those rows are not primary calibration
 rows and must not create `market_microstructure_snapshot`,

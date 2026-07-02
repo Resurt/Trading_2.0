@@ -18,6 +18,7 @@ from trading_api.schemas import MarketInstrumentOverview, MarketOverviewResponse
 
 GatewayFactory = Callable[[], Any]
 _READONLY_BROKER_EXECUTOR: ThreadPoolExecutor | None = None
+PERSISTED_TRADE_TAPE_SOURCE = "persisted_data_only_trade_tape"
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,8 +130,20 @@ class DashboardMarketFeedService:
             "quote_rows_count": len(overview.instruments) if overview else 0,
             "order_book_available": _selected_order_book_available(selected),
             "trade_tape_available": bool(selected and selected.recent_market_trades),
+            "trade_tape_source": selected.trade_tape_source if selected else None,
             "trade_tape_status": selected.trade_tape_status if selected else None,
             "trade_tape_reason": selected.trade_tape_reason if selected else None,
+            "persisted_trade_tape_available": (
+                selected.persisted_trade_tape_available if selected else False
+            ),
+            "latest_persisted_trade_ts": (
+                selected.latest_persisted_trade_ts.isoformat()
+                if selected and selected.latest_persisted_trade_ts is not None
+                else None
+            ),
+            "dashboard_trade_tape_fallback": (
+                selected.dashboard_trade_tape_fallback if selected else None
+            ),
             "broker_calls_paused_until": (
                 self._broker_calls_paused_until.isoformat()
                 if self._broker_calls_paused_until is not None
@@ -407,7 +420,11 @@ class DashboardMarketFeedService:
                     gateway=gateway,
                     ref=ref,
                     instrument=instrument,
-                    recent_trades=[],
+                    recent_trades=(
+                        instrument.recent_market_trades
+                        if instrument.market_trades_source == PERSISTED_TRADE_TAPE_SOURCE
+                        else []
+                    ),
                     record_warnings=False,
                 )
                 return instrument.instrument_id, payload
@@ -538,6 +555,9 @@ class DashboardMarketFeedService:
             current.recent_market_trades,
             source=current.market_trades_source or "order_book_summary_payload",
         )
+        persisted_trade_update = (
+            trade_update if _is_persisted_trade_update(trade_update) else None
+        )
         current = current.model_copy(update=trade_update)
         recent_trades = cast(list[dict[str, object]], trade_update["recent_market_trades"])
         if should_refresh_trades and not _has_stream_trade_rows(current):
@@ -548,15 +568,27 @@ class DashboardMarketFeedService:
             )
             self._last_trades_refresh_at[selected_instrument] = now
             if fetched_trades:
-                trade_update = _visible_trade_tape_update(
+                live_trade_update = _visible_trade_tape_update(
                     fetched_trades,
                     source="tbank_get_last_trades",
                 )
+                trade_update = _prefer_live_or_persisted_trade_update(
+                    live_trade_update,
+                    persisted_trade_update,
+                )
+            elif current.persisted_trade_tape_available:
+                trade_update = _persisted_trade_state_from_current(current)
+                if _is_live_trade_update(trade_update):
+                    trade_update = _mark_persisted_trade_fallback(trade_update)
             else:
                 trade_update = _visible_trade_tape_update(
                     current.recent_market_trades,
                     source=current.market_trades_source or "order_book_summary_payload",
                 )
+                if _is_live_trade_update(trade_update) and _is_persisted_trade_update(
+                    trade_update
+                ):
+                    trade_update = _mark_persisted_trade_fallback(trade_update)
             current = current.model_copy(update=trade_update)
             recent_trades = cast(list[dict[str, object]], trade_update["recent_market_trades"])
 
@@ -1453,8 +1485,12 @@ def _preserve_visible_trade_tape(
             "recent_market_trades": cached.recent_market_trades,
             "market_trades_source": cached.market_trades_source,
             "market_trades_age_ms": _market_trades_age_ms(cached_trades),
+            "trade_tape_source": cached.trade_tape_source,
             "trade_tape_status": cached.trade_tape_status,
             "trade_tape_reason": cached.trade_tape_reason,
+            "persisted_trade_tape_available": cached.persisted_trade_tape_available,
+            "latest_persisted_trade_ts": cached.latest_persisted_trade_ts,
+            "dashboard_trade_tape_fallback": cached.dashboard_trade_tape_fallback,
         }
     )
 
@@ -1596,6 +1632,13 @@ def _price_levels(value: object, *, reverse: bool) -> list[tuple[Decimal, Decima
 
 
 def _market_trades_age_ms(trades: Sequence[dict[str, object]]) -> int | None:
+    newest = _latest_trade_ts(trades)
+    if newest is None:
+        return None
+    return max(0, int((datetime.now(tz=UTC) - newest).total_seconds() * 1000))
+
+
+def _latest_trade_ts(trades: Sequence[dict[str, object]]) -> datetime | None:
     newest: datetime | None = None
     for trade in trades:
         ts = _datetime_or_none(
@@ -1606,9 +1649,7 @@ def _market_trades_age_ms(trades: Sequence[dict[str, object]]) -> int | None:
         )
         if ts is not None and (newest is None or ts > newest):
             newest = ts
-    if newest is None:
-        return None
-    return max(0, int((datetime.now(tz=UTC) - newest).total_seconds() * 1000))
+    return newest
 
 
 def _trade_sort_ts(trade: dict[str, object]) -> datetime:
@@ -1637,11 +1678,18 @@ def _visible_trade_tape_update(
     *,
     source: str,
     stale_source: str | None = None,
+    dashboard_trade_tape_fallback: str | None = None,
 ) -> dict[str, object]:
     normalized = [dict(item) for item in trades or [] if isinstance(item, dict)]
     age_ms = _market_trades_age_ms(normalized)
     status = _trade_tape_status(normalized, age_ms)
     reason = _trade_tape_reason(normalized, age_ms)
+    persisted_available = source == PERSISTED_TRADE_TAPE_SOURCE and bool(normalized)
+    latest_persisted_trade_ts = _latest_trade_ts(normalized) if persisted_available else None
+    fallback = (
+        dashboard_trade_tape_fallback
+        or ("persisted" if persisted_available and status == "live" else None)
+    )
     read_model_source = source == "order_book_summary_payload" or source.startswith(
         "market_trades_stream"
     )
@@ -1654,8 +1702,12 @@ def _visible_trade_tape_update(
             "recent_market_trades": normalized,
             "market_trades_source": source,
             "market_trades_age_ms": age_ms,
+            "trade_tape_source": source,
             "trade_tape_status": status,
             "trade_tape_reason": reason,
+            "persisted_trade_tape_available": persisted_available,
+            "latest_persisted_trade_ts": latest_persisted_trade_ts,
+            "dashboard_trade_tape_fallback": fallback,
         }
     return {
         "recent_market_trades": [],
@@ -1665,8 +1717,69 @@ def _visible_trade_tape_update(
             else source or stale_source or "stale_market_trades_samples"
         ),
         "market_trades_age_ms": age_ms,
+        "trade_tape_source": (
+            "no_market_trades_samples"
+            if not normalized
+            else source or stale_source or "stale_market_trades_samples"
+        ),
         "trade_tape_status": status,
         "trade_tape_reason": reason,
+        "persisted_trade_tape_available": persisted_available,
+        "latest_persisted_trade_ts": latest_persisted_trade_ts,
+        "dashboard_trade_tape_fallback": None,
+    }
+
+
+def _prefer_live_or_persisted_trade_update(
+    live_update: dict[str, object],
+    persisted_update: dict[str, object] | None,
+) -> dict[str, object]:
+    if _is_live_trade_update(live_update):
+        return live_update
+    if persisted_update is not None and _is_live_trade_update(persisted_update):
+        return _mark_persisted_trade_fallback(persisted_update)
+    return live_update
+
+
+def _is_live_trade_update(update: dict[str, object]) -> bool:
+    trades = update.get("recent_market_trades")
+    return (
+        isinstance(trades, list)
+        and bool(trades)
+        and update.get("trade_tape_status") in {"live", "fresh"}
+    )
+
+
+def _is_persisted_trade_update(update: dict[str, object]) -> bool:
+    return update.get("market_trades_source") == PERSISTED_TRADE_TAPE_SOURCE
+
+
+def _mark_persisted_trade_fallback(update: dict[str, object]) -> dict[str, object]:
+    return {
+        **update,
+        "market_trades_source": PERSISTED_TRADE_TAPE_SOURCE,
+        "trade_tape_source": PERSISTED_TRADE_TAPE_SOURCE,
+        "persisted_trade_tape_available": True,
+        "dashboard_trade_tape_fallback": "persisted",
+    }
+
+
+def _persisted_trade_state_from_current(
+    current: MarketInstrumentOverview,
+) -> dict[str, object]:
+    trades = current.recent_market_trades or []
+    return {
+        "recent_market_trades": trades,
+        "market_trades_source": PERSISTED_TRADE_TAPE_SOURCE,
+        "market_trades_age_ms": _market_trades_age_ms(trades)
+        if trades
+        else current.market_trades_age_ms,
+        "trade_tape_source": PERSISTED_TRADE_TAPE_SOURCE,
+        "trade_tape_status": current.trade_tape_status or "stale",
+        "trade_tape_reason": current.trade_tape_reason or "trade_exchange_ts_too_old",
+        "persisted_trade_tape_available": True,
+        "latest_persisted_trade_ts": current.latest_persisted_trade_ts,
+        "dashboard_trade_tape_fallback": current.dashboard_trade_tape_fallback,
     }
 
 

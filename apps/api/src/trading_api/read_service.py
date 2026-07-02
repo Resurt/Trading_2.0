@@ -620,6 +620,23 @@ class BffReadService:
         if not include_details:
             order_book_summary = _compact_order_book_summary(order_book_summary)
             recent_market_trades = []
+        persisted_market_trades = (
+            self._recent_persisted_market_trades(instrument_id, registry=registry)
+            if include_details
+            else []
+        )
+        latest_persisted_trade_ts = _latest_market_trade_ts(persisted_market_trades)
+        market_trades_source = (
+            "order_book_summary_payload"
+            if recent_market_trades
+            else "no_market_trades_samples"
+        )
+        if persisted_market_trades and _latest_market_trade_ts(
+            persisted_market_trades
+        ) > _latest_market_trade_ts(recent_market_trades):
+            recent_market_trades = persisted_market_trades
+            market_trades_source = "persisted_data_only_trade_tape"
+        market_trades_age_ms = _market_trade_rows_age_ms(recent_market_trades, now=now)
 
         return {
             "instrument_id": instrument_id,
@@ -688,12 +705,11 @@ class BffReadService:
             ),
             "order_book_stale": order_book_stale,
             "recent_market_trades": recent_market_trades,
-            "market_trades_source": (
-                "order_book_summary_payload"
-                if recent_market_trades
-                else "no_market_trades_samples"
-            ),
-            "market_trades_age_ms": None,
+            "market_trades_source": market_trades_source,
+            "market_trades_age_ms": market_trades_age_ms,
+            "trade_tape_source": market_trades_source,
+            "persisted_trade_tape_available": bool(persisted_market_trades),
+            "latest_persisted_trade_ts": latest_persisted_trade_ts,
             "reason_code": (
                 official_decision.reason_code
                 if official_exchange_closed
@@ -751,6 +767,32 @@ class BffReadService:
             .order_by(OrderBookSummary.ts_utc.desc())
             .limit(1)
         ).scalars().first()
+
+    def _recent_persisted_market_trades(
+        self,
+        instrument_id: str,
+        *,
+        registry: InstrumentRegistry | None = None,
+        limit: int = 20,
+    ) -> list[JsonPayload]:
+        aliases = _instrument_storage_aliases(instrument_id, registry)
+        rows = (
+            self._session.execute(
+                select(MarketTradeSample)
+                .where(MarketTradeSample.instrument_id.in_(aliases))
+                .order_by(
+                    func.coalesce(
+                        MarketTradeSample.exchange_ts,
+                        MarketTradeSample.received_ts,
+                    ).desc(),
+                    MarketTradeSample.received_ts.desc(),
+                )
+                .limit(limit)
+            )
+            .scalars()
+            .all()
+        )
+        return [_market_trade_sample_payload(row) for row in rows]
 
     def _latest_market_candle(self, instrument_id: str) -> MarketCandle | None:
         try:
@@ -3225,6 +3267,59 @@ def _microstructure_snapshot_response(
         source=snapshot.source,
         payload=snapshot.snapshot_payload,
     )
+
+
+def _market_trade_sample_payload(row: MarketTradeSample) -> JsonPayload:
+    exchange_ts = _ensure_utc_datetime(row.exchange_ts) if row.exchange_ts is not None else None
+    received_ts = _ensure_utc_datetime(row.received_ts)
+    payload = row.payload if isinstance(row.payload, dict) else {}
+    return {
+        "instrument_id": row.instrument_id,
+        "price": str(row.price),
+        "quantity_lots": str(row.quantity_lots) if row.quantity_lots is not None else None,
+        "side": row.side,
+        "trade_id": row.trade_id,
+        "exchange_ts": exchange_ts.isoformat() if exchange_ts is not None else None,
+        "received_ts": received_ts.isoformat(),
+        "ts_utc": (exchange_ts or received_ts).isoformat(),
+        "source": "persisted_data_only_trade_tape",
+        "broker_source": row.source,
+        "venue_type": row.venue_type,
+        "persisted": True,
+        "include_in_calibration": row.include_in_calibration,
+        "payload_source": payload.get("source"),
+    }
+
+
+def _latest_market_trade_ts(rows: list[JsonPayload]) -> datetime:
+    latest: datetime | None = None
+    for row in rows:
+        ts = _datetime_or_none(
+            row.get("exchange_ts")
+            or row.get("ts_utc")
+            or row.get("time")
+            or row.get("ts")
+        )
+        if ts is not None and (latest is None or ts > latest):
+            latest = ts
+    return latest or datetime.min.replace(tzinfo=UTC)
+
+
+def _market_trade_rows_age_ms(rows: list[JsonPayload], *, now: datetime) -> int | None:
+    latest = _latest_market_trade_ts(rows)
+    if latest == datetime.min.replace(tzinfo=UTC):
+        return None
+    return max(0, int((now - latest).total_seconds() * 1000))
+
+
+def _datetime_or_none(value: object) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except Exception:
+        return None
+    return _ensure_utc_datetime(parsed)
 
 
 def _decimal_avg(values: list[Decimal]) -> Decimal | None:

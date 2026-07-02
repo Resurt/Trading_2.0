@@ -220,8 +220,12 @@ export interface MarketInstrumentOverview {
   recent_market_trades: JsonPayload[];
   market_trades_source: string | null;
   market_trades_age_ms: number | null;
+  trade_tape_source?: string | null;
   trade_tape_status?: string | null;
   trade_tape_reason?: string | null;
+  persisted_trade_tape_available?: boolean;
+  latest_persisted_trade_ts?: string | null;
+  dashboard_trade_tape_fallback?: string | null;
   reason_code: string | null;
   warning: string | null;
   order_book_summary: JsonPayload;

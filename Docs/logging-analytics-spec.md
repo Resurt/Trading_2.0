@@ -1326,7 +1326,23 @@ are rejected as `late_after_session_close` even if older snapshot payloads
 incorrectly contain `include_in_calibration=true` or `calibration_allowed=true`.
 Analytics payloads expose `microstructure_rows_total`,
 `calibration_microstructure_rows`, `calibration_rejected_rows`, and
-`calibration_rejection_reasons`.
+`calibration_rejection_reasons`. Summary reports also expose
+`calibration_eligibility_breakdown` with separate
+`strict_timestamp_eligible_count`, `diagnostic_eligible_count`,
+`strict_calibration_eligible_count`, `tape_confirmed_eligible_count`, and
+`strict_timestamp_eligible_but_calibration_rejected_count`. A row may have real
+`exchange_ts`/`received_ts` and still be rejected from strict calibration when it
+is stale or otherwise fails calibration quality checks.
+
+Stream gap reporting must be scoped and classified rather than emitted as a
+single unqualified count. Data-shadow summary reports include
+`stream_gap_warning_count`, `stream_gap_info_count`,
+`stream_gap_classification_counts`, `stream_gap_severity_counts`,
+`stream_gap_by_instrument`, and `stream_gap_details_top`. Classification values
+include `real_stream_gap`, `stale_snapshot_gap`, `session_boundary_gap`,
+`session_closed_gap`, `source_switch_gap`, and `sparse_identifier_gap`.
+`stream_gaps_detected` is reserved for warning-severity gaps; session-boundary or
+sparse-identifier gaps remain visible as info diagnostics.
 
 Known-invalid primary market-data rows must not remain in PostgreSQL primary
 calibration/logging tables. Rows created after session close, during an official
@@ -1368,6 +1384,10 @@ reported with `trade_tape_status=stale`,
 `market_trades_source=tbank_get_last_trades`. Rows newer than
 `DASHBOARD_TRADES_DELAYED_DISPLAY_SECONDS` may be displayed as a delayed tape,
 but they must not be stored or labeled as live trade rows.
+If dashboard selected details fall back to persisted data-only trade samples, the
+source fields must be `persisted_data_only_trade_tape` and
+`dashboard_trade_tape_fallback=persisted`; this fallback is read-only and must
+not create `market_trade_sample` rows or trading entities.
 
 Data-shadow runtime status exposes supervisor observability separately from
 analytics facts: `supervisor_enabled`, `supervisor_state`,

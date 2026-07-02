@@ -219,6 +219,8 @@ function reasonLabel(reason: string | null | undefined): string {
     missing_trade_exchange_ts: "нет времени сделок",
     no_market_trades_samples: "лента сделок не пришла",
     tbank_get_last_trades: "GetLastTrades не дал свежих сделок",
+    persisted_data_only_trade_tape: "persisted data-only trade tape",
+    persisted: "persisted data-only tape fallback",
     instrument_unavailable: "инструмент недоступен",
     not_for_calibration: "не для калибровки",
     broker_quote_not_for_calibration: "брокерская котировка только для отображения",
@@ -648,7 +650,11 @@ function tradeTapeReason(): string {
 }
 
 function tradeTapeSourceLabel(): string {
-  const source = selectedInstrument.value?.market_trades_source;
+  const source =
+    selectedInstrument.value?.trade_tape_source ?? selectedInstrument.value?.market_trades_source;
+  if (selectedInstrument.value?.dashboard_trade_tape_fallback === "persisted") {
+    return reasonLabel("persisted");
+  }
   if (source === "tbank_get_last_trades") {
     return "GetLastTrades не дал свежих сделок";
   }

@@ -477,6 +477,14 @@ and `market_trades_source=tbank_get_last_trades`. Older diagnostic rows are
 hidden behind the same explicit stale status/reason. A fresh order book with a
 stale trade tape is a display limitation, not a data-only logging failure by
 itself.
+If `GetLastTrades` is transiently empty or stale while `market_trade_sample`
+continues to grow, selected details may use the persisted data-only tape as a
+read-only dashboard fallback. Expected fields are
+`trade_tape_source=persisted_data_only_trade_tape`,
+`persisted_trade_tape_available=true`, `latest_persisted_trade_ts`, and
+`dashboard_trade_tape_fallback=persisted`. Do not treat this as live broker tape,
+do not backfill/fabricate trades, and do not write any rows from the dashboard
+feed path.
 Data-only collector stream names must include `market_trades`; otherwise the
 dashboard can only report `no_market_trades_samples`/stale diagnostics and cannot
 show a true live tape.
@@ -484,6 +492,13 @@ If `market_trades` is alive but the selected tape remains empty, verify that
 trade-core maps broker `instrument_uid`/`figi` to canonical `MOEX:*` in stream
 payloads. The dashboard joins selected rows by canonical `instrument_id`; broker
 ids are retained only as `broker_instrument_id`.
+For analytics warnings, inspect structured classifications before escalating.
+`stream_gaps_detected` means warning-severity gaps remain, while
+`session_boundary_gap` and `sparse_identifier_gap` are informational context.
+`some_rows_not_calibration_eligible` should be read with
+`calibration_eligibility_breakdown`: strict timestamp eligibility only means real
+`exchange_ts`/`received_ts` are present; strict calibration eligibility can still
+reject stale or invalid rows.
 Selected order-book refresh must remain below the freshness threshold. The current
 defaults are `DASHBOARD_SELECTED_BOOK_REFRESH_SECONDS=3` and
 `DASHBOARD_ORDER_BOOK_MAX_EXCHANGE_AGE_SECONDS=30`; if operators see an open-market
