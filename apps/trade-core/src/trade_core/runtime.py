@@ -160,6 +160,41 @@ DEFAULT_INSTRUMENTS: tuple[InstrumentRef, ...] = (
         class_code="TQBR",
         ticker="GAZP",
     ),
+    InstrumentRef(
+        instrument_id="MOEX:LKOH",
+        class_code="TQBR",
+        ticker="LKOH",
+    ),
+    InstrumentRef(
+        instrument_id="MOEX:YDEX",
+        class_code="TQBR",
+        ticker="YDEX",
+    ),
+    InstrumentRef(
+        instrument_id="MOEX:TATN",
+        class_code="TQBR",
+        ticker="TATN",
+    ),
+    InstrumentRef(
+        instrument_id="MOEX:GMKN",
+        class_code="TQBR",
+        ticker="GMKN",
+    ),
+    InstrumentRef(
+        instrument_id="MOEX:OZON",
+        class_code="TQBR",
+        ticker="OZON",
+    ),
+    InstrumentRef(
+        instrument_id="MOEX:VTBR",
+        class_code="TQBR",
+        ticker="VTBR",
+    ),
+    InstrumentRef(
+        instrument_id="MOEX:T",
+        class_code="TQBR",
+        ticker="T",
+    ),
 )
 
 
@@ -260,9 +295,7 @@ class TradeCoreRuntimeConfig:
                 env.get("DATA_SHADOW_COLLECT_TRADES"),
                 default=True,
             ),
-            data_only_trades_poll_seconds=float(
-                env.get("DATA_SHADOW_TRADES_POLL_SECONDS", "5")
-            ),
+            data_only_trades_poll_seconds=float(env.get("DATA_SHADOW_TRADES_POLL_SECONDS", "5")),
             data_only_trades_lookback_seconds=int(
                 env.get("DATA_SHADOW_TRADES_LOOKBACK_SECONDS", "60")
             ),
@@ -273,15 +306,11 @@ class TradeCoreRuntimeConfig:
                 env.get("TRADING_DIVIDEND_SYNC_ENABLED"),
                 default=default_dividend_sync_enabled,
             ),
-            dividend_sync_lookback_days=int(
-                env.get("TRADING_DIVIDEND_SYNC_LOOKBACK_DAYS", "730")
-            ),
+            dividend_sync_lookback_days=int(env.get("TRADING_DIVIDEND_SYNC_LOOKBACK_DAYS", "730")),
             dividend_sync_lookahead_days=int(
                 env.get("TRADING_DIVIDEND_SYNC_LOOKAHEAD_DAYS", "365")
             ),
-            dividend_sync_interval_hours=int(
-                env.get("TRADING_DIVIDEND_SYNC_INTERVAL_HOURS", "24")
-            ),
+            dividend_sync_interval_hours=int(env.get("TRADING_DIVIDEND_SYNC_INTERVAL_HOURS", "24")),
             dividend_sync_fail_open=_bool_env(
                 env.get("TRADING_DIVIDEND_SYNC_FAIL_OPEN"),
                 default=False,
@@ -1046,9 +1075,7 @@ class TradeCoreRuntime:
                     now=event.observed_at,
                 )
             if event.event_type == "session_run_opened":
-                self._current_snapshot = result.snapshot.with_micro_session(
-                    event.micro_session_id
-                )
+                self._current_snapshot = result.snapshot.with_micro_session(event.micro_session_id)
                 await self._snapshot_positions(
                     reason="micro_session_session_run_opened",
                     now=event.observed_at,
@@ -1230,9 +1257,7 @@ class TradeCoreRuntime:
                     "data_only_polling_fallback": True,
                     "include_in_calibration": calibration_allowed,
                     "calibration_allowed": calibration_allowed,
-                    "venue_type": (
-                        "official_exchange" if calibration_allowed else "display_only"
-                    ),
+                    "venue_type": ("official_exchange" if calibration_allowed else "display_only"),
                 }
                 received_at = now_utc
                 order_book = order_book_from_mapping(payload, received_at=received_at)
@@ -1647,9 +1672,7 @@ class TradeCoreRuntime:
         if not self.config.data_only_start_arming_enabled:
             return False, None, "data_only_start_arming_disabled"
         if preflight.get("official_exchange_closed") is True:
-            return False, None, str(
-                preflight.get("reason_code") or "official_exchange_closed"
-            )
+            return False, None, str(preflight.get("reason_code") or "official_exchange_closed")
         now_msk = _ensure_msk(now)
         trading_date = _payload_date(preflight, "trading_date") or now_msk.date()
         next_window_at = _preflight_datetime_msk(
@@ -1740,8 +1763,8 @@ class TradeCoreRuntime:
         last_error: Exception | None = None
         for attempt in range(1, attempts + 1):
             self.stats.preflight_phase = "preflight_running"
-            self.stats.preflight_started_at = (
-                self.stats.preflight_started_at or datetime.now(tz=UTC)
+            self.stats.preflight_started_at = self.stats.preflight_started_at or datetime.now(
+                tz=UTC
             )
             self.stats.next_retry_at = None
             self._write_audit_event(
@@ -1830,9 +1853,7 @@ class TradeCoreRuntime:
         payload["daily_collection_active"] = self.stats.daily_collection_active
         payload["cancelled_by_operator"] = self.stats.cancelled_by_operator
         payload["completed_for_day"] = self.stats.completed_for_day
-        payload["last_window_completed_at"] = _iso_or_none(
-            self.stats.last_window_completed_at
-        )
+        payload["last_window_completed_at"] = _iso_or_none(self.stats.last_window_completed_at)
         payload["next_resume_at"] = _iso_or_none(self.stats.next_resume_at)
         payload["day_complete_at"] = _iso_or_none(self.stats.completed_for_day_at)
         return payload
@@ -1909,9 +1930,7 @@ class TradeCoreRuntime:
             "working_instruments": list(self.stats.working_instruments),
             "cancelled_by_operator": self.stats.cancelled_by_operator,
             "completed_for_day": self.stats.completed_for_day,
-            "next_collection_window_at": _iso_or_none(
-                self.stats.next_collection_window_at
-            ),
+            "next_collection_window_at": _iso_or_none(self.stats.next_collection_window_at),
             "remaining_windows_today": self.stats.remaining_windows_today,
             "next_resume_at": _iso_or_none(self.stats.next_resume_at),
             "paused_at": _iso_or_none(self.stats.paused_at),
@@ -1930,16 +1949,12 @@ class TradeCoreRuntime:
             "trade_samples_seen": self.stats.data_only_trade_samples_seen,
             "trade_poll_count": self.stats.data_only_trade_polls,
             "trade_poll_error_count": self.stats.data_only_trade_poll_errors,
-            "last_data_only_trade_poll_at": _iso_or_none(
-                self.stats.last_data_only_trade_poll_at
-            ),
+            "last_data_only_trade_poll_at": _iso_or_none(self.stats.last_data_only_trade_poll_at),
             "last_trade_sample_at": _iso_or_none(self.stats.last_trade_sample_at),
             "trade_collection_reason": self.stats.trade_collection_reason,
             "trade_poll_interval_seconds": self.config.data_only_trades_poll_seconds,
             "trade_poll_lookback_seconds": self.config.data_only_trades_lookback_seconds,
-            "trade_poll_max_per_instrument": (
-                self.config.data_only_trades_max_per_instrument
-            ),
+            "trade_poll_max_per_instrument": (self.config.data_only_trades_max_per_instrument),
             "readonly_calls_only": True,
             "real_orders_disabled": True,
             "strategy_trading_disabled": True,
@@ -2053,9 +2068,7 @@ class TradeCoreRuntime:
             else _enum_payload(
                 preflight.get("session_type"),
                 SessionType,
-                default=SessionType.WEEKEND
-                if now_msk.weekday() >= 5
-                else SessionType.WEEKDAY_MAIN,
+                default=SessionType.WEEKEND if now_msk.weekday() >= 5 else SessionType.WEEKDAY_MAIN,
             )
         )
         window_open = (
@@ -2267,9 +2280,7 @@ class TradeCoreRuntime:
         )
         self._loaded_strategy_config_identity = identity
         action = (
-            "strategy_config_loaded"
-            if previous_identity is None
-            else "strategy_config_reloaded"
+            "strategy_config_loaded" if previous_identity is None else "strategy_config_reloaded"
         )
         payload = {
             "strategy_id": self.strategy_config.strategy_id,
@@ -2336,9 +2347,7 @@ class TradeCoreRuntime:
         if command_type in {"stop", "pause"}:
             return await self._stop_data_only_collection(
                 command,
-                requested_state="stopped_by_operator"
-                if command_type == "stop"
-                else "stopped",
+                requested_state="stopped_by_operator" if command_type == "stop" else "stopped",
                 reason_code="data_only_collection_stopped"
                 if command_type == "stop"
                 else "data_only_collection_paused",
@@ -2414,8 +2423,7 @@ class TradeCoreRuntime:
                 )
         market_open = isinstance(preflight, Mapping) and preflight.get("market_open") is True
         collection_allowed = (
-            isinstance(preflight, Mapping)
-            and preflight.get("data_only_collection_allowed") is True
+            isinstance(preflight, Mapping) and preflight.get("data_only_collection_allowed") is True
         )
         reason_code = (
             str(preflight.get("reason_code") or "market_closed_expected")
@@ -2438,10 +2446,13 @@ class TradeCoreRuntime:
                 requested_instruments = _tuple_payload(payload, "instruments") or tuple(
                     instrument.instrument_id for instrument in self.config.instruments
                 )
-                working_instruments = _tuple_payload(
-                    annotated_preflight,
-                    "working_instruments",
-                ) or requested_instruments
+                working_instruments = (
+                    _tuple_payload(
+                        annotated_preflight,
+                        "working_instruments",
+                    )
+                    or requested_instruments
+                )
                 self.robot_control_state = "armed_until_next_window"
                 self.stats.collector_state = "armed_until_next_window"
                 self.stats.current_window_state = "armed_until_next_window"
@@ -2464,9 +2475,7 @@ class TradeCoreRuntime:
                     trading_date=next_window.trading_date,
                     after=preflight_now,
                 )
-                annotated_preflight["next_collection_window_at"] = (
-                    next_window.start_at.isoformat()
-                )
+                annotated_preflight["next_collection_window_at"] = next_window.start_at.isoformat()
                 annotated_preflight["next_resume_at"] = next_window.start_at.isoformat()
                 annotated_preflight["command_status"] = "armed_until_next_window"
                 self._data_only_preflight_payload = annotated_preflight
@@ -2639,9 +2648,7 @@ class TradeCoreRuntime:
                 "trade_collection_enabled": self.config.data_only_collect_trades,
                 "trade_poll_interval_seconds": self.config.data_only_trades_poll_seconds,
                 "trade_poll_lookback_seconds": self.config.data_only_trades_lookback_seconds,
-                "trade_poll_max_per_instrument": (
-                    self.config.data_only_trades_max_per_instrument
-                ),
+                "trade_poll_max_per_instrument": (self.config.data_only_trades_max_per_instrument),
                 "preflight_result": self._data_only_preflight_payload,
             },
         )
@@ -2664,9 +2671,7 @@ class TradeCoreRuntime:
                 "trade_collection_enabled": self.config.data_only_collect_trades,
                 "trade_poll_interval_seconds": self.config.data_only_trades_poll_seconds,
                 "trade_poll_lookback_seconds": self.config.data_only_trades_lookback_seconds,
-                "trade_poll_max_per_instrument": (
-                    self.config.data_only_trades_max_per_instrument
-                ),
+                "trade_poll_max_per_instrument": (self.config.data_only_trades_max_per_instrument),
             },
         )
 
@@ -2687,9 +2692,7 @@ class TradeCoreRuntime:
         self.stats.current_window_state = requested_state
         self.stats.daily_collection_active = False
         self.stats.day_collection_state = (
-            "cancelled_by_operator"
-            if requested_state == "stopped_by_operator"
-            else requested_state
+            "cancelled_by_operator" if requested_state == "stopped_by_operator" else requested_state
         )
         self.stats.cancelled_by_operator = requested_state == "stopped_by_operator"
         self.stats.completed_for_day = False
@@ -2752,9 +2755,7 @@ class TradeCoreRuntime:
             broker_order = order_repository.get_broker_order_by_request_order_id(
                 intent.request_order_id
             )
-            exchange_order_id = (
-                broker_order.exchange_order_id if broker_order is not None else None
-            )
+            exchange_order_id = broker_order.exchange_order_id if broker_order is not None else None
             try:
                 cancel_result = await execution.cancel_order(
                     intent,
@@ -2807,9 +2808,7 @@ class TradeCoreRuntime:
         self.metrics.set_working_orders_after_stop(remaining)
         self.metrics.inc_emergency_stop(result="degraded" if failed else "applied")
         self.robot_control_state = "degraded" if failed else "emergency_stopped"
-        reason_code = (
-            "runtime_emergency_stop_degraded" if failed else "runtime_emergency_stopped"
-        )
+        reason_code = "runtime_emergency_stop_degraded" if failed else "runtime_emergency_stopped"
         return (
             reason_code,
             {
@@ -2935,7 +2934,7 @@ class TradeCoreRuntime:
         except Exception as exc:
             msg = (
                 "T-Bank SDK extra is required for sandbox/shadow/production. "
-                "Install with: python -m pip install -e \".[tbank]\" --extra-index-url "
+                'Install with: python -m pip install -e ".[tbank]" --extra-index-url '
                 "https://opensource.tbank.ru/api/v4/projects/238/packages/pypi/simple"
             )
             raise RuntimeError(msg) from exc
@@ -3861,9 +3860,7 @@ def default_trading_schedule(moment: datetime) -> TradingSchedule:
     trading_date = local.date()
     if local.weekday() >= 5:
         return TradingSchedule(
-            windows=(
-                _window(trading_date, SessionKind.WEEKEND, time(10, 0), time(19, 0)),
-            )
+            windows=(_window(trading_date, SessionKind.WEEKEND, time(10, 0), time(19, 0)),)
         )
     return TradingSchedule(
         windows=(
@@ -3913,9 +3910,7 @@ def trading_schedule_from_response(
             continue
         try:
             start_at = _ensure_msk(datetime.fromisoformat(str(item["start_at"])))
-            calendar_date = date.fromisoformat(
-                str(item.get("calendar_date", item["trading_date"]))
-            )
+            calendar_date = date.fromisoformat(str(item.get("calendar_date", item["trading_date"])))
             windows.append(
                 ScheduleWindow(
                     session_type=_schedule_session_type(

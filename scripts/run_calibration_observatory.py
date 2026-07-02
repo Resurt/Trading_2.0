@@ -34,7 +34,7 @@ from trading_common.db.service import DatabaseService
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--universe", default="SBER,GAZP")
+    parser.add_argument("--universe", default="SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T")
     parser.add_argument("--lookback-days", type=int, default=20)
     parser.add_argument("--windows", default="7d,20d,60d,90d,180d,365d")
     parser.add_argument(

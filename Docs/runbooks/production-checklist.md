@@ -96,23 +96,23 @@ docker compose ps
 
 ## Historical calibration gate
 
-Перед controlled minimal live нужно зафиксировать результаты исторического
-прогона:
+РџРµСЂРµРґ controlled minimal live РЅСѓР¶РЅРѕ Р·Р°С„РёРєСЃРёСЂРѕРІР°С‚СЊ СЂРµР·СѓР»СЊС‚Р°С‚С‹ РёСЃС‚РѕСЂРёС‡РµСЃРєРѕРіРѕ
+РїСЂРѕРіРѕРЅР°:
 
-- backfill минимум `90d` по активным инструментам завершён без placeholder
+- backfill РјРёРЅРёРјСѓРј `90d` РїРѕ Р°РєС‚РёРІРЅС‹Рј РёРЅСЃС‚СЂСѓРјРµРЅС‚Р°Рј Р·Р°РІРµСЂС€С‘РЅ Р±РµР· placeholder
   `instrument_uid`;
-- `historical_data_quality_report.coverage_pct` и invalid OHLC reviewed;
-- `historical_db_replay` повторно проходит идемпотентно без дублей;
-- `counterfactual_result` построен для blocked/cancelled/rejected
-  opportunities по горизонтам `+5m/+10m/+15m`;
-- `historical_report_rebuild` построил hourly/daily reports по
+- `historical_data_quality_report.coverage_pct` Рё invalid OHLC reviewed;
+- `historical_db_replay` РїРѕРІС‚РѕСЂРЅРѕ РїСЂРѕС…РѕРґРёС‚ РёРґРµРјРїРѕС‚РµРЅС‚РЅРѕ Р±РµР· РґСѓР±Р»РµР№;
+- `counterfactual_result` РїРѕСЃС‚СЂРѕРµРЅ РґР»СЏ blocked/cancelled/rejected
+  opportunities РїРѕ РіРѕСЂРёР·РѕРЅС‚Р°Рј `+5m/+10m/+15m`;
+- `historical_report_rebuild` РїРѕСЃС‚СЂРѕРёР» hourly/daily reports РїРѕ
   `session_type`, `instrument_id`, `timeframe`;
-- `calibration_report` содержит blocker ranking, missed opportunity summary,
-  gross/net PnL proxy, cost sensitivity и recommendations;
-- ни один historical/shadow replay шаг не вызвал real `PostOrder` или
+- `calibration_report` СЃРѕРґРµСЂР¶РёС‚ blocker ranking, missed opportunity summary,
+  gross/net PnL proxy, cost sensitivity Рё recommendations;
+- РЅРё РѕРґРёРЅ historical/shadow replay С€Р°Рі РЅРµ РІС‹Р·РІР°Р» real `PostOrder` РёР»Рё
   `CancelOrder`.
 
-Проверка:
+РџСЂРѕРІРµСЂРєР°:
 
 ```powershell
 python scripts/run_launch_readiness.py --mode historical-replay
@@ -124,7 +124,7 @@ python scripts/run_launch_readiness.py --mode historical-final-calibration
 Production preflight requires clean T-Bank instrument resolution:
 
 ```powershell
-python scripts/run_tbank_instrument_resolve.py --instruments SBER,GAZP,LKOH --strict --json-output
+python scripts/run_tbank_instrument_resolve.py --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T --strict --json-output
 python scripts/run_launch_readiness.py --mode instrument-resolution
 python scripts/run_launch_readiness.py --mode production-preflight
 ```
@@ -143,7 +143,7 @@ imbalance, freshness, stream gaps and latency:
 ```powershell
 set TRADING_DATA_ONLY_SHADOW=true
 python scripts/run_data_shadow_summary_report.py --lookback-hours 6 --json-output
-python scripts/run_launch_readiness.py --mode data-shadow --instruments SBER,GAZP
+python scripts/run_launch_readiness.py --mode data-shadow --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T
 ```
 
 Data-only shadow is readonly. It cannot be used to justify live orders by itself; it only supplies
@@ -155,7 +155,7 @@ Before any strategy shadow or live consideration, run diagnostic-only analytics:
 
 ```powershell
 python scripts/run_intraday_analytics.py --date YYYY-MM-DD --mode data_shadow --json-output
-python scripts/run_calibration_observatory.py --universe SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR --lookback-days 20 --mode data_shadow --json-output
+python scripts/run_calibration_observatory.py --universe SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T --lookback-days 20 --mode data_shadow --json-output
 ```
 
 Required review:

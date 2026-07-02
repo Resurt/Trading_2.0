@@ -85,6 +85,7 @@ class BlockerCode(StrEnum):
     DIVIDEND_CALENDAR_UNAVAILABLE = "dividend_calendar_unavailable"
     FUTURE_DIVIDEND_RISK_WINDOW = "future_dividend_risk_window"
     SHORT_BLOCKED_DIVIDEND_WINDOW = "short_blocked_dividend_window"
+    T_PRO_FREE_QUOTA_EXHAUSTED = "t_pro_free_quota_exhausted"
 
 
 class CancelReasonCode(StrEnum):
@@ -289,6 +290,9 @@ class RiskLimits:
     block_short_on_special_day: bool = True
     special_day_trade_policy: str = "shadow_only"
     dividend_sync_fail_open: bool = False
+    t_pro_subscription_active: bool | None = None
+    t_executed_trades_today: int = 0
+    t_block_after_free_quota: bool = False
 
     @classmethod
     def from_strategy_config(cls, config: ConfigDrivenStrategyConfig) -> RiskLimits:

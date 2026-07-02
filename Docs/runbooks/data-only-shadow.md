@@ -66,16 +66,16 @@ strict dual-freshness calibration.
 Dry-run, no broker calls:
 
 ```bash
-python scripts/run_data_only_shadow_smoke.py --instruments SBER,GAZP --minutes 1 --dry-run --json-output
+python scripts/run_data_only_shadow_smoke.py --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T --minutes 1 --dry-run --json-output
 ```
 
 Readonly live smoke, only when token and market data access are configured:
 
 ```bash
 set TRADING_DATA_ONLY_SHADOW=true
-python scripts/run_tbank_instrument_resolve.py --instruments SBER,GAZP --strict --json-output
-python scripts/run_tbank_dividend_sync.py --instruments SBER,GAZP --lookback-days 730 --lookahead-days 365 --json-output
-python scripts/run_data_only_shadow_smoke.py --instruments SBER,GAZP --minutes 10 --require-dividend-sync --json-output
+python scripts/run_tbank_instrument_resolve.py --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T --strict --json-output
+python scripts/run_tbank_dividend_sync.py --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T --lookback-days 730 --lookahead-days 365 --json-output
+python scripts/run_data_only_shadow_smoke.py --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T --minutes 10 --require-dividend-sync --json-output
 ```
 
 If the market is closed, zero order book samples is a warning, not a trading failure.
@@ -96,7 +96,7 @@ The report exposes `exchange_ts_present_count`, `exchange_ts_missing_count`,
 
 ```bash
 set TRADING_DATA_ONLY_SHADOW=true
-python scripts/run_launch_readiness.py --mode data-shadow --instruments SBER,GAZP --shadow-minutes 10
+python scripts/run_launch_readiness.py --mode data-shadow --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T --shadow-minutes 10
 ```
 
 The gate checks SDK import, instrument registry readiness, dividend sync readiness unless explicitly
@@ -125,13 +125,18 @@ Run diagnostic analytics after data-only shadow has collected enough market hour
 
 ```bash
 python scripts/run_intraday_analytics.py --date YYYY-MM-DD --mode data_shadow --json-output
-python scripts/run_calibration_observatory.py --universe SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR --lookback-days 20 --mode data_shadow --json-output
+python scripts/run_calibration_observatory.py --universe SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T --lookback-days 20 --mode data_shadow --json-output
 ```
 
 Outputs:
 
 - `.local/collection_reports/intraday/`
 - `.local/collection_reports/calibration_observatory/`
+
+Current core universe is `SBER, GAZP, LKOH, YDEX, TATN, GMKN, OZON, VTBR, T`.
+`T` is РњРљРџРђРћ В«Рў-РўРµС…РЅРѕР»РѕРіРёРёВ» (`MOEX:T`, TQBR, ISIN `RU000A107UL4`). Treat
+`lot_size`, `min_price_increment`, `figi` and `instrument_uid` as resolver or
+`instrument_registry` facts; do not seed them from env defaults.
 
 Interpretation boundary:
 
@@ -150,7 +155,7 @@ availability. After a schema/pipeline change, verify during an open collection
 window with:
 
 ```bash
-python scripts/run_live_exchange_ts_trade_tape_diagnostic.py --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR --minutes 10 --json-output
+python scripts/run_live_exchange_ts_trade_tape_diagnostic.py --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T --minutes 10 --json-output
 ```
 
 The script is readonly. It calls `GetOrderBook`, `GetLastPrices`,
@@ -166,9 +171,9 @@ Every live data-only smoke must run session/calendar preflight before starting r
 Required order:
 
 ```bash
-python scripts/run_tbank_instrument_resolve.py --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR --strict --json-output
-python scripts/run_tbank_dividend_sync.py --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR --lookback-days 730 --lookahead-days 365 --json-output
-python scripts/run_data_only_shadow_smoke.py --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR --minutes 0 --preflight-only --require-dividend-sync --json-output
+python scripts/run_tbank_instrument_resolve.py --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T --strict --json-output
+python scripts/run_tbank_dividend_sync.py --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T --lookback-days 730 --lookahead-days 365 --json-output
+python scripts/run_data_only_shadow_smoke.py --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T --minutes 0 --preflight-only --require-dividend-sync --json-output
 ```
 
 Preflight fields include `market_open`, `market_closed_expected`, `reason_code`,
@@ -182,7 +187,7 @@ CLI smoke and API `/session/preflight` use the same `TradingSessionPreflightServ
 rules. For fresh API comparison during incident triage, call:
 
 ```text
-GET /session/preflight?instruments=SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR&mode=data_shadow&cache=false
+GET /session/preflight?instruments=SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T&mode=data_shadow&cache=false
 ```
 
 Operator-facing session state is reconciled from fresh preflight. `/session/current`
@@ -252,7 +257,7 @@ Weekend handling:
 Readiness gate:
 
 ```bash
-python scripts/run_launch_readiness.py --mode data-shadow --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR --shadow-minutes 10 --gate-timeout-seconds 900
+python scripts/run_launch_readiness.py --mode data-shadow --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T --shadow-minutes 10 --gate-timeout-seconds 900
 ```
 
 The readiness gate first runs preflight-only. If the market is expected closed, it passes with
@@ -267,7 +272,7 @@ warning; do not retry aggressively, reduce the universe or stream batch size.
 The dashboard Start button is not a blind start command. It first calls:
 
 ```text
-GET /session/preflight?instruments=SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR&mode=data_shadow
+GET /session/preflight?instruments=SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T&mode=data_shadow
 ```
 
 Current policy: the dashboard preflight is advisory only. The Start button must not
@@ -295,7 +300,7 @@ Stop remains a controlled operator command. In data-only mode it stops/cancels m
 stream tasks, moves collector state to `stopped_by_operator`, and shows the result in
 the command status strip. It does not wait for intraday, summary, calibration, or
 other report generation. The dashboard must immediately switch the data-only logging
-panel from active collection to `Останавливается`/`Сбор логов остановлен` after the
+panel from active collection to `РћСЃС‚Р°РЅР°РІР»РёРІР°РµС‚СЃСЏ`/`РЎР±РѕСЂ Р»РѕРіРѕРІ РѕСЃС‚Р°РЅРѕРІР»РµРЅ` after the
 operator command is accepted, then reconcile with `/runtime/data-shadow/status`.
 Trade-core runs a fast robot-command poller
 (`TRADING_ROBOT_COMMAND_POLL_INTERVAL_SECONDS`, default `0.25`) so Stop does not
@@ -336,7 +341,7 @@ fresh snapshots are growing, use this controlled Stop -> rebuild -> Start flow:
    GET http://localhost:8001/health
    GET /runtime/data-shadow/status
    GET /robot/status
-   GET /session/preflight?instruments=SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR&mode=data_shadow&cache=false
+   GET /session/preflight?instruments=SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T&mode=data_shadow&cache=false
    ```
 
 2. Stop collection through the operator API before touching Docker:
@@ -375,7 +380,7 @@ fresh snapshots are growing, use this controlled Stop -> rebuild -> Start flow:
    {
      "mode": "data_shadow",
      "reason": "restart_after_controlled_docker_rebuild",
-     "instruments": "SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR",
+     "instruments": "SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T",
      "real_orders_disabled": true,
      "strategy_trading_disabled": true
    }
@@ -384,7 +389,7 @@ fresh snapshots are growing, use this controlled Stop -> rebuild -> Start flow:
    If the current session is open, acceptance is `collector_state=collecting` and
    either `stream_alive=true` or both `market_microstructure_snapshot` and
    `order_book_summary` counts grow. Check this for at least one minute after
-   Start; prefer confirming 8/8 instruments have fresh snapshots. Trading entity
+   Start; prefer confirming 9/9 instruments have fresh snapshots. Trading entity
    deltas and `PostOrder`/`CancelOrder` must stay zero.
 
 5. If the current session is closed but the next same-day collection window is
@@ -592,7 +597,7 @@ Closed-session dashboard quotes and selected order books are display-only. They
 must keep `quote_allowed_for_data_collection=false`, must not use live exchange
 labels, and must set `include_in_calibration=false` /
 `calibration_market_quality_score=0`.
-The dashboard ribbon should show `Рынок закрыт` / `Торги закрыты` when the
+The dashboard ribbon should show `Р С‹РЅРѕРє Р·Р°РєСЂС‹С‚` / `РўРѕСЂРіРё Р·Р°РєСЂС‹С‚С‹` when the
 feed session is closed. OTC or indicative broker quotes are shown only as
 `venue_type`/`quote_source`; they must not make the UI jump back to
 `weekday_evening`, `continuous_trading`, or `data_only_collection_allowed=true`.
@@ -676,7 +681,7 @@ audit_event records with the rejection reason.
 Before any future strategy shadow:
 
 - Resolve the full core universe through broker/SDK or a previously resolved
-  `instrument_registry` cache: `SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR`.
+  `instrument_registry` cache: `SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T`.
 - Treat `lot_size` and `min_price_increment` as broker/registry facts, not env
   defaults. Env instruments identify tickers only.
 - Unknown `lot_size` blocks entry risk with `instrument_lot_size_unknown`.
@@ -688,6 +693,11 @@ Before any future strategy shadow:
 - EXIT candidates reduce existing positions and must not be blocked by position
   limit when projected lots decrease. Exit without position or oversized exit is
   blocked explicitly.
+- `MOEX:T` has an instrument-specific Pro commission scenario: first 15 executed
+  buy/sell trades per Moscow trading day can be commission-free only when Pro
+  subscription is explicitly known active. The quota counts executions/fills, not
+  submitted orders and not lot quantity. Unknown Pro status and exhausted quota
+  use fallback project commission.
 - Short entry permission is fail-closed when account or instrument permission is
   unknown. Short exits that reduce risk remain allowed by the short-permission
   gate.

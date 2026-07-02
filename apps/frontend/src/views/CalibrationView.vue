@@ -21,7 +21,7 @@ import StatusPill from "../components/ui/StatusPill.vue";
 type LooseRow = Record<string, unknown>;
 
 const lookbackDays = ref(10);
-const instruments = ref("SBER,GAZP");
+const instruments = ref("SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T");
 const timeframes = ref("5m,10m,15m");
 const strategyId = ref("baseline");
 const calibrationScope = ref("primary_normal_days");
@@ -29,7 +29,7 @@ const loading = ref(false);
 const error = ref("");
 const report = ref<CalibrationResponse | null>(null);
 
-const observatoryUniverse = ref("SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR");
+const observatoryUniverse = ref("SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T");
 const observatoryLookbackDays = ref(20);
 const observatoryWindows = ref("7d,20d,60d,90d,180d,365d");
 const observatoryMode = ref("data_shadow");

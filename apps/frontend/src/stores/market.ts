@@ -10,6 +10,7 @@ import type {
   JsonPayload,
   MarketInstrumentOverview,
   MarketOverviewResponse,
+  RobotStatusResponse,
   WebSocketEnvelope,
 } from "../api/types";
 
@@ -22,6 +23,7 @@ export const CORE_INSTRUMENT_IDS = [
   "MOEX:GMKN",
   "MOEX:OZON",
   "MOEX:VTBR",
+  "MOEX:T",
 ];
 
 const DEFAULT_SELECTED_INSTRUMENT_ID = "MOEX:SBER";
@@ -545,6 +547,43 @@ export const useMarketStore = defineStore("market", () => {
     };
   }
 
+  function applyRobotRuntimeStatus(robotStatus: RobotStatusResponse): void {
+    const nextCollectorState = robotStatus.data_shadow_collector_state;
+    if (!nextCollectorState) {
+      return;
+    }
+    const collecting = nextCollectorState === "collecting";
+    dataShadowStatus.value = {
+      ...dataShadowStatus.value,
+      collector_state: nextCollectorState,
+      data_shadow_collector_state: nextCollectorState,
+      daily_collection_active:
+        robotStatus.daily_collection_active ?? dataShadowStatus.value.daily_collection_active,
+      current_window_state: collecting
+        ? "collecting"
+        : nextCollectorState === "stopped_by_operator"
+          ? "stopped_by_operator"
+          : dataShadowStatus.value.current_window_state,
+      effective_logging_state:
+        robotStatus.effective_logging_state ??
+        (collecting ? "collecting" : dataShadowStatus.value.effective_logging_state),
+      command_status: robotStatus.command_status ?? dataShadowStatus.value.command_status,
+      preflight_phase: robotStatus.preflight_phase ?? dataShadowStatus.value.preflight_phase,
+      start_in_progress: robotStatus.start_in_progress ?? dataShadowStatus.value.start_in_progress,
+      collector_left_running: collecting,
+      reason_code:
+        robotStatus.last_command_reason_code ??
+        (collecting
+          ? dataShadowStatus.value.reason_code
+          : dataShadowStatus.value.reason_code ?? "data_only_collection_stopped"),
+      stream_alive: collecting ? dataShadowStatus.value.stream_alive : false,
+      last_command_id: robotStatus.command_id ?? dataShadowStatus.value.last_command_id,
+      last_command_status: robotStatus.command_status ?? dataShadowStatus.value.last_command_status,
+      last_command_reason_code:
+        robotStatus.last_command_reason_code ?? dataShadowStatus.value.last_command_reason_code,
+    };
+  }
+
   async function connectMarketSocket(): Promise<void> {
     if (marketSocket && marketSocket.readyState < WebSocket.CLOSING) {
       return;
@@ -722,6 +761,7 @@ export const useMarketStore = defineStore("market", () => {
     fetchDataShadowStatus,
     markDataShadowStopping,
     markDataShadowStopped,
+    applyRobotRuntimeStatus,
     connectMarketSocket,
     startDashboardFeed,
     stopDashboardFeed,

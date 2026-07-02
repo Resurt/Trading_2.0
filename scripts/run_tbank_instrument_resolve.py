@@ -143,7 +143,7 @@ async def async_main(args: argparse.Namespace) -> dict[str, object]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--instruments", default="SBER,GAZP")
+    parser.add_argument("--instruments", default="SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T")
     parser.add_argument("--class-code", default="TQBR")
     parser.add_argument("--database-url")
     parser.add_argument("--dry-run", action="store_true")

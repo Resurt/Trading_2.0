@@ -196,7 +196,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--from-date", type=parse_date)
     parser.add_argument("--to-date", type=parse_date)
     parser.add_argument("--lookback-days", type=int, default=365)
-    parser.add_argument("--instruments", default="SBER,GAZP")
+    parser.add_argument("--instruments", default="SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T")
     parser.add_argument("--timeframes", default="5m,10m,15m")
     parser.add_argument(
         "--sessions",
@@ -337,9 +337,7 @@ def load_short_availability(
             InstrumentRegistry.instrument_id,
             InstrumentRegistry.instrument_payload,
             InstrumentRegistry.broker_payload,
-        ).where(
-            InstrumentRegistry.instrument_id.in_(instruments)
-        )
+        ).where(InstrumentRegistry.instrument_id.in_(instruments))
     ).all()
     return {
         str(instrument_id): _short_available_from_payloads(instrument_payload, broker_payload)
@@ -415,14 +413,16 @@ def load_candles(
 ) -> list[CandlePoint]:
     query_timeframes = tuple(sorted(set(timeframes) | {"5m"}))
     rows = session.execute(
-        select(MarketCandle).where(
+        select(MarketCandle)
+        .where(
             MarketCandle.trading_date >= from_date,
             MarketCandle.trading_date <= to_date,
             MarketCandle.instrument_id.in_(instruments),
             MarketCandle.timeframe.in_(query_timeframes),
             MarketCandle.session_type.in_(sessions),
             MarketCandle.is_closed.is_(True),
-        ).order_by(
+        )
+        .order_by(
             MarketCandle.instrument_id,
             MarketCandle.timeframe,
             MarketCandle.open_ts_utc,
@@ -753,14 +753,14 @@ def generate_research_configs(
                 add(
                     ResearchConfig(
                         config_id="",
-                    hypothesis="cost_aware_momentum",
-                    horizon_minutes=15,
-                    side=side,
-                    return_bars=3,
-                    return_threshold_bps=60.0,
-                    edge_margin_bps=float(margin),
+                        hypothesis="cost_aware_momentum",
+                        horizon_minutes=15,
+                        side=side,
+                        return_bars=3,
+                        return_threshold_bps=60.0,
+                        edge_margin_bps=float(margin),
+                    )
                 )
-            )
         if side == "short":
             for bars in (1, 2, 3):
                 for threshold in (20, 30, 45, 60, 90):
@@ -1225,9 +1225,7 @@ def build_report_payload(
         },
         "tested_configs": [result_payload(result) for result in results],
         "passing_configs": [result_payload(result) for result in passing],
-        "rejected_configs": [
-            result_payload(result) for result in results if not result.passed
-        ],
+        "rejected_configs": [result_payload(result) for result in results if not result.passed],
         "best_by_validation_net": result_payload(sorted_by_validation[0]) if results else None,
         "best_by_avg_net": result_payload(sorted_by_avg[0]) if results else None,
         "best_by_stability": result_payload(sorted_by_stability[0]) if results else None,

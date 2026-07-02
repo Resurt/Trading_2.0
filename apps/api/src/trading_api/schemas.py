@@ -609,7 +609,7 @@ class IntradayAnalyticsSnapshotResponse(BaseModel):
 
 
 class CalibrationObservatoryRunRequest(BaseModel):
-    universe: str = "SBER,GAZP"
+    universe: str = "SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T"
     lookback_days: int = Field(default=20, ge=1, le=3660)
     windows: str = "7d,20d,60d,90d,180d,365d"
     mode: str = "all"

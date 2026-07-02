@@ -55,7 +55,7 @@ $env:TBANK_ENVIRONMENT = "live"
 $env:SSL_TBANK_VERIFY = "true"
 $env:TBANK_UNARY_TIMEOUT_FLOOR_SECONDS = "5.0"
 python scripts/run_tbank_sdk_import_check.py
-python scripts/run_historical_candle_backfill.py --instruments SBER,GAZP --lookback-days 90 --raw-interval 1m --derive 5m,10m,15m
+python scripts/run_historical_candle_backfill.py --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T --lookback-days 90 --raw-interval 1m --derive 5m,10m,15m
 docker compose up -d --build trade-core api report-worker frontend
 python -m alembic upgrade head
 ```
@@ -81,7 +81,7 @@ Do not kill `trade-core` for hourly rollovers. Micro-sessions are logical and mu
 
 ## Historical readiness before shadow
 
-Перед live shadow-днём рекомендуется прогнать historical контур:
+РџРµСЂРµРґ live shadow-РґРЅС‘Рј СЂРµРєРѕРјРµРЅРґСѓРµС‚СЃСЏ РїСЂРѕРіРЅР°С‚СЊ historical РєРѕРЅС‚СѓСЂ:
 
 ```powershell
 python scripts/run_historical_data_quality_report.py --lookback-days 90 --json-output
@@ -89,22 +89,22 @@ python scripts/run_historical_replay_from_db.py --lookback-days 90 --strategy-id
 python scripts/run_historical_counterfactual_rebuild.py --lookback-days 90 --strategy-id baseline --json-output
 python scripts/run_historical_report_rebuild.py --lookback-days 90 --strategy-id baseline --include-counterfactual --json-output
 python scripts/run_tbank_dividend_sync.py --lookback-days 730 --lookahead-days 365 --json-output
-python scripts/run_market_special_day_classification.py --lookback-days 90 --instruments SBER,GAZP --json-output
+python scripts/run_market_special_day_classification.py --lookback-days 90 --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T --json-output
 python scripts/run_calibration_report.py --lookback-days 90 --strategy-id baseline --calibration-scope primary_normal_days --require-special-day-classification --json-output
 python scripts/run_launch_readiness.py --mode historical-replay
 python scripts/run_launch_readiness.py --mode historical-final-calibration
 ```
 
-Цель проверки: убедиться, что historical candles покрывают выбранные
-инструменты/таймфреймы, replay создаёт полный decision journal, а
-counterfactual/calibration уже показывают blocker ranking и candidate funnel.
-Shadow mode после этого использует live market data, но продолжает запрещать
+Р¦РµР»СЊ РїСЂРѕРІРµСЂРєРё: СѓР±РµРґРёС‚СЊСЃСЏ, С‡С‚Рѕ historical candles РїРѕРєСЂС‹РІР°СЋС‚ РІС‹Р±СЂР°РЅРЅС‹Рµ
+РёРЅСЃС‚СЂСѓРјРµРЅС‚С‹/С‚Р°Р№РјС„СЂРµР№РјС‹, replay СЃРѕР·РґР°С‘С‚ РїРѕР»РЅС‹Р№ decision journal, Р°
+counterfactual/calibration СѓР¶Рµ РїРѕРєР°Р·С‹РІР°СЋС‚ blocker ranking Рё candidate funnel.
+Shadow mode РїРѕСЃР»Рµ СЌС‚РѕРіРѕ РёСЃРїРѕР»СЊР·СѓРµС‚ live market data, РЅРѕ РїСЂРѕРґРѕР»Р¶Р°РµС‚ Р·Р°РїСЂРµС‰Р°С‚СЊ
 real `PostOrder`/`CancelOrder`.
 ## Shadow Calibration Caveat
 
-Перед shadow live special days должны быть классифицированы. Historical candles не
-калибруют real spread/depth/slippage/latency, поэтому execution thresholds требуют
-подтверждения на shadow live data.
+РџРµСЂРµРґ shadow live special days РґРѕР»Р¶РЅС‹ Р±С‹С‚СЊ РєР»Р°СЃСЃРёС„РёС†РёСЂРѕРІР°РЅС‹. Historical candles РЅРµ
+РєР°Р»РёР±СЂСѓСЋС‚ real spread/depth/slippage/latency, РїРѕСЌС‚РѕРјСѓ execution thresholds С‚СЂРµР±СѓСЋС‚
+РїРѕРґС‚РІРµСЂР¶РґРµРЅРёСЏ РЅР° shadow live data.
 
 ## Dividend Calendar Before Shadow
 
@@ -118,7 +118,7 @@ behaviour for new entries. Future dividend windows are shadow-only by default.
 Shadow uses live readonly broker data. Before starting shadow:
 
 ```powershell
-python scripts/run_tbank_instrument_resolve.py --instruments SBER,GAZP,LKOH --strict --json-output
+python scripts/run_tbank_instrument_resolve.py --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T --strict --json-output
 python scripts/run_launch_readiness.py --mode instrument-resolution
 python scripts/run_launch_readiness.py --mode shadow
 ```
@@ -134,8 +134,8 @@ run data-only shadow to collect live microstructure without strategy evaluation:
 
 ```powershell
 set TRADING_DATA_ONLY_SHADOW=true
-python scripts/run_data_only_shadow_smoke.py --instruments SBER,GAZP --minutes 10 --require-dividend-sync --json-output
-python scripts/run_launch_readiness.py --mode data-shadow --instruments SBER,GAZP
+python scripts/run_data_only_shadow_smoke.py --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T --minutes 10 --require-dividend-sync --json-output
+python scripts/run_launch_readiness.py --mode data-shadow --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T
 ```
 
 Data-only shadow must not create `signal_candidate`, `order_intent`, `broker_order` or

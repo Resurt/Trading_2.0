@@ -64,6 +64,9 @@ from trading_common.db.repositories import RobotCommandRepository
 from trading_common.db.service import DatabaseService
 
 MSK = ZoneInfo("Europe/Moscow")
+CORE_TICKERS = ("SBER", "GAZP", "LKOH", "YDEX", "TATN", "GMKN", "OZON", "VTBR", "T")
+CORE_IDS = tuple(f"MOEX:{ticker}" for ticker in CORE_TICKERS)
+CORE_UIDS = tuple(f"uid-{ticker.lower()}" for ticker in CORE_TICKERS)
 
 
 def msk(year: int, month: int, day: int, hour: int, minute: int = 0) -> datetime:
@@ -134,7 +137,7 @@ def test_runtime_config_enables_data_only_shadow_from_env() -> None:
 def test_default_runtime_instruments_have_no_placeholder_uid() -> None:
     tickers = {instrument.ticker for instrument in DEFAULT_INSTRUMENTS}
 
-    assert {"SBER", "GAZP"} <= tickers
+    assert tickers == {"SBER", "GAZP", "LKOH", "YDEX", "TATN", "GMKN", "OZON", "VTBR", "T"}
     assert all(instrument.instrument_uid is None for instrument in DEFAULT_INSTRUMENTS)
 
 
@@ -292,9 +295,7 @@ class PollingOrderBookGateway(RecordingStreamGateway):
                         "price": "100.04",
                         "quantity_lots": "3",
                         "side": "buy",
-                        "exchange_ts": (now - timedelta(seconds=10))
-                        .astimezone(UTC)
-                        .isoformat(),
+                        "exchange_ts": (now - timedelta(seconds=10)).astimezone(UTC).isoformat(),
                         "trade_id": f"{instrument_id}:trade-1",
                     },
                     {
@@ -304,9 +305,7 @@ class PollingOrderBookGateway(RecordingStreamGateway):
                         "price": "100.06",
                         "quantity_lots": "1",
                         "side": "sell",
-                        "exchange_ts": (now - timedelta(seconds=5))
-                        .astimezone(UTC)
-                        .isoformat(),
+                        "exchange_ts": (now - timedelta(seconds=5)).astimezone(UTC).isoformat(),
                         "trade_id": f"{instrument_id}:trade-2",
                     },
                 ],
@@ -641,11 +640,15 @@ def test_data_only_start_probe_fallback_polls_order_book_and_writes_microstructu
         await runtime.run_cycle(now=msk(2026, 6, 28, 14, 30))
 
         with runtime.database.session_factory() as session:
-            snapshot = session.execute(
-                select(MarketMicrostructureSnapshot).order_by(
-                    MarketMicrostructureSnapshot.ts_utc
+            snapshot = (
+                session.execute(
+                    select(MarketMicrostructureSnapshot).order_by(
+                        MarketMicrostructureSnapshot.ts_utc
+                    )
                 )
-            ).scalars().first()
+                .scalars()
+                .first()
+            )
             assert snapshot is not None
             assert snapshot.session_type == "weekend"
             assert snapshot.session_phase == "continuous_trading"
@@ -730,7 +733,7 @@ def test_data_only_trade_polling_fallback_persists_samples_without_trading_entit
                     select(MarketTradeSample).order_by(MarketTradeSample.instrument_id)
                 ).scalars()
             )
-            assert len(samples) == 2
+            assert len(samples) == len(CORE_TICKERS)
             assert {sample.source for sample in samples} == {
                 "tbank_get_last_trades_polling_fallback"
             }
@@ -741,8 +744,8 @@ def test_data_only_trade_polling_fallback_persists_samples_without_trading_entit
             assert session.scalar(select(func.count()).select_from(OrderIntent)) == 0
             assert session.scalar(select(func.count()).select_from(BrokerOrder)) == 0
 
-        assert len(gateway.last_trade_requests) >= 2
-        assert runtime.stats.data_only_trade_samples_seen >= 2
+        assert len(gateway.last_trade_requests) >= len(CORE_TICKERS)
+        assert runtime.stats.data_only_trade_samples_seen >= len(CORE_TICKERS)
         assert runtime.stats.trade_collection_reason == "trade_samples_persisted"
         assert gateway.post_order_calls == []
         assert gateway.cancel_order_calls == []
@@ -988,12 +991,16 @@ def test_data_only_collection_auto_stops_after_preflight_window_end(tmp_path: Pa
             first_snapshot_count = session.scalar(
                 select(func.count()).select_from(MarketMicrostructureSnapshot)
             )
-            first_snapshot = session.execute(
-                select(MarketMicrostructureSnapshot).order_by(
-                    MarketMicrostructureSnapshot.ts_utc.desc()
+            first_snapshot = (
+                session.execute(
+                    select(MarketMicrostructureSnapshot).order_by(
+                        MarketMicrostructureSnapshot.ts_utc.desc()
+                    )
                 )
-            ).scalars().first()
-            assert first_snapshot_count == 2
+                .scalars()
+                .first()
+            )
+            assert first_snapshot_count == len(CORE_TICKERS)
             assert first_snapshot is not None
             assert first_snapshot.session_phase == "continuous_trading"
             assert first_snapshot.micro_session_id.endswith("T1400")
@@ -1015,21 +1022,29 @@ def test_data_only_collection_auto_stops_after_preflight_window_end(tmp_path: Pa
                 session.scalar(select(func.count()).select_from(MarketMicrostructureSnapshot))
                 == first_snapshot_count
             )
-            auto_stop_event = session.execute(
-                select(AuditEvent).where(
-                    AuditEvent.action == "data_only_shadow_collection_auto_stopped"
+            auto_stop_event = (
+                session.execute(
+                    select(AuditEvent).where(
+                        AuditEvent.action == "data_only_shadow_collection_auto_stopped"
+                    )
                 )
-            ).scalars().first()
+                .scalars()
+                .first()
+            )
             assert auto_stop_event is not None
             assert auto_stop_event.audit_payload["reason_code"] == (
                 "data_only_session_window_closed"
             )
             assert auto_stop_event.audit_payload["collector_state"] == "stopped_day_complete"
-            day_complete_event = session.execute(
-                select(AuditEvent).where(
-                    AuditEvent.action == "data_only_shadow_collection_day_complete"
+            day_complete_event = (
+                session.execute(
+                    select(AuditEvent).where(
+                        AuditEvent.action == "data_only_shadow_collection_day_complete"
+                    )
                 )
-            ).scalars().first()
+                .scalars()
+                .first()
+            )
             assert day_complete_event is not None
             assert session.scalar(select(func.count()).select_from(SignalCandidate)) == 0
             assert session.scalar(select(func.count()).select_from(OrderIntent)) == 0
@@ -1085,11 +1100,15 @@ def test_data_only_weekday_start_rolls_morning_main_evening_and_completes_day(
         assert runtime.stats.current_window_state == "collecting"
 
         with runtime.database.session_factory() as session:
-            latest = session.execute(
-                select(MarketMicrostructureSnapshot).order_by(
-                    MarketMicrostructureSnapshot.ts_utc.desc()
+            latest = (
+                session.execute(
+                    select(MarketMicrostructureSnapshot).order_by(
+                        MarketMicrostructureSnapshot.ts_utc.desc()
+                    )
                 )
-            ).scalars().first()
+                .scalars()
+                .first()
+            )
             assert latest is not None
             assert latest.session_type == "weekday_main"
             assert latest.snapshot_payload["include_in_calibration"] is True
@@ -1105,11 +1124,15 @@ def test_data_only_weekday_start_rolls_morning_main_evening_and_completes_day(
         assert runtime.stats.collector_state == "collecting"
 
         with runtime.database.session_factory() as session:
-            latest = session.execute(
-                select(MarketMicrostructureSnapshot).order_by(
-                    MarketMicrostructureSnapshot.ts_utc.desc()
+            latest = (
+                session.execute(
+                    select(MarketMicrostructureSnapshot).order_by(
+                        MarketMicrostructureSnapshot.ts_utc.desc()
+                    )
                 )
-            ).scalars().first()
+                .scalars()
+                .first()
+            )
             assert latest is not None
             assert latest.session_type == "weekday_evening"
 
@@ -1270,11 +1293,15 @@ def test_data_only_daily_intent_restores_and_resumes_after_runtime_restart(
         await second_runtime.run_cycle(now=msk(2026, 6, 29, 7))
         assert second_runtime.stats.collector_state == "collecting"
         with second_runtime.database.session_factory() as session:
-            latest = session.execute(
-                select(MarketMicrostructureSnapshot).order_by(
-                    MarketMicrostructureSnapshot.ts_utc.desc()
+            latest = (
+                session.execute(
+                    select(MarketMicrostructureSnapshot).order_by(
+                        MarketMicrostructureSnapshot.ts_utc.desc()
+                    )
                 )
-            ).scalars().first()
+                .scalars()
+                .first()
+            )
             assert latest is not None
             assert latest.session_type == "weekday_morning"
         assert second_gateway.post_order_calls == []
@@ -1348,11 +1375,15 @@ def test_data_only_daily_intent_restarts_active_window_after_runtime_restart(
             snapshot_count = session.scalar(
                 select(func.count()).select_from(MarketMicrostructureSnapshot)
             )
-            latest = session.execute(
-                select(MarketMicrostructureSnapshot).order_by(
-                    MarketMicrostructureSnapshot.ts_utc.desc()
+            latest = (
+                session.execute(
+                    select(MarketMicrostructureSnapshot).order_by(
+                        MarketMicrostructureSnapshot.ts_utc.desc()
+                    )
                 )
-            ).scalars().first()
+                .scalars()
+                .first()
+            )
         assert int(snapshot_count or 0) > first_snapshot_count
         assert latest is not None
         assert latest.session_type == "weekday_main"
@@ -1472,18 +1503,15 @@ def test_runtime_resolves_default_instruments_for_shadow_streams(
 
     asyncio.run(runtime.start())
 
-    assert gateway.resolve_calls[0].tickers == ("SBER", "GAZP")
-    assert tuple(instrument.instrument_id for instrument in runtime.config.instruments) == (
-        "MOEX:SBER",
-        "MOEX:GAZP",
+    assert gateway.resolve_calls[0].tickers == CORE_TICKERS
+    assert tuple(instrument.instrument_id for instrument in runtime.config.instruments) == CORE_IDS
+    assert (
+        tuple(instrument.instrument_uid for instrument in runtime.config.instruments)
+        == CORE_UIDS
     )
-    assert tuple(instrument.instrument_uid for instrument in runtime.config.instruments) == (
-        "uid-sber",
-        "uid-gazp",
-    )
-    assert tuple(instrument.instrument_uid for instrument in gateway.stream_instruments) == (
-        "uid-sber",
-        "uid-gazp",
+    assert (
+        tuple(instrument.instrument_uid for instrument in gateway.stream_instruments)
+        == CORE_UIDS
     )
     with runtime.database.session_factory() as session:
         rows = session.execute(
@@ -1528,13 +1556,17 @@ def test_runtime_marks_dividend_calendar_unavailable_on_partial_sync(
     assert runtime.robot_control_state == expected_state
     session = runtime._session
     assert session is not None
-    rows = session.execute(
-        select(AuditEvent).where(
-            AuditEvent.action.in_(
-                ("dividend_sync_completed_with_errors", "dividend_sync_failed")
+    rows = (
+        session.execute(
+            select(AuditEvent).where(
+                AuditEvent.action.in_(
+                    ("dividend_sync_completed_with_errors", "dividend_sync_failed")
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     matching_payloads = [
         row.audit_payload for row in rows if "dividend_sync_clean" in row.audit_payload
     ]
@@ -1739,12 +1771,10 @@ def test_closed_bar_candidate_risk_order_path_is_deterministic(tmp_path: Path) -
         assert session.scalar(select(func.count()).select_from(SignalCandidate)) == 1
         stage_names = list(
             session.execute(
-                select(CandidateStageResult.stage_name).order_by(
-                    CandidateStageResult.stage_seq
-                )
+                select(CandidateStageResult.stage_name).order_by(CandidateStageResult.stage_seq)
             ).scalars()
         )
-        assert len(stage_names) == 28
+        assert len(stage_names) == 29
         assert {
             "dividend_calendar_available",
             "future_dividend_risk_window_policy",
@@ -1755,6 +1785,7 @@ def test_closed_bar_candidate_risk_order_path_is_deterministic(tmp_path: Path) -
             "position_state_freshness",
             "position_reconciliation",
             "long_allowed_by_config",
+            "t_pro_free_quota_guard",
             "total_expected_costs",
             "max_gross_exposure",
             "max_net_exposure",

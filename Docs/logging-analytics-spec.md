@@ -606,6 +606,14 @@ total_expected_costs_bps =
   + max(assumed_slippage_bps, 0)
 ```
 
+`MOEX:T` is the only current instrument-specific exception: the
+`t_technologies_pro_free_quota` policy may model the first 15 executed buy/sell
+trades per Moscow trading day at `0 bps` only when Pro subscription is explicitly
+known active. The counter scope is executed trades/fills, not orders and not lot
+quantity. Unknown Pro status or the 16th and later execution use fallback project
+commission. Data-only analytics may publish both regular and T Pro-free
+scenarios, but must not create trades or orders.
+
 Если `expected_edge_bps - total_expected_costs_bps` меньше
 `min_edge_after_total_costs_bps`, пишется:
 

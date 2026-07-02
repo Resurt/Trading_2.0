@@ -17,27 +17,27 @@ Required latest sync state:
 can be used only with an explicit operator override and must not hide a failed
 T-Bank `GetDividends` run.
 
-## Назначение
+## РќР°Р·РЅР°С‡РµРЅРёРµ
 
-Финальная historical calibration нужна только как подготовка к shadow live. Она не
-доказывает прибыльность стратегии и не заменяет live spread/depth/slippage/latency
-наблюдения.
+Р¤РёРЅР°Р»СЊРЅР°СЏ historical calibration РЅСѓР¶РЅР° С‚РѕР»СЊРєРѕ РєР°Рє РїРѕРґРіРѕС‚РѕРІРєР° Рє shadow live. РћРЅР° РЅРµ
+РґРѕРєР°Р·С‹РІР°РµС‚ РїСЂРёР±С‹Р»СЊРЅРѕСЃС‚СЊ СЃС‚СЂР°С‚РµРіРёРё Рё РЅРµ Р·Р°РјРµРЅСЏРµС‚ live spread/depth/slippage/latency
+РЅР°Р±Р»СЋРґРµРЅРёСЏ.
 
-## Обязательный порядок
+## РћР±СЏР·Р°С‚РµР»СЊРЅС‹Р№ РїРѕСЂСЏРґРѕРє
 
-1. `historical candle backfill` на 10 дней в `--dry-run`.
-2. `historical candle backfill` на 10 дней readonly.
-3. `T-Bank dividend sync` через `GetDividends`:
+1. `historical candle backfill` РЅР° 10 РґРЅРµР№ РІ `--dry-run`.
+2. `historical candle backfill` РЅР° 10 РґРЅРµР№ readonly.
+3. `T-Bank dividend sync` С‡РµСЂРµР· `GetDividends`:
    `python scripts/run_tbank_dividend_sync.py --lookback-days 730 --lookahead-days 365 --json-output`.
-4. `market special day classification` с `--require-dividend-sync --include-future`.
-5. `historical data quality report` с `--require-special-day-classification`.
-6. `historical replay from DB` только по DB `strategy_config`.
+4. `market special day classification` СЃ `--require-dividend-sync --include-future`.
+5. `historical data quality report` СЃ `--require-special-day-classification`.
+6. `historical replay from DB` С‚РѕР»СЊРєРѕ РїРѕ DB `strategy_config`.
 7. `historical counterfactual rebuild`.
 8. `historical reports rebuild`.
-9. `calibration report` с `calibration_scope=primary_normal_days`.
-10. Расширение периода до 90d.
-11. Расширение периода до 365d.
-12. Shadow live 10-20 торговых дней.
+9. `calibration report` СЃ `calibration_scope=primary_normal_days`.
+10. Р Р°СЃС€РёСЂРµРЅРёРµ РїРµСЂРёРѕРґР° РґРѕ 90d.
+11. Р Р°СЃС€РёСЂРµРЅРёРµ РїРµСЂРёРѕРґР° РґРѕ 365d.
+12. Shadow live 10-20 С‚РѕСЂРіРѕРІС‹С… РґРЅРµР№.
 13. Sandbox order smoke.
 14. Controlled minimal live.
 
@@ -47,35 +47,35 @@ T-Bank `GetDividends` run.
 python scripts/run_launch_readiness.py --mode historical-final-calibration
 ```
 
-Gate должен падать, если:
+Gate РґРѕР»Р¶РµРЅ РїР°РґР°С‚СЊ, РµСЃР»Рё:
 
-- нет `market_candle`;
-- нет quality report;
-- не запускалась special day classification;
-- не выполнен T-Bank dividend sync, если только оператор явно не разрешил manual fallback;
-- есть future dividend risk window без классификации и risk policy;
+- РЅРµС‚ `market_candle`;
+- РЅРµС‚ quality report;
+- РЅРµ Р·Р°РїСѓСЃРєР°Р»Р°СЃСЊ special day classification;
+- РЅРµ РІС‹РїРѕР»РЅРµРЅ T-Bank dividend sync, РµСЃР»Рё С‚РѕР»СЊРєРѕ РѕРїРµСЂР°С‚РѕСЂ СЏРІРЅРѕ РЅРµ СЂР°Р·СЂРµС€РёР» manual fallback;
+- РµСЃС‚СЊ future dividend risk window Р±РµР· РєР»Р°СЃСЃРёС„РёРєР°С†РёРё Рё risk policy;
 - `calibration_clean=false`;
-- replay использовал default strategy config;
-- dividend/corporate-action дни не исключены или не помечены отдельно;
-- отсутствует counterfactual;
-- отсутствует calibration report;
-- secret scan нашёл raw secrets.
+- replay РёСЃРїРѕР»СЊР·РѕРІР°Р» default strategy config;
+- dividend/corporate-action РґРЅРё РЅРµ РёСЃРєР»СЋС‡РµРЅС‹ РёР»Рё РЅРµ РїРѕРјРµС‡РµРЅС‹ РѕС‚РґРµР»СЊРЅРѕ;
+- РѕС‚СЃСѓС‚СЃС‚РІСѓРµС‚ counterfactual;
+- РѕС‚СЃСѓС‚СЃС‚РІСѓРµС‚ calibration report;
+- secret scan РЅР°С€С‘Р» raw secrets.
 
-## Что считается чистой калибровкой
+## Р§С‚Рѕ СЃС‡РёС‚Р°РµС‚СЃСЏ С‡РёСЃС‚РѕР№ РєР°Р»РёР±СЂРѕРІРєРѕР№
 
-`calibration_clean=true` допустим только когда:
+`calibration_clean=true` РґРѕРїСѓСЃС‚РёРј С‚РѕР»СЊРєРѕ РєРѕРіРґР°:
 
 - `calibration_scope=primary_normal_days`;
-- special day classification выполнена;
-- dividend calendar загружен через T-Bank `GetDividends` (`source=api_import`) или
-  оператор явно запустил отчёт с `--allow-manual-corporate-actions`;
-- `dividend_gap_day` и `corporate_action_day` исключены из primary scope;
-- recommendations сохранены только в `calibration_report.report_payload`;
-- `strategy_config` не изменён автоматически.
+- special day classification РІС‹РїРѕР»РЅРµРЅР°;
+- dividend calendar Р·Р°РіСЂСѓР¶РµРЅ С‡РµСЂРµР· T-Bank `GetDividends` (`source=api_import`) РёР»Рё
+  РѕРїРµСЂР°С‚РѕСЂ СЏРІРЅРѕ Р·Р°РїСѓСЃС‚РёР» РѕС‚С‡С‘С‚ СЃ `--allow-manual-corporate-actions`;
+- `dividend_gap_day` Рё `corporate_action_day` РёСЃРєР»СЋС‡РµРЅС‹ РёР· primary scope;
+- recommendations СЃРѕС…СЂР°РЅРµРЅС‹ С‚РѕР»СЊРєРѕ РІ `calibration_report.report_payload`;
+- `strategy_config` РЅРµ РёР·РјРµРЅС‘РЅ Р°РІС‚РѕРјР°С‚РёС‡РµСЃРєРё.
 
 ## Candle-only Caveats
 
-Historical candles не калибруют:
+Historical candles РЅРµ РєР°Р»РёР±СЂСѓСЋС‚:
 
 - `real_spread`;
 - `order_book_depth`;
@@ -95,7 +95,7 @@ backfill both call readonly T-Bank methods.
 Run before final calibration:
 
 ```powershell
-python scripts/run_tbank_instrument_resolve.py --instruments SBER,GAZP,LKOH --strict --json-output
+python scripts/run_tbank_instrument_resolve.py --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T --strict --json-output
 python scripts/run_launch_readiness.py --mode instrument-resolution
 ```
 
@@ -104,4 +104,4 @@ has `source=seed`, `resolution_status!=resolved`, and no `instrument_uid`/`figi`
 Clean calibration is not allowed while GetDividends/GetCandles would use
 `MOEX:*` as a broker id.
 
-Эти параметры требуют shadow live calibration.
+Р­С‚Рё РїР°СЂР°РјРµС‚СЂС‹ С‚СЂРµР±СѓСЋС‚ shadow live calibration.

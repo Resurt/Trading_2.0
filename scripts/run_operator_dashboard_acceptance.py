@@ -13,7 +13,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUT_DIR = ROOT / ".local" / "collection_reports" / "operator_dashboard_acceptance"
-CORE_TICKERS = ("SBER", "GAZP", "LKOH", "YDEX", "TATN", "GMKN", "OZON", "VTBR")
+CORE_TICKERS = ("SBER", "GAZP", "LKOH", "YDEX", "TATN", "GMKN", "OZON", "VTBR", "T")
 
 
 @dataclass(frozen=True)
@@ -84,13 +84,12 @@ def validate(
         errors.append("market overview instruments is not a list")
         rows = []
     tickers = {
-        str(row.get("ticker") or row.get("instrument_id", "").split(":")[-1])
-        for row in rows
+        str(row.get("ticker") or row.get("instrument_id", "").split(":")[-1]) for row in rows
     }
     if tuple(sorted(tickers & set(CORE_TICKERS))) != tuple(sorted(CORE_TICKERS)):
         errors.append(f"market overview does not include all core tickers: {sorted(tickers)}")
-    if len(rows) != 8:
-        errors.append(f"market overview returned {len(rows)} rows, expected 8")
+    if len(rows) != len(CORE_TICKERS):
+        errors.append(f"market overview returned {len(rows)} rows, expected {len(CORE_TICKERS)}")
 
     live_rows = 0
     broker_display_rows = 0
@@ -173,7 +172,7 @@ def main() -> int:
         Endpoint(
             "03_session_preflight.json",
             "GET",
-            "/session/preflight?instruments=SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR&mode=data_shadow",
+            "/session/preflight?instruments=SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T&mode=data_shadow",
         ),
         Endpoint("04_data_shadow_status_before.json", "GET", "/runtime/data-shadow/status"),
         Endpoint("05_market_overview_before.json", "GET", "/market/overview"),

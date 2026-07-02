@@ -169,10 +169,10 @@ describe("market store", () => {
     vi.useRealTimers();
   });
 
-  it("starts with eight core instruments and selects SBER by default", () => {
+  it("starts with nine core instruments and selects SBER by default", () => {
     const market = useMarketStore();
 
-    expect(market.quoteRows).toHaveLength(8);
+    expect(market.quoteRows).toHaveLength(9);
     expect(market.selectedInstrumentId).toBe("MOEX:SBER");
     expect(market.currentInstrument?.instrument_id).toBe("MOEX:SBER");
   });
@@ -187,7 +187,7 @@ describe("market store", () => {
 
     market.applyOverview({ generated_at: now, instruments: [] });
 
-    expect(market.quoteRows).toHaveLength(8);
+    expect(market.quoteRows).toHaveLength(9);
     expect(market.currentInstrument?.last_price).toBe("313.10");
     expect(market.warnings).toContain("empty_market_ws_snapshot");
   });
@@ -208,7 +208,7 @@ describe("market store", () => {
       instruments: [instrument({ instrument_id: "MOEX:SBER", ticker: "SBER", last_price: "313.50" })],
     });
 
-    expect(market.quoteRows).toHaveLength(8);
+    expect(market.quoteRows).toHaveLength(9);
     expect(market.quoteRows.find((row) => row.instrument_id === "MOEX:SBER")?.last_price).toBe("313.50");
     expect(market.quoteRows.find((row) => row.instrument_id === "MOEX:GAZP")?.last_price).toBe("144.20");
   });

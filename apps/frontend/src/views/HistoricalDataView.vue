@@ -17,7 +17,7 @@ import MetricTile from "../components/ui/MetricTile.vue";
 import MiniBars from "../components/ui/MiniBars.vue";
 
 const lookbackDays = ref(10);
-const instruments = ref("SBER,GAZP");
+const instruments = ref("SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T");
 const timeframes = ref("1m,5m,10m,15m");
 const strategyId = ref("baseline");
 const loading = ref(false);

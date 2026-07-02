@@ -123,8 +123,15 @@ total_expected_costs_bps =
 
 Где:
 
-- `commission_entry_bps` и `commission_exit_bps` не ниже `5 bps`;
-- `round_trip_commission_bps` не ниже `10 bps`;
+- `commission_entry_bps` и `commission_exit_bps` не ниже `5 bps` для обычных бумаг;
+- `round_trip_commission_bps` не ниже `10 bps` для обычных бумаг;
+- `MOEX:T` uses `t_technologies_pro_free_quota`: the first 15 executed buy/sell
+  trades per Moscow trading day can be `0 bps` only when Pro subscription is
+  explicitly known active. If Pro status is unknown/inactive or the 15-execution
+  quota is exhausted, risk/execution uses fallback commission.
+- The `MOEX:T` quota counts executed trades/fills, not submitted orders and not
+  lot quantity; partial fills consume quota slots when represented as separate
+  executions.
 - `spread_bps` берется из текущего `MarketState`;
 - `assumed_slippage_bps` задается конфигом.
 

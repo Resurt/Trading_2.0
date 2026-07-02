@@ -33,7 +33,7 @@ for src in (
 from trading_common.db.config import build_database_url_from_env
 from trading_common.db.service import DatabaseService
 
-CORE_TICKERS = ("SBER", "GAZP", "LKOH", "YDEX", "TATN", "GMKN", "OZON", "VTBR")
+CORE_TICKERS = ("SBER", "GAZP", "LKOH", "YDEX", "TATN", "GMKN", "OZON", "VTBR", "T")
 COUNT_TABLES = (
     "market_microstructure_snapshot",
     "signal_candidate",
@@ -100,8 +100,8 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
         if ws_first.get("source") != "dashboard_market_feed":
             errors.append("WS /ws/market-feed is not DashboardMarketFeed snapshot")
         ws_rows = ws_first.get("quote_rows")
-        if not isinstance(ws_rows, list) or len(ws_rows) < 8:
-            errors.append("WS first snapshot did not contain 8 quote rows")
+        if not isinstance(ws_rows, list) or len(ws_rows) < len(CORE_TICKERS):
+            errors.append(f"WS first snapshot did not contain {len(CORE_TICKERS)} quote rows")
         if ws_first.get("selected_instrument") != selected_instrument:
             errors.append("WS first snapshot selected instrument mismatch")
     ws_switched = ws_result.get("switch_snapshot")
@@ -109,16 +109,21 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
         selected_after_switch = ws_switched.get("selected_details")
         if ws_switched.get("selected_instrument") != switch_instrument:
             errors.append("WS selected switch did not preserve requested instrument")
-        if not isinstance(selected_after_switch, dict) or selected_after_switch.get(
-            "instrument_id"
-        ) != switch_instrument:
+        if (
+            not isinstance(selected_after_switch, dict)
+            or selected_after_switch.get("instrument_id") != switch_instrument
+        ):
             errors.append("WS selected details did not switch to target instrument")
     snapshot = get_json(
-        f"{api_base}/dashboard/market-feed/snapshot?{urllib.parse.urlencode({
-            'selected_instrument': selected_instrument,
-            'include_order_book': 'true',
-            'include_trades': 'true',
-        })}",
+        f"{api_base}/dashboard/market-feed/snapshot?{
+            urllib.parse.urlencode(
+                {
+                    'selected_instrument': selected_instrument,
+                    'include_order_book': 'true',
+                    'include_trades': 'true',
+                }
+            )
+        }",
         timeout_seconds=args.timeout_seconds,
     )
     rows = snapshot.get("quote_rows")
@@ -131,8 +136,10 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
         if isinstance(row, dict)
     }
     missing = [ticker for ticker in CORE_TICKERS if ticker not in tickers]
-    if len(rows) != 8:
-        errors.append(f"dashboard feed returned {len(rows)} quote rows, expected 8")
+    if len(rows) != len(CORE_TICKERS):
+        errors.append(
+            f"dashboard feed returned {len(rows)} quote rows, expected {len(CORE_TICKERS)}"
+        )
     if missing:
         errors.append(f"dashboard feed missing tickers: {missing}")
     for row in rows:
@@ -158,9 +165,10 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
     for row in rows:
         if not isinstance(row, dict):
             continue
-        if row.get("last_price_source") == "latest_market_candle_close" and row.get(
-            "quote_status"
-        ) == "live":
+        if (
+            row.get("last_price_source") == "latest_market_candle_close"
+            and row.get("quote_status") == "live"
+        ):
             errors.append(f"{row.get('instrument_id')} stale candle fallback is labeled live")
         if row.get("freshness_status") == "stale" and row.get("quote_status") == "live":
             errors.append(f"{row.get('instrument_id')} stale freshness is labeled live")
@@ -177,11 +185,15 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
             errors.append("market is open but selected SBER order book is stale")
         time.sleep(5)
         second_snapshot = get_json(
-            f"{api_base}/dashboard/market-feed/snapshot?{urllib.parse.urlencode({
-                'selected_instrument': selected_instrument,
-                'include_order_book': 'true',
-                'include_trades': 'true',
-            })}",
+            f"{api_base}/dashboard/market-feed/snapshot?{
+                urllib.parse.urlencode(
+                    {
+                        'selected_instrument': selected_instrument,
+                        'include_order_book': 'true',
+                        'include_trades': 'true',
+                    }
+                )
+            }",
             timeout_seconds=args.timeout_seconds,
         )
         second_selected = (
@@ -218,8 +230,7 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
 
     after_counts = table_counts(database)
     deltas = {
-        table: after_counts.get(table, 0) - before_counts.get(table, 0)
-        for table in COUNT_TABLES
+        table: after_counts.get(table, 0) - before_counts.get(table, 0) for table in COUNT_TABLES
     }
     if data_shadow.get("collector_state") == "collecting":
         if deltas.get("market_microstructure_snapshot", 0) != 0:
@@ -239,9 +250,7 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
         "market_open": market_open,
         "ws_primary_ok": bool(ws_result.get("ok")),
         "ws_path": ws_result.get("path"),
-        "ws_selected_switch_passed": not any(
-            "WS selected" in item for item in errors
-        ),
+        "ws_selected_switch_passed": not any("WS selected" in item for item in errors),
         "dashboard_feed_status": status,
         "quote_rows": len(rows),
         "selected_instrument": selected.get("instrument_id"),
@@ -351,9 +360,10 @@ def websocket_connect(url: str, *, timeout_seconds: float) -> socket.socket:
     accept = base64.b64encode(
         hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")).digest()
     ).decode("ascii")
-    if f"Sec-WebSocket-Accept: {accept}".lower() not in response.decode(
-        "utf-8", errors="replace"
-    ).lower():
+    if (
+        f"Sec-WebSocket-Accept: {accept}".lower()
+        not in response.decode("utf-8", errors="replace").lower()
+    ):
         raise RuntimeError("websocket accept header mismatch")
     return raw_sock
 

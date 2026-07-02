@@ -71,7 +71,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--to-date", type=parse_date)
     parser.add_argument("--lookback-days", type=int, default=90)
     parser.add_argument("--strategy-id", default="baseline")
-    parser.add_argument("--instruments", default="SBER,GAZP")
+    parser.add_argument("--instruments", default="SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T")
     parser.add_argument("--timeframes", default="5m,10m,15m")
     parser.add_argument(
         "--group-by",

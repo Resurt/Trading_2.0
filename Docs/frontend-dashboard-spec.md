@@ -75,6 +75,7 @@ The quote board expects the core universe:
 - `GMKN`
 - `OZON`
 - `VTBR`
+- `T`
 
 An empty or partial snapshot must merge by `instrument_id` and must not delete
 missing universe rows from the existing board.
@@ -455,7 +456,7 @@ remain display-only and are not primary calibration evidence.
 Run:
 
 ```powershell
-python scripts/run_dashboard_live_feed_acceptance.py --selected-instrument MOEX:SBER --switch-instrument MOEX:GAZP --json-output
+python scripts/run_dashboard_live_feed_acceptance.py --selected-instrument MOEX:SBER --switch-instrument MOEX:T --json-output
 ```
 
 The acceptance must verify:
@@ -463,9 +464,9 @@ The acceptance must verify:
 - API health;
 - WebSocket primary connection;
 - first snapshot within 3 seconds;
-- at least 8 quote rows;
+- at least 9 quote rows;
 - SBER default selection;
-- GAZP selected switch;
+- `MOEX:T` selected switch;
 - selected details present;
 - explicit trade tape status or trades;
 - stale candle fallback not labeled live;

@@ -36,7 +36,7 @@ from trading_common.db.models import (
 )
 
 JsonPayload = dict[str, Any]
-DEFAULT_INSTRUMENTS = ("SBER", "GAZP")
+DEFAULT_INSTRUMENTS = ("SBER", "GAZP", "LKOH", "YDEX", "TATN", "GMKN", "OZON", "VTBR", "T")
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,8 +181,7 @@ class DividendSyncService:
                     instrument_id=str(item.get("instrument_id") or ""),
                     ticker=str(item.get("ticker") or "") or None,
                     error_code=str(
-                        item.get("error_code")
-                        or "instrument_not_resolved_for_dividend_sync"
+                        item.get("error_code") or "instrument_not_resolved_for_dividend_sync"
                     ),
                     error_message=str(
                         item.get("error_message")
@@ -280,9 +279,7 @@ class DividendSyncService:
                 instruments={
                     "values": [item.instrument_id for item in result.instruments],
                     "tickers": [
-                        item.ticker
-                        for item in result.instruments
-                        if item.ticker is not None
+                        item.ticker for item in result.instruments if item.ticker is not None
                     ],
                 },
                 instruments_processed=result.instruments_processed,
@@ -438,9 +435,13 @@ class DividendSyncService:
             value = raw.strip()
             if not value:
                 continue
-            row = self._session.execute(
-                select(InstrumentRegistry).where(InstrumentRegistry.ticker == value.upper())
-            ).scalars().first()
+            row = (
+                self._session.execute(
+                    select(InstrumentRegistry).where(InstrumentRegistry.ticker == value.upper())
+                )
+                .scalars()
+                .first()
+            )
             if row is None and ":" in value:
                 row = self._session.get(InstrumentRegistry, value)
             if (
@@ -470,11 +471,15 @@ class DividendSyncService:
                             ),
                         )
                     )
-                    row = self._session.execute(
-                        select(InstrumentRegistry).where(
-                            InstrumentRegistry.ticker == (resolved[0].ticker or value.upper())
+                    row = (
+                        self._session.execute(
+                            select(InstrumentRegistry).where(
+                                InstrumentRegistry.ticker == (resolved[0].ticker or value.upper())
+                            )
                         )
-                    ).scalars().first()
+                        .scalars()
+                        .first()
+                    )
                 except Exception as exc:
                     unresolved.append(
                         {
@@ -531,9 +536,7 @@ class DividendSyncService:
                         }
                     )
                     continue
-            refs.append(
-                ref
-            )
+            refs.append(ref)
         return tuple(dict.fromkeys(refs)), tuple(unresolved), resolution_attempted
 
     def _delete_api_import_dividends(
@@ -554,15 +557,19 @@ class DividendSyncService:
         self._session.execute(stmt)
 
     def _existing_event(self, event: CorporateActionEvent) -> CorporateActionEventRow | None:
-        return self._session.execute(
-            select(CorporateActionEventRow).where(
-                CorporateActionEventRow.instrument_id == event.instrument_id,
-                CorporateActionEventRow.action_type == event.action_type,
-                CorporateActionEventRow.ex_date == event.ex_date,
-                CorporateActionEventRow.amount_per_share == event.amount_per_share,
-                CorporateActionEventRow.source == event.source,
+        return (
+            self._session.execute(
+                select(CorporateActionEventRow).where(
+                    CorporateActionEventRow.instrument_id == event.instrument_id,
+                    CorporateActionEventRow.action_type == event.action_type,
+                    CorporateActionEventRow.ex_date == event.ex_date,
+                    CorporateActionEventRow.amount_per_share == event.amount_per_share,
+                    CorporateActionEventRow.source == event.source,
+                )
             )
-        ).scalars().first()
+            .scalars()
+            .first()
+        )
 
     def _write_audit(self, action: str, *, severity: str, payload: JsonPayload) -> None:
         now = datetime.now(tz=UTC)

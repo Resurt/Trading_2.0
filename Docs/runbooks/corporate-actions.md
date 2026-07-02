@@ -26,34 +26,34 @@ Manual CSV/JSON remains fallback/override only. It cannot silently replace a fai
 `api_import` sync unless the operator explicitly uses an override such as
 `--allow-manual-corporate-actions`.
 
-## Назначение
+## РќР°Р·РЅР°С‡РµРЅРёРµ
 
-`corporate_action_event` и `market_special_day` нужны, чтобы historical replay и
-calibration не смешивали обычные дни с dividend gap / split / corporate-action днями.
-Такие дни могут выглядеть как сильный directional move в свечах, но это не торговый
-сигнал стратегии.
+`corporate_action_event` Рё `market_special_day` РЅСѓР¶РЅС‹, С‡С‚РѕР±С‹ historical replay Рё
+calibration РЅРµ СЃРјРµС€РёРІР°Р»Рё РѕР±С‹С‡РЅС‹Рµ РґРЅРё СЃ dividend gap / split / corporate-action РґРЅСЏРјРё.
+РўР°РєРёРµ РґРЅРё РјРѕРіСѓС‚ РІС‹РіР»СЏРґРµС‚СЊ РєР°Рє СЃРёР»СЊРЅС‹Р№ directional move РІ СЃРІРµС‡Р°С…, РЅРѕ СЌС‚Рѕ РЅРµ С‚РѕСЂРіРѕРІС‹Р№
+СЃРёРіРЅР°Р» СЃС‚СЂР°С‚РµРіРёРё.
 
-## Импорт
+## РРјРїРѕСЂС‚
 
-Основной путь теперь автоматический: `trade-core` и CLI вызывают readonly broker method
-`BrokerGateway.get_dividends`, который внутри `infra/tbank` маппится на T-Bank / T-Invest
-`GetDividends`. Ручной CSV/JSON import остаётся только fallback/override, когда данные брокера
-недоступны или оператор хочет явно переопределить событие.
+РћСЃРЅРѕРІРЅРѕР№ РїСѓС‚СЊ С‚РµРїРµСЂСЊ Р°РІС‚РѕРјР°С‚РёС‡РµСЃРєРёР№: `trade-core` Рё CLI РІС‹Р·С‹РІР°СЋС‚ readonly broker method
+`BrokerGateway.get_dividends`, РєРѕС‚РѕСЂС‹Р№ РІРЅСѓС‚СЂРё `infra/tbank` РјР°РїРїРёС‚СЃСЏ РЅР° T-Bank / T-Invest
+`GetDividends`. Р СѓС‡РЅРѕР№ CSV/JSON import РѕСЃС‚Р°С‘С‚СЃСЏ С‚РѕР»СЊРєРѕ fallback/override, РєРѕРіРґР° РґР°РЅРЅС‹Рµ Р±СЂРѕРєРµСЂР°
+РЅРµРґРѕСЃС‚СѓРїРЅС‹ РёР»Рё РѕРїРµСЂР°С‚РѕСЂ С…РѕС‡РµС‚ СЏРІРЅРѕ РїРµСЂРµРѕРїСЂРµРґРµР»РёС‚СЊ СЃРѕР±С‹С‚РёРµ.
 
 ```powershell
 python scripts/run_tbank_dividend_sync.py `
-  --instruments SBER,GAZP `
+  --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T `
   --lookback-days 730 `
   --lookahead-days 365 `
   --json-output
 ```
 
-После успешного sync события сохраняются в `corporate_action_event` с
-`source=api_import`, `confidence=confirmed`, `action_type=dividend`. Будущие ex-date
-помечаются в `market_special_day` как `future_dividend_risk_window` или
+РџРѕСЃР»Рµ СѓСЃРїРµС€РЅРѕРіРѕ sync СЃРѕР±С‹С‚РёСЏ СЃРѕС…СЂР°РЅСЏСЋС‚СЃСЏ РІ `corporate_action_event` СЃ
+`source=api_import`, `confidence=confirmed`, `action_type=dividend`. Р‘СѓРґСѓС‰РёРµ ex-date
+РїРѕРјРµС‡Р°СЋС‚СЃСЏ РІ `market_special_day` РєР°Рє `future_dividend_risk_window` РёР»Рё
 `dividend_gap_day`, `exclude_from_primary_calibration=true`, `trade_policy=shadow_only`.
 
-Ручной fallback:
+Р СѓС‡РЅРѕР№ fallback:
 
 ```powershell
 python scripts/run_corporate_actions_import.py `
@@ -62,7 +62,7 @@ python scripts/run_corporate_actions_import.py `
   --json-output
 ```
 
-Разовый ручной ввод:
+Р Р°Р·РѕРІС‹Р№ СЂСѓС‡РЅРѕР№ РІРІРѕРґ:
 
 ```powershell
 python scripts/run_corporate_actions_import.py `
@@ -90,37 +90,37 @@ CSV columns:
 
 ## Special Day Classification
 
-После dividend sync или manual fallback нужно классифицировать период:
+РџРѕСЃР»Рµ dividend sync РёР»Рё manual fallback РЅСѓР¶РЅРѕ РєР»Р°СЃСЃРёС„РёС†РёСЂРѕРІР°С‚СЊ РїРµСЂРёРѕРґ:
 
 ```powershell
 python scripts/run_market_special_day_classification.py `
   --lookback-days 90 `
-  --instruments SBER,GAZP `
+  --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T `
   --include-future `
   --lookahead-days 365 `
   --require-dividend-sync `
   --json-output
 ```
 
-Классификатор:
+РљР»Р°СЃСЃРёС„РёРєР°С‚РѕСЂ:
 
-- связывает `corporate_action_event.ex_date` с `trading_date`;
-- считает open gap: previous session close -> current session open;
-- пишет `dividend_gap_day`, `corporate_action_day`, `abnormal_gap_day`;
-- по умолчанию ставит `exclude_from_primary_calibration=true`;
-- по умолчанию ставит `trade_policy=shadow_only`.
+- СЃРІСЏР·С‹РІР°РµС‚ `corporate_action_event.ex_date` СЃ `trading_date`;
+- СЃС‡РёС‚Р°РµС‚ open gap: previous session close -> current session open;
+- РїРёС€РµС‚ `dividend_gap_day`, `corporate_action_day`, `abnormal_gap_day`;
+- РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ СЃС‚Р°РІРёС‚ `exclude_from_primary_calibration=true`;
+- РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ СЃС‚Р°РІРёС‚ `trade_policy=shadow_only`.
 
-## Операционные правила
+## РћРїРµСЂР°С†РёРѕРЅРЅС‹Рµ РїСЂР°РІРёР»Р°
 
-- Primary source для dividend calendar: T-Bank `GetDividends`.
-- Manual CSV/JSON: только fallback/override, в отчётах отображается warning
-  `manual_corporate_actions_only`, если нет `api_import`.
-- Dividend ex-date / dividend gap day нельзя смешивать с обычными днями primary calibration.
-- Future dividend risk window по умолчанию переводит entries в `shadow_only`/block policy.
-- Special days можно анализировать отдельно через `calibration_scope=special_days_only`.
-- Если classification не запускалась, `historical data quality` и `calibration` должны
-  показывать warning `corporate_action_classification_missing`.
-- Live/shadow risk layer должен блокировать или переводить entries в shadow-only по
+- Primary source РґР»СЏ dividend calendar: T-Bank `GetDividends`.
+- Manual CSV/JSON: С‚РѕР»СЊРєРѕ fallback/override, РІ РѕС‚С‡С‘С‚Р°С… РѕС‚РѕР±СЂР°Р¶Р°РµС‚СЃСЏ warning
+  `manual_corporate_actions_only`, РµСЃР»Рё РЅРµС‚ `api_import`.
+- Dividend ex-date / dividend gap day РЅРµР»СЊР·СЏ СЃРјРµС€РёРІР°С‚СЊ СЃ РѕР±С‹С‡РЅС‹РјРё РґРЅСЏРјРё primary calibration.
+- Future dividend risk window РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ РїРµСЂРµРІРѕРґРёС‚ entries РІ `shadow_only`/block policy.
+- Special days РјРѕР¶РЅРѕ Р°РЅР°Р»РёР·РёСЂРѕРІР°С‚СЊ РѕС‚РґРµР»СЊРЅРѕ С‡РµСЂРµР· `calibration_scope=special_days_only`.
+- Р•СЃР»Рё classification РЅРµ Р·Р°РїСѓСЃРєР°Р»Р°СЃСЊ, `historical data quality` Рё `calibration` РґРѕР»Р¶РЅС‹
+  РїРѕРєР°Р·С‹РІР°С‚СЊ warning `corporate_action_classification_missing`.
+- Live/shadow risk layer РґРѕР»Р¶РµРЅ Р±Р»РѕРєРёСЂРѕРІР°С‚СЊ РёР»Рё РїРµСЂРµРІРѕРґРёС‚СЊ entries РІ shadow-only РїРѕ
   `RiskLimits.special_day_trade_policy`.
 
 ## Make Targets
@@ -141,7 +141,7 @@ send internal ids such as `MOEX:SBER` to `GetDividends`.
 Before real dividend sync:
 
 ```powershell
-python scripts/run_tbank_instrument_resolve.py --instruments SBER,GAZP,LKOH --strict --json-output
+python scripts/run_tbank_instrument_resolve.py --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T --strict --json-output
 python scripts/run_launch_readiness.py --mode instrument-resolution
 ```
 
@@ -157,11 +157,11 @@ historical dry-run. It is not clean for final calibration, shadow or production.
 
 ## Definition Of Done
 
-- `corporate_action_event` заполнена по нужным инструментам через `source=api_import`
-  или manual fallback явно разрешён оператором.
-- `market_special_day` есть за replay/calibration период.
-- Будущие dividend risk windows классифицированы.
+- `corporate_action_event` Р·Р°РїРѕР»РЅРµРЅР° РїРѕ РЅСѓР¶РЅС‹Рј РёРЅСЃС‚СЂСѓРјРµРЅС‚Р°Рј С‡РµСЂРµР· `source=api_import`
+  РёР»Рё manual fallback СЏРІРЅРѕ СЂР°Р·СЂРµС€С‘РЅ РѕРїРµСЂР°С‚РѕСЂРѕРј.
+- `market_special_day` РµСЃС‚СЊ Р·Р° replay/calibration РїРµСЂРёРѕРґ.
+- Р‘СѓРґСѓС‰РёРµ dividend risk windows РєР»Р°СЃСЃРёС„РёС†РёСЂРѕРІР°РЅС‹.
 - `python scripts/run_historical_data_quality_report.py --require-special-day-classification ...`
-  проходит без ошибки.
-- Primary calibration возвращает `calibration_clean=true`; без dividend sync это запрещено,
-  кроме явного `--allow-manual-corporate-actions`.
+  РїСЂРѕС…РѕРґРёС‚ Р±РµР· РѕС€РёР±РєРё.
+- Primary calibration РІРѕР·РІСЂР°С‰Р°РµС‚ `calibration_clean=true`; Р±РµР· dividend sync СЌС‚Рѕ Р·Р°РїСЂРµС‰РµРЅРѕ,
+  РєСЂРѕРјРµ СЏРІРЅРѕРіРѕ `--allow-manual-corporate-actions`.

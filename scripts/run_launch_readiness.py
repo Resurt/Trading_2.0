@@ -94,7 +94,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--date", default="2026-06-12")
     parser.add_argument("--strategy-id", default="baseline")
     parser.add_argument("--lookback-days", type=int, default=10)
-    parser.add_argument("--instruments", default="SBER,GAZP")
+    parser.add_argument("--instruments", default="SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T")
     parser.add_argument("--timeframes", default="5m,10m,15m")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--shadow-minutes", type=float, default=0.0)
@@ -282,8 +282,7 @@ def run_production_preflight(args: argparse.Namespace, env: Mapping[str, str]) -
         env_gate("dev_auth_disabled", env.get("TRADING_AUTH_MODE", "static_bearer") != "dev"),
         env_gate(
             "dividend_sync_enabled",
-            env.get("TRADING_DIVIDEND_SYNC_ENABLED", "true").lower()
-            in {"1", "true", "yes", "on"},
+            env.get("TRADING_DIVIDEND_SYNC_ENABLED", "true").lower() in {"1", "true", "yes", "on"},
         ),
         env_gate(
             "dividend_sync_fail_closed_default",
@@ -1031,9 +1030,7 @@ def run_instrument_registry_gate(
         try:
             with database.session_scope() as session:
                 requested = {
-                    item.strip().upper()
-                    for item in args.instruments.split(",")
-                    if item.strip()
+                    item.strip().upper() for item in args.instruments.split(",") if item.strip()
                 }
                 rows = (
                     session.query(InstrumentRegistry)
@@ -1128,8 +1125,7 @@ def run_compose_shared_db_gate() -> GateResult:
     }
     db_keys = ("POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_DB", "POSTGRES_USER")
     values = {
-        service: {key: env.get(key) for key in db_keys}
-        for service, env in service_env.items()
+        service: {key: env.get(key) for key in db_keys} for service, env in service_env.items()
     }
     expected = values.get("api")
     same = all(value == expected for value in values.values())

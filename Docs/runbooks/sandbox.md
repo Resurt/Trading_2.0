@@ -33,7 +33,7 @@ $env:TRADING_RUNTIME_MODE = "sandbox"
 $env:TBANK_ENVIRONMENT = "sandbox"
 python scripts/run_tbank_sdk_import_check.py
 python scripts/run_launch_readiness.py --mode sandbox
-python scripts/run_historical_candle_backfill.py --instruments SBER,GAZP --lookback-days 7 --dry-run
+python scripts/run_historical_candle_backfill.py --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T --lookback-days 7 --dry-run
 ```
 
 Do not run a sandbox `PostOrder` smoke unless the confirmation variable is set deliberately:

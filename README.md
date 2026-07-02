@@ -1,22 +1,22 @@
 # Trading 2.0
 
-Проект торгового робота для Московской биржи через T-Invest API.
+РџСЂРѕРµРєС‚ С‚РѕСЂРіРѕРІРѕРіРѕ СЂРѕР±РѕС‚Р° РґР»СЏ РњРѕСЃРєРѕРІСЃРєРѕР№ Р±РёСЂР¶Рё С‡РµСЂРµР· T-Invest API.
 
-Целевая архитектура:
+Р¦РµР»РµРІР°СЏ Р°СЂС…РёС‚РµРєС‚СѓСЂР°:
 
-- backend полностью на Python;
-- frontend на Vue 3 в dark theme;
-- `trade-core` как долгоживущий критический контейнер;
-- T-Bank gRPC как primary broker transport;
-- FastAPI BFF + WebSocket для live dashboard;
-- PostgreSQL как source of truth по состоянию, ордерам, событиям, отчетам и аудиту;
-- Redis для Celery и coordination/cache;
-- Prometheus + Grafana для метрик;
-- Loki + Fluent Bit для technical logs.
+- backend РїРѕР»РЅРѕСЃС‚СЊСЋ РЅР° Python;
+- frontend РЅР° Vue 3 РІ dark theme;
+- `trade-core` РєР°Рє РґРѕР»РіРѕР¶РёРІСѓС‰РёР№ РєСЂРёС‚РёС‡РµСЃРєРёР№ РєРѕРЅС‚РµР№РЅРµСЂ;
+- T-Bank gRPC РєР°Рє primary broker transport;
+- FastAPI BFF + WebSocket РґР»СЏ live dashboard;
+- PostgreSQL РєР°Рє source of truth РїРѕ СЃРѕСЃС‚РѕСЏРЅРёСЋ, РѕСЂРґРµСЂР°Рј, СЃРѕР±С‹С‚РёСЏРј, РѕС‚С‡РµС‚Р°Рј Рё Р°СѓРґРёС‚Сѓ;
+- Redis РґР»СЏ Celery Рё coordination/cache;
+- Prometheus + Grafana РґР»СЏ РјРµС‚СЂРёРє;
+- Loki + Fluent Bit РґР»СЏ technical logs.
 
-## Обязательное чтение перед разработкой
+## РћР±СЏР·Р°С‚РµР»СЊРЅРѕРµ С‡С‚РµРЅРёРµ РїРµСЂРµРґ СЂР°Р·СЂР°Р±РѕС‚РєРѕР№
 
-Перед любой задачей нужно прочитать:
+РџРµСЂРµРґ Р»СЋР±РѕР№ Р·Р°РґР°С‡РµР№ РЅСѓР¶РЅРѕ РїСЂРѕС‡РёС‚Р°С‚СЊ:
 
 - `Docs/architecture.md`
 - `Docs/implementation-plan.md`
@@ -39,39 +39,39 @@
 - `Docs/observability_runbook.md`
 - `Docs/live-analytics-bff.md`
 - `Docs/logging_analytics_acceptance.md`
-- все ADR из `Docs/adr/`
+- РІСЃРµ ADR РёР· `Docs/adr/`
 
-Если в ходе задачи меняется архитектурное решение, нужно обновить `Docs/` и соответствующий ADR в том же шаге.
+Р•СЃР»Рё РІ С…РѕРґРµ Р·Р°РґР°С‡Рё РјРµРЅСЏРµС‚СЃСЏ Р°СЂС…РёС‚РµРєС‚СѓСЂРЅРѕРµ СЂРµС€РµРЅРёРµ, РЅСѓР¶РЅРѕ РѕР±РЅРѕРІРёС‚СЊ `Docs/` Рё СЃРѕРѕС‚РІРµС‚СЃС‚РІСѓСЋС‰РёР№ ADR РІ С‚РѕРј Р¶Рµ С€Р°РіРµ.
 
-## Текущее состояние
+## РўРµРєСѓС‰РµРµ СЃРѕСЃС‚РѕСЏРЅРёРµ
 
-На этом этапе зафиксирована документация проекта, создан monorepo-каркас, добавлены
-инфраструктурный compose-стек, схема PostgreSQL, BrokerGateway для T-Bank,
-сессионная модель с hourly micro-sessions, market data pipeline с bar engine и
-каркас strategy/risk/execution/reconciliation без прибыльной бизнес-логики.
-Также добавлены structured JSON logging, Prometheus metrics registry и Grafana
-dashboards provisioning для production-like observability. `report-worker`
-содержит Celery task pipeline, hourly/daily reports, counterfactual analytics и
-ручные CLI-скрипты для запуска отчетов вне FastAPI. `api` содержит FastAPI BFF
-с REST endpoints для управления, live read models, отчетов, strategy config и
-live WebSocket channels для dashboard/orders/market/reports. В production-like
-режимах WebSocket в браузере авторизуется через короткоживущий ticket из
-`POST /auth/ws-ticket`, а REST использует bearer auth. `frontend`
-содержит Vue 3 dark-theme UI для live dashboard, reports, settings и diagnostics
-с Pinia stores, REST snapshots и live WebSocket updates.
+РќР° СЌС‚РѕРј СЌС‚Р°РїРµ Р·Р°С„РёРєСЃРёСЂРѕРІР°РЅР° РґРѕРєСѓРјРµРЅС‚Р°С†РёСЏ РїСЂРѕРµРєС‚Р°, СЃРѕР·РґР°РЅ monorepo-РєР°СЂРєР°СЃ, РґРѕР±Р°РІР»РµРЅС‹
+РёРЅС„СЂР°СЃС‚СЂСѓРєС‚СѓСЂРЅС‹Р№ compose-СЃС‚РµРє, СЃС…РµРјР° PostgreSQL, BrokerGateway РґР»СЏ T-Bank,
+СЃРµСЃСЃРёРѕРЅРЅР°СЏ РјРѕРґРµР»СЊ СЃ hourly micro-sessions, market data pipeline СЃ bar engine Рё
+РєР°СЂРєР°СЃ strategy/risk/execution/reconciliation Р±РµР· РїСЂРёР±С‹Р»СЊРЅРѕР№ Р±РёР·РЅРµСЃ-Р»РѕРіРёРєРё.
+РўР°РєР¶Рµ РґРѕР±Р°РІР»РµРЅС‹ structured JSON logging, Prometheus metrics registry Рё Grafana
+dashboards provisioning РґР»СЏ production-like observability. `report-worker`
+СЃРѕРґРµСЂР¶РёС‚ Celery task pipeline, hourly/daily reports, counterfactual analytics Рё
+СЂСѓС‡РЅС‹Рµ CLI-СЃРєСЂРёРїС‚С‹ РґР»СЏ Р·Р°РїСѓСЃРєР° РѕС‚С‡РµС‚РѕРІ РІРЅРµ FastAPI. `api` СЃРѕРґРµСЂР¶РёС‚ FastAPI BFF
+СЃ REST endpoints РґР»СЏ СѓРїСЂР°РІР»РµРЅРёСЏ, live read models, РѕС‚С‡РµС‚РѕРІ, strategy config Рё
+live WebSocket channels РґР»СЏ dashboard/orders/market/reports. Р’ production-like
+СЂРµР¶РёРјР°С… WebSocket РІ Р±СЂР°СѓР·РµСЂРµ Р°РІС‚РѕСЂРёР·СѓРµС‚СЃСЏ С‡РµСЂРµР· РєРѕСЂРѕС‚РєРѕР¶РёРІСѓС‰РёР№ ticket РёР·
+`POST /auth/ws-ticket`, Р° REST РёСЃРїРѕР»СЊР·СѓРµС‚ bearer auth. `frontend`
+СЃРѕРґРµСЂР¶РёС‚ Vue 3 dark-theme UI РґР»СЏ live dashboard, reports, settings Рё diagnostics
+СЃ Pinia stores, REST snapshots Рё live WebSocket updates.
 
-## Каркас репозитория
+## РљР°СЂРєР°СЃ СЂРµРїРѕР·РёС‚РѕСЂРёСЏ
 
-- `apps/trade-core` - долгоживущий Python runtime для session/market/strategy/risk/execution orchestration.
-- `apps/api` - FastAPI BFF для управления, read models, отчетов и live WebSocket feeds.
-- `apps/report-worker` - Celery/report worker для hourly/daily/counterfactual analytics.
-- `apps/frontend` - Vue 3 + Vite dark-theme операторский UI.
-- `packages/common` - общие enums и dataclasses.
-- `tests` - backend unit/smoke/acceptance tests для runtime, API, SDK wrapper, analytics и launch gates.
-- `scripts` - вспомогательные скрипты совместимости.
-- `tools/reports` - CLI для hourly/daily/counterfactual отчетов вне FastAPI.
+- `apps/trade-core` - РґРѕР»РіРѕР¶РёРІСѓС‰РёР№ Python runtime РґР»СЏ session/market/strategy/risk/execution orchestration.
+- `apps/api` - FastAPI BFF РґР»СЏ СѓРїСЂР°РІР»РµРЅРёСЏ, read models, РѕС‚С‡РµС‚РѕРІ Рё live WebSocket feeds.
+- `apps/report-worker` - Celery/report worker РґР»СЏ hourly/daily/counterfactual analytics.
+- `apps/frontend` - Vue 3 + Vite dark-theme РѕРїРµСЂР°С‚РѕСЂСЃРєРёР№ UI.
+- `packages/common` - РѕР±С‰РёРµ enums Рё dataclasses.
+- `tests` - backend unit/smoke/acceptance tests РґР»СЏ runtime, API, SDK wrapper, analytics Рё launch gates.
+- `scripts` - РІСЃРїРѕРјРѕРіР°С‚РµР»СЊРЅС‹Рµ СЃРєСЂРёРїС‚С‹ СЃРѕРІРјРµСЃС‚РёРјРѕСЃС‚Рё.
+- `tools/reports` - CLI РґР»СЏ hourly/daily/counterfactual РѕС‚С‡РµС‚РѕРІ РІРЅРµ FastAPI.
 
-## Локальные проверки
+## Р›РѕРєР°Р»СЊРЅС‹Рµ РїСЂРѕРІРµСЂРєРё
 
 ```bash
 python -m pytest
@@ -83,31 +83,31 @@ cd apps/frontend && npm run typecheck
 cd apps/frontend && npm run test:unit
 ```
 
-На Windows, если PowerShell блокирует `npm.ps1`, используйте `npm.cmd`.
+РќР° Windows, РµСЃР»Рё PowerShell Р±Р»РѕРєРёСЂСѓРµС‚ `npm.ps1`, РёСЃРїРѕР»СЊР·СѓР№С‚Рµ `npm.cmd`.
 
-Единая локальная проверка без зависимости от `make`:
+Р•РґРёРЅР°СЏ Р»РѕРєР°Р»СЊРЅР°СЏ РїСЂРѕРІРµСЂРєР° Р±РµР· Р·Р°РІРёСЃРёРјРѕСЃС‚Рё РѕС‚ `make`:
 
 ```bash
 python scripts/check.py
 ```
 
-Полный local controlled-launch acceptance без реальных broker orders:
+РџРѕР»РЅС‹Р№ local controlled-launch acceptance Р±РµР· СЂРµР°Р»СЊРЅС‹С… broker orders:
 
 ```bash
 python scripts/run_controlled_launch_acceptance.py
 ```
 
-Быстрый вариант, если `scripts/check.py` уже запускался отдельно:
+Р‘С‹СЃС‚СЂС‹Р№ РІР°СЂРёР°РЅС‚, РµСЃР»Рё `scripts/check.py` СѓР¶Рµ Р·Р°РїСѓСЃРєР°Р»СЃСЏ РѕС‚РґРµР»СЊРЅРѕ:
 
 ```bash
 python scripts/run_controlled_launch_acceptance.py --skip-full-check
 ```
 
-Этот gate проверяет analytics-smoke, report rebuild, replay-day,
+Р­С‚РѕС‚ gate РїСЂРѕРІРµСЂСЏРµС‚ analytics-smoke, report rebuild, replay-day,
 `docker compose config`, SQLite migration upgrade/downgrade/upgrade,
-sandbox dry-run, production safety guards и secret scan.
+sandbox dry-run, production safety guards Рё secret scan.
 
-Реальный T-Bank SDK wrapper подключается optional extra, чтобы обычный CI не зависел от
+Р РµР°Р»СЊРЅС‹Р№ T-Bank SDK wrapper РїРѕРґРєР»СЋС‡Р°РµС‚СЃСЏ optional extra, С‡С‚РѕР±С‹ РѕР±С‹С‡РЅС‹Р№ CI РЅРµ Р·Р°РІРёСЃРµР» РѕС‚
 T-Bank package index:
 
 ```powershell
@@ -117,40 +117,40 @@ $env:TBANK_UNARY_TIMEOUT_FLOOR_SECONDS = "5.0"
 python scripts/run_sandbox_smoke.py --dry-run
 ```
 
-Для реального readonly smoke без `--dry-run` токены должны лежать в ignored
-`secrets/tbank_full_access_token` / `secrets/tbank_readonly_token`, а переменные
-`TBANK_*_TOKEN_FILE` должны указывать на эти файлы. `SSL_TBANK_VERIFY=true`
-включает bundled Russian Trusted Root CA в официальном T-Bank SDK; TLS verification
-не отключается.
+Р”Р»СЏ СЂРµР°Р»СЊРЅРѕРіРѕ readonly smoke Р±РµР· `--dry-run` С‚РѕРєРµРЅС‹ РґРѕР»Р¶РЅС‹ Р»РµР¶Р°С‚СЊ РІ ignored
+`secrets/tbank_full_access_token` / `secrets/tbank_readonly_token`, Р° РїРµСЂРµРјРµРЅРЅС‹Рµ
+`TBANK_*_TOKEN_FILE` РґРѕР»Р¶РЅС‹ СѓРєР°Р·С‹РІР°С‚СЊ РЅР° СЌС‚Рё С„Р°Р№Р»С‹. `SSL_TBANK_VERIFY=true`
+РІРєР»СЋС‡Р°РµС‚ bundled Russian Trusted Root CA РІ РѕС„РёС†РёР°Р»СЊРЅРѕРј T-Bank SDK; TLS verification
+РЅРµ РѕС‚РєР»СЋС‡Р°РµС‚СЃСЏ.
 
 ## Trade-core runtime
 
-`python -m trade_core.service` запускает HTTP `/health` и `/metrics`, а также
-фоновый `TradeCoreRuntime`. Безопасный режим по умолчанию - `historical_replay`:
-он открывает logical micro-sessions, пишет domain events в БД, строит closed bars,
-создаёт `signal_candidate`, прогоняет risk gates и создаёт pseudo-orders без
-реальных broker calls.
+`python -m trade_core.service` Р·Р°РїСѓСЃРєР°РµС‚ HTTP `/health` Рё `/metrics`, Р° С‚Р°РєР¶Рµ
+С„РѕРЅРѕРІС‹Р№ `TradeCoreRuntime`. Р‘РµР·РѕРїР°СЃРЅС‹Р№ СЂРµР¶РёРј РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ - `historical_replay`:
+РѕРЅ РѕС‚РєСЂС‹РІР°РµС‚ logical micro-sessions, РїРёС€РµС‚ domain events РІ Р‘Р”, СЃС‚СЂРѕРёС‚ closed bars,
+СЃРѕР·РґР°С‘С‚ `signal_candidate`, РїСЂРѕРіРѕРЅСЏРµС‚ risk gates Рё СЃРѕР·РґР°С‘С‚ pseudo-orders Р±РµР·
+СЂРµР°Р»СЊРЅС‹С… broker calls.
 
-Минимальный локальный запуск без T-Bank токенов:
+РњРёРЅРёРјР°Р»СЊРЅС‹Р№ Р»РѕРєР°Р»СЊРЅС‹Р№ Р·Р°РїСѓСЃРє Р±РµР· T-Bank С‚РѕРєРµРЅРѕРІ:
 
 ```powershell
 $env:TRADING_RUNTIME_MODE = "historical_replay"
 python -m trade_core.service
 ```
 
-Production не стартует без явного `TRADING_PRODUCTION_CONFIRM=I_UNDERSTAND_LIVE_ORDERS`.
+Production РЅРµ СЃС‚Р°СЂС‚СѓРµС‚ Р±РµР· СЏРІРЅРѕРіРѕ `TRADING_PRODUCTION_CONFIRM=I_UNDERSTAND_LIVE_ORDERS`.
 
 ### Launch blocker fixes
 
-- В Docker Compose `trade-core`, `api` и `report-worker` используют один PostgreSQL через `POSTGRES_HOST=postgres`, `POSTGRES_DB`, `POSTGRES_USER` и `POSTGRES_PASSWORD_FILE`.
-- Runtime больше не уходит в SQLite молча. SQLite fallback разрешён только при явном `TRADING_RUNTIME_LOCAL_SQLITE=1` для локальных одно-процессных экспериментов.
-- `trade-core` пишет в startup log/audit `database_backend` и `database_url_redacted`.
-- Sandbox/shadow/production проверяют наличие T-Bank SDK extra; контейнерный build ставит `.[tbank]` через официальный T-Bank package index.
-- Инструменты `SBER,GAZP` резолвятся через T-Bank instruments API в реальные `instrument_uid`/canonical `instrument_id`; placeholder UID запрещён для sandbox/shadow/production.
-- API production использует `TRADING_AUTH_MODE=static_bearer`; браузерные WebSocket соединения получают короткоживущий ticket через `POST /auth/ws-ticket`.
-- Для расширенной приёмки используйте `python scripts/run_launch_readiness.py --mode local|compose|sandbox|shadow|production-preflight`.
+- Р’ Docker Compose `trade-core`, `api` Рё `report-worker` РёСЃРїРѕР»СЊР·СѓСЋС‚ РѕРґРёРЅ PostgreSQL С‡РµСЂРµР· `POSTGRES_HOST=postgres`, `POSTGRES_DB`, `POSTGRES_USER` Рё `POSTGRES_PASSWORD_FILE`.
+- Runtime Р±РѕР»СЊС€Рµ РЅРµ СѓС…РѕРґРёС‚ РІ SQLite РјРѕР»С‡Р°. SQLite fallback СЂР°Р·СЂРµС€С‘РЅ С‚РѕР»СЊРєРѕ РїСЂРё СЏРІРЅРѕРј `TRADING_RUNTIME_LOCAL_SQLITE=1` РґР»СЏ Р»РѕРєР°Р»СЊРЅС‹С… РѕРґРЅРѕ-РїСЂРѕС†РµСЃСЃРЅС‹С… СЌРєСЃРїРµСЂРёРјРµРЅС‚РѕРІ.
+- `trade-core` РїРёС€РµС‚ РІ startup log/audit `database_backend` Рё `database_url_redacted`.
+- Sandbox/shadow/production РїСЂРѕРІРµСЂСЏСЋС‚ РЅР°Р»РёС‡РёРµ T-Bank SDK extra; РєРѕРЅС‚РµР№РЅРµСЂРЅС‹Р№ build СЃС‚Р°РІРёС‚ `.[tbank]` С‡РµСЂРµР· РѕС„РёС†РёР°Р»СЊРЅС‹Р№ T-Bank package index.
+- РРЅСЃС‚СЂСѓРјРµРЅС‚С‹ `SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T` СЂРµР·РѕР»РІСЏС‚СЃСЏ С‡РµСЂРµР· T-Bank instruments API РІ СЂРµР°Р»СЊРЅС‹Рµ `instrument_uid`/canonical `instrument_id`; placeholder UID Р·Р°РїСЂРµС‰С‘РЅ РґР»СЏ sandbox/shadow/production.
+- API production РёСЃРїРѕР»СЊР·СѓРµС‚ `TRADING_AUTH_MODE=static_bearer`; Р±СЂР°СѓР·РµСЂРЅС‹Рµ WebSocket СЃРѕРµРґРёРЅРµРЅРёСЏ РїРѕР»СѓС‡Р°СЋС‚ РєРѕСЂРѕС‚РєРѕР¶РёРІСѓС‰РёР№ ticket С‡РµСЂРµР· `POST /auth/ws-ticket`.
+- Р”Р»СЏ СЂР°СЃС€РёСЂРµРЅРЅРѕР№ РїСЂРёС‘РјРєРё РёСЃРїРѕР»СЊР·СѓР№С‚Рµ `python scripts/run_launch_readiness.py --mode local|compose|sandbox|shadow|production-preflight`.
 
-Приёмка logging/analytics слоя для калибровки:
+РџСЂРёС‘РјРєР° logging/analytics СЃР»РѕСЏ РґР»СЏ РєР°Р»РёР±СЂРѕРІРєРё:
 
 ```bash
 make analytics-smoke
@@ -158,20 +158,20 @@ make report-rebuild
 make replay-day
 ```
 
-Историческая загрузка свечей перед replay/calibration:
+РСЃС‚РѕСЂРёС‡РµСЃРєР°СЏ Р·Р°РіСЂСѓР·РєР° СЃРІРµС‡РµР№ РїРµСЂРµРґ replay/calibration:
 
 ```bash
-python scripts/run_historical_candle_backfill.py --instruments SBER,GAZP --lookback-days 90 --dry-run
+python scripts/run_historical_candle_backfill.py --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T --lookback-days 90 --dry-run
 ```
 
-Реальная загрузка использует только readonly T-Bank methods и пишет raw `1m`
-candles плюс derived `5m/10m/15m` bars в `market_candle`. Подробности:
+Р РµР°Р»СЊРЅР°СЏ Р·Р°РіСЂСѓР·РєР° РёСЃРїРѕР»СЊР·СѓРµС‚ С‚РѕР»СЊРєРѕ readonly T-Bank methods Рё РїРёС€РµС‚ raw `1m`
+candles РїР»СЋСЃ derived `5m/10m/15m` bars РІ `market_candle`. РџРѕРґСЂРѕР±РЅРѕСЃС‚Рё:
 `Docs/historical-candle-backfill.md`.
 
-После загрузки свечей исторический контур проверяет качество `market_candle`,
-запускает DB-backed replay, строит counterfactual `+5m/+10m/+15m`,
-пересобирает historical hourly/daily reports и формирует calibration report без
-реальных `PostOrder`/`CancelOrder`:
+РџРѕСЃР»Рµ Р·Р°РіСЂСѓР·РєРё СЃРІРµС‡РµР№ РёСЃС‚РѕСЂРёС‡РµСЃРєРёР№ РєРѕРЅС‚СѓСЂ РїСЂРѕРІРµСЂСЏРµС‚ РєР°С‡РµСЃС‚РІРѕ `market_candle`,
+Р·Р°РїСѓСЃРєР°РµС‚ DB-backed replay, СЃС‚СЂРѕРёС‚ counterfactual `+5m/+10m/+15m`,
+РїРµСЂРµСЃРѕР±РёСЂР°РµС‚ historical hourly/daily reports Рё С„РѕСЂРјРёСЂСѓРµС‚ calibration report Р±РµР·
+СЂРµР°Р»СЊРЅС‹С… `PostOrder`/`CancelOrder`:
 
 ```bash
 make historical-quality LOOKBACK_DAYS=90
@@ -186,10 +186,10 @@ make market-special-days LOOKBACK_DAYS=90
 make calibration-primary LOOKBACK_DAYS=90
 ```
 
-Операционный порядок: `Docs/runbooks/historical-replay.md` и
-`Docs/runbooks/calibration.md`. Перед final calibration обязательно выполните
-`Docs/runbooks/corporate-actions.md` и `Docs/runbooks/final-historical-calibration.md`:
-dividend/corporate-action дни исключаются из primary calibration по умолчанию.
+РћРїРµСЂР°С†РёРѕРЅРЅС‹Р№ РїРѕСЂСЏРґРѕРє: `Docs/runbooks/historical-replay.md` Рё
+`Docs/runbooks/calibration.md`. РџРµСЂРµРґ final calibration РѕР±СЏР·Р°С‚РµР»СЊРЅРѕ РІС‹РїРѕР»РЅРёС‚Рµ
+`Docs/runbooks/corporate-actions.md` Рё `Docs/runbooks/final-historical-calibration.md`:
+dividend/corporate-action РґРЅРё РёСЃРєР»СЋС‡Р°СЋС‚СЃСЏ РёР· primary calibration РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ.
 Primary corporate-action path is T-Bank `GetDividends` via `run_tbank_dividend_sync.py`;
 manual CSV/JSON import is fallback/override only and does not make final calibration clean
 unless the operator explicitly allows manual corporate actions.
@@ -212,11 +212,15 @@ CLI:
 
 ```bash
 python scripts/run_intraday_analytics.py --date YYYY-MM-DD --json-output
-python scripts/run_calibration_observatory.py --universe SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR --lookback-days 20 --json-output
+python scripts/run_calibration_observatory.py --universe SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T --lookback-days 20 --json-output
 ```
 
 Outputs are written under `.local/collection_reports/intraday/` and
 `.local/collection_reports/calibration_observatory/`.
+
+Core universe is `SBER, GAZP, LKOH, YDEX, TATN, GMKN, OZON, VTBR, T`. `T` is
+РњРљРџРђРћ В«Рў-РўРµС…РЅРѕР»РѕРіРёРёВ» (`MOEX:T`, TQBR, ISIN `RU000A107UL4`); broker identity,
+lot size and min price increment must come from resolver/`instrument_registry`.
 
 Safety invariants:
 
@@ -226,9 +230,9 @@ Safety invariants:
 - 10-20 trading days are early evidence, not final truth, and must not hard-disable a contour;
 - any actual runtime config application remains a separate future operator/admin workflow.
 
-## Локальный Docker Compose
+## Р›РѕРєР°Р»СЊРЅС‹Р№ Docker Compose
 
-Создайте локальные Docker secrets в папке `secrets/` и не коммитьте их:
+РЎРѕР·РґР°Р№С‚Рµ Р»РѕРєР°Р»СЊРЅС‹Рµ Docker secrets РІ РїР°РїРєРµ `secrets/` Рё РЅРµ РєРѕРјРјРёС‚СЊС‚Рµ РёС…:
 
 ```bash
 mkdir -p secrets
@@ -238,7 +242,7 @@ printf "paste_full_access_token_here" > secrets/tbank_full_access_token
 printf "paste_readonly_token_here" > secrets/tbank_readonly_token
 ```
 
-Запуск:
+Р—Р°РїСѓСЃРє:
 
 ```bash
 docker compose up -d --build
@@ -247,7 +251,7 @@ python -m alembic upgrade head
 docker compose logs -f --tail=200
 ```
 
-Локальные адреса:
+Р›РѕРєР°Р»СЊРЅС‹Рµ Р°РґСЂРµСЃР°:
 
 - frontend: `http://localhost:5173`
 - api health: `http://localhost:8000/health`
@@ -264,7 +268,7 @@ production, resolve internal canonical instruments to T-Bank `instrument_uid` /
 `figi`:
 
 ```powershell
-python scripts/run_tbank_instrument_resolve.py --instruments SBER,GAZP,LKOH --strict --json-output
+python scripts/run_tbank_instrument_resolve.py --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T --strict --json-output
 python scripts/run_launch_readiness.py --mode instrument-resolution
 ```
 
@@ -280,9 +284,9 @@ It is not trading shadow and not strategy shadow.
 
 ```powershell
 set TRADING_DATA_ONLY_SHADOW=true
-python scripts/run_data_only_shadow_smoke.py --instruments SBER,GAZP --minutes 10 --require-dividend-sync --json-output
+python scripts/run_data_only_shadow_smoke.py --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T --minutes 10 --require-dividend-sync --json-output
 python scripts/run_data_shadow_summary_report.py --lookback-hours 6 --json-output
-python scripts/run_launch_readiness.py --mode data-shadow --instruments SBER,GAZP --shadow-minutes 10
+python scripts/run_launch_readiness.py --mode data-shadow --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T --shadow-minutes 10
 ```
 
 Data-only shadow writes `market_microstructure_snapshot` and exposes
@@ -305,7 +309,7 @@ Closed market is reported as `market_closed_expected` with `next_session_at` and
 a strategy failure:
 
 ```powershell
-python scripts/run_data_only_shadow_smoke.py --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR --minutes 0 --preflight-only --require-dividend-sync --json-output
+python scripts/run_data_only_shadow_smoke.py --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T --minutes 0 --preflight-only --require-dividend-sync --json-output
 ```
 
 The dashboard Start action may call `/session/preflight` first, but that check is
@@ -442,7 +446,7 @@ Selected order-book refresh is intentionally faster than the freshness budget:
 The selected ladder is considered complete only from actual `bids[]`/`asks[]`
 arrays with at least five levels per side. `depth_levels` without levels, or a
 single top-of-book row, must show as loading/unavailable and must not be rendered
-as a fresh full стакан.
+as a fresh full СЃС‚Р°РєР°РЅ.
 
 Explicit readonly broker quote refresh remains `POST /market/quotes/refresh`.
 Temporary request failures must not clear already displayed quotes; if the readonly
@@ -479,10 +483,10 @@ Trade-core canonicalizes stream payloads from broker `instrument_uid`/`figi` to
 `MOEX:*` and keeps the original id as `broker_instrument_id`; dashboard selected
 books and market trades join by canonical `instrument_id`.
 
-After the official session closes, the dashboard must show `Рынок закрыт` /
-`Торги закрыты` from the dashboard feed snapshot. Broker OTC or indicative
+After the official session closes, the dashboard must show `Р С‹РЅРѕРє Р·Р°РєСЂС‹С‚` /
+`РўРѕСЂРіРё Р·Р°РєСЂС‹С‚С‹` from the dashboard feed snapshot. Broker OTC or indicative
 quotes may still be displayed, but only as venue/source metadata; they must not
-make the ribbon jump back to `Вечерняя сессия`, must not keep
+make the ribbon jump back to `Р’РµС‡РµСЂРЅСЏСЏ СЃРµСЃСЃРёСЏ`, must not keep
 `data_only_collection_allowed=true`, and must not preserve a cached live exchange
 order book as a fresh calibration-eligible book.
 

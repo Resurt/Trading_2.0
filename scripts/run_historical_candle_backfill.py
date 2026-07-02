@@ -65,9 +65,7 @@ async def async_main() -> None:
             broker_gateway = (
                 DryRunBrokerGateway()
                 if args.dry_run
-                else TBankBrokerGateway(
-                    config=TBankBrokerConfig.from_launch_policy(launch_policy)
-                )
+                else TBankBrokerGateway(config=TBankBrokerConfig.from_launch_policy(launch_policy))
             )
             service = HistoricalCandleBackfillService(
                 broker_gateway=broker_gateway,  # type: ignore[arg-type]
@@ -125,7 +123,7 @@ async def async_main() -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--instruments", default="SBER,GAZP")
+    parser.add_argument("--instruments", default="SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T")
     parser.add_argument("--from-date", type=parse_date)
     parser.add_argument("--to-date", type=parse_date)
     parser.add_argument("--raw-interval", default="1m")

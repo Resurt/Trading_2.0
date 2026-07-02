@@ -9,7 +9,7 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
-CORE_TICKERS = ("SBER", "GAZP", "LKOH", "YDEX", "TATN", "GMKN", "OZON", "VTBR")
+CORE_TICKERS = ("SBER", "GAZP", "LKOH", "YDEX", "TATN", "GMKN", "OZON", "VTBR", "T")
 CORE_CSV = ",".join(CORE_TICKERS)
 
 REASON_LABELS = {
@@ -60,12 +60,11 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
         errors.append("market overview instruments is not a list")
 
     tickers = {
-        str(row.get("ticker") or str(row.get("instrument_id", "")).split(":")[-1])
-        for row in rows
+        str(row.get("ticker") or str(row.get("instrument_id", "")).split(":")[-1]) for row in rows
     }
     missing_tickers = [ticker for ticker in CORE_TICKERS if ticker not in tickers]
-    if len(rows) != 8:
-        errors.append(f"market overview returned {len(rows)} rows, expected 8")
+    if len(rows) != len(CORE_TICKERS):
+        errors.append(f"market overview returned {len(rows)} rows, expected {len(CORE_TICKERS)}")
     if missing_tickers:
         errors.append(f"market overview missing core tickers: {missing_tickers}")
 
@@ -151,10 +150,9 @@ def validate_details(
     no_samples_marker = details.get("market_trades_source") == "no_market_trades_samples"
     if no_trades and not no_samples_marker:
         warnings.append("selected details has no trades without no_market_trades_samples marker")
-    has_quality_without_book = (
-        not details.get("order_book_source")
-        and details.get("display_market_quality_score") not in (None, "")
-    )
+    has_quality_without_book = not details.get("order_book_source") and details.get(
+        "display_market_quality_score"
+    ) not in (None, "")
     if has_quality_without_book:
         errors.append("details exposes display quality score without a real order book")
 

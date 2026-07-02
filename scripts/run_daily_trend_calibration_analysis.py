@@ -24,10 +24,19 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import func, select
 
 ROOT = Path(__file__).resolve().parents[1]
-for src in (ROOT, ROOT / "packages" / "common" / "src"):
+for src in (
+    ROOT,
+    ROOT / "apps" / "trade-core" / "src",
+    ROOT / "packages" / "common" / "src",
+):
     if str(src) not in path:
         path.insert(0, str(src))
 
+from trade_core.strategy.commission_policy import (  # noqa: E402
+    DEFAULT_COMMISSION_BPS_PER_SIDE,
+    T_PRO_FREE_EXECUTED_TRADES_PER_DAY,
+    estimate_next_execution_commission,
+)
 from trading_common.db.config import build_database_url_from_env
 from trading_common.db.models import (
     InstrumentRegistry,
@@ -252,9 +261,7 @@ def _build_pseudo_bars(
                 low_mid=min(item.mid_price for item in ordered),
                 close_mid=ordered[-1].mid_price,
                 avg_spread_bps=(
-                    sum(spreads, Decimal("0")) / Decimal(len(spreads))
-                    if spreads
-                    else Decimal("0")
+                    sum(spreads, Decimal("0")) / Decimal(len(spreads)) if spreads else Decimal("0")
                 ),
                 samples_count=len(ordered),
             )
@@ -482,6 +489,7 @@ def _payload(
             bool(item.get("artifact_excluded")) for item in known_windows
         ),
         "known_window_validation": known_windows,
+        "t_commission_scenario_analysis": _t_commission_scenario_analysis(valid),
         "top_windows": [asdict(item) for item in top[:20]],
         "worst_windows": [asdict(item) for item in worst[:20]],
         "summary_by_instrument_session_side": _summary(valid),
@@ -510,12 +518,71 @@ def _summary(windows: list[ForwardWindow]) -> list[dict[str, Any]]:
                 "avg_net_bps_proxy": sum(values, Decimal("0")) / Decimal(len(values)),
                 "best_net_bps_proxy": max(values),
                 "worst_net_bps_proxy": min(values),
-                "hit_rate_net_positive": (
-                    sum(1 for value in values if value > 0) / len(values)
-                ),
+                "hit_rate_net_positive": (sum(1 for value in values if value > 0) / len(values)),
             }
         )
     return result
+
+
+def _t_commission_scenario_analysis(windows: list[ForwardWindow]) -> dict[str, Any]:
+    t_windows = [
+        window
+        for window in windows
+        if _ticker_symbol(window.instrument) == "T" and window.gross_bps is not None
+    ]
+    regular_policy = estimate_next_execution_commission(
+        instrument_id="MOEX:T",
+        fallback_commission_bps=DEFAULT_COMMISSION_BPS_PER_SIDE,
+        pro_subscription_active=None,
+    )
+    pro_policy = estimate_next_execution_commission(
+        instrument_id="MOEX:T",
+        fallback_commission_bps=DEFAULT_COMMISSION_BPS_PER_SIDE,
+        executed_trades_today=0,
+        pro_subscription_active=True,
+    )
+    if not t_windows:
+        return {
+            "instrument_id": "MOEX:T",
+            "candidate_windows": 0,
+            "effective_cost_model": pro_policy.as_payload(),
+            "regular_cost_model": regular_policy.as_payload(),
+            "free_quota_remaining_assumption": T_PRO_FREE_EXECUTED_TRADES_PER_DAY,
+            "net_bps_with_regular_commission": None,
+            "net_bps_with_T_pro_free_commission": None,
+            "zero_commission_changes_net_sign_count": 0,
+            "warning": "no_T_windows_available",
+        }
+    regular_net: list[Decimal] = []
+    pro_free_net: list[Decimal] = []
+    changed_sign = 0
+    for window in t_windows:
+        gross = window.gross_bps or Decimal("0")
+        regular_cost = window.estimated_cost_bps
+        spread_only_cost = max(
+            regular_cost - (DEFAULT_COMMISSION_BPS_PER_SIDE * Decimal("2")),
+            Decimal("0"),
+        )
+        regular_value = gross - regular_cost
+        pro_value = gross - spread_only_cost
+        regular_net.append(regular_value)
+        pro_free_net.append(pro_value)
+        if regular_value <= Decimal("0") < pro_value:
+            changed_sign += 1
+    return {
+        "instrument_id": "MOEX:T",
+        "candidate_windows": len(t_windows),
+        "effective_cost_model": pro_policy.as_payload(),
+        "regular_cost_model": regular_policy.as_payload(),
+        "free_quota_remaining_assumption": T_PRO_FREE_EXECUTED_TRADES_PER_DAY,
+        "net_bps_with_regular_commission": sum(regular_net, Decimal("0"))
+        / Decimal(len(regular_net)),
+        "net_bps_with_T_pro_free_commission": sum(pro_free_net, Decimal("0"))
+        / Decimal(len(pro_free_net)),
+        "zero_commission_changes_net_sign_count": changed_sign,
+        "positive_regular_count": sum(1 for value in regular_net if value > 0),
+        "positive_T_pro_free_count": sum(1 for value in pro_free_net if value > 0),
+    }
 
 
 def _nearest_point(

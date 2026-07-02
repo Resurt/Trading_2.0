@@ -6,6 +6,7 @@ from decimal import Decimal, InvalidOperation
 
 from trade_core.session import OrderSessionPolicy
 from trade_core.session.reason_codes import ORDER_TYPE_FORBIDDEN
+from trade_core.strategy.commission_policy import estimate_next_execution_commission
 from trade_core.strategy.models import (
     BlockerCode,
     PortfolioSnapshot,
@@ -101,9 +102,7 @@ class DefaultRiskEngine:
                 "special_day_trade_policy": request.special_day_trade_policy,
             },
             limit_value=Decimal("0"),
-            observed_value=(
-                Decimal("1") if request.future_dividend_risk_window else Decimal("0")
-            ),
+            observed_value=(Decimal("1") if request.future_dividend_risk_window else Decimal("0")),
         )
         self._append_gate(
             gates,
@@ -187,14 +186,11 @@ class DefaultRiskEngine:
                 "block_short_on_special_day": request.limits.block_short_on_special_day,
                 "candidate_side": request.candidate.side.value,
                 "special_day_trade_policy": (
-                    request.special_day_trade_policy
-                    or request.limits.special_day_trade_policy
+                    request.special_day_trade_policy or request.limits.special_day_trade_policy
                 ),
             },
             limit_value=Decimal("0"),
-            observed_value=(
-                Decimal("1") if request.special_day_type is not None else Decimal("0")
-            ),
+            observed_value=(Decimal("1") if request.special_day_type is not None else Decimal("0")),
         )
 
         self._append_gate(
@@ -435,9 +431,23 @@ class DefaultRiskEngine:
             },
         )
 
+        commission_policy = estimate_next_execution_commission(
+            instrument_id=request.candidate.instrument.instrument_id,
+            fallback_commission_bps=request.limits.assumed_commission_bps_per_side,
+            executed_trades_today=request.limits.t_executed_trades_today,
+            pro_subscription_active=request.limits.t_pro_subscription_active,
+            block_t_after_free_quota=request.limits.t_block_after_free_quota,
+        )
+        self._append_gate(
+            gates,
+            code=BlockerCode.T_PRO_FREE_QUOTA_EXHAUSTED,
+            gate_name="t_pro_free_quota_guard",
+            passed=not (is_entry and commission_policy.block_new_entry_after_free_quota),
+            reason_payload=commission_policy.as_payload(),
+        )
         total_costs = _total_expected_costs_bps(
             spread_bps=spread_bps,
-            commission_bps_per_side=request.limits.assumed_commission_bps_per_side,
+            commission_bps_per_side=commission_policy.commission_bps,
             slippage_bps=request.limits.assumed_slippage_bps,
         )
         edge_after_total_costs = request.candidate.expected_edge_bps - total_costs
@@ -450,15 +460,16 @@ class DefaultRiskEngine:
             observed_value=edge_after_total_costs,
             reason_payload={
                 "expected_edge_bps": str(request.candidate.expected_edge_bps),
-                "commission_bps_per_side": str(
-                    max(request.limits.assumed_commission_bps_per_side, Decimal("5"))
-                ),
+                "commission_bps_per_side": str(max(commission_policy.commission_bps, Decimal("0"))),
                 "round_trip_commission_bps": str(
                     max(
-                        request.limits.assumed_commission_bps_per_side * Decimal("2"),
-                        Decimal("10"),
+                        commission_policy.commission_bps * Decimal("2"),
+                        Decimal("0")
+                        if commission_policy.free_commission_applies
+                        else Decimal("10"),
                     )
                 ),
+                "commission_policy": commission_policy.as_payload(),
                 "spread_bps": _optional_str(spread_bps),
                 "assumed_slippage_bps": str(max(request.limits.assumed_slippage_bps, Decimal("0"))),
                 "total_expected_costs_bps": str(total_costs),
@@ -635,14 +646,12 @@ class DefaultRiskEngine:
             },
         )
 
-        exit_without_position = (
-            is_long_exit and _current_long_lots(request.portfolio) <= 0
-        ) or (is_short_exit and _current_short_lots(request.portfolio) <= 0)
+        exit_without_position = (is_long_exit and _current_long_lots(request.portfolio) <= 0) or (
+            is_short_exit and _current_short_lots(request.portfolio) <= 0
+        )
         exit_quantity_exceeds_position = (
             is_long_exit and request.candidate.lot_qty > _current_long_lots(request.portfolio)
-        ) or (
-            is_short_exit and request.candidate.lot_qty > _current_short_lots(request.portfolio)
-        )
+        ) or (is_short_exit and request.candidate.lot_qty > _current_short_lots(request.portfolio))
         self._append_gate(
             gates,
             code=BlockerCode.EXIT_WITHOUT_POSITION,
@@ -823,8 +832,11 @@ def _total_expected_costs_bps(
     commission_bps_per_side: Decimal,
     slippage_bps: Decimal,
 ) -> Decimal:
-    commission_per_side = max(commission_bps_per_side, Decimal("5"))
-    round_trip_commission = max(commission_per_side * Decimal("2"), Decimal("10"))
+    if commission_bps_per_side == Decimal("0"):
+        round_trip_commission = Decimal("0")
+    else:
+        commission_per_side = max(commission_bps_per_side, Decimal("5"))
+        round_trip_commission = max(commission_per_side * Decimal("2"), Decimal("10"))
     spread_component = max(spread_bps or Decimal("0"), Decimal("0"))
     slippage_component = max(slippage_bps, Decimal("0"))
     return round_trip_commission + spread_component + slippage_component

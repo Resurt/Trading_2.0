@@ -220,8 +220,7 @@ async def _run_open_market_smoke(
         if _is_resource_exhausted(exc):
             warnings.append("broker_resource_exhausted")
             errors.append(
-                "broker_resource_exhausted: reduce universe or "
-                "--max-instruments-per-stream-batch"
+                "broker_resource_exhausted: reduce universe or --max-instruments-per-stream-batch"
             )
         else:
             errors.append(f"{type(exc).__name__}: {exc}")
@@ -243,19 +242,13 @@ async def _run_open_market_smoke(
         age_seconds = max(
             Decimal("0"),
             Decimal(
-                str(
-                    (
-                        datetime.now(tz=UTC) - runtime.stats.last_stream_message_at
-                    ).total_seconds()
-                )
+                str((datetime.now(tz=UTC) - runtime.stats.last_stream_message_at).total_seconds())
             ),
         ).quantize(Decimal("0.001"))
     final_counts = _table_counts(runtime.database)
     deltas = _count_deltas(initial_counts, final_counts)
     forbidden_deltas = [
-        name
-        for name in ("signal_candidate", "order_intent", "broker_order")
-        if deltas[name] != 0
+        name for name in ("signal_candidate", "order_intent", "broker_order") if deltas[name] != 0
     ]
     if forbidden_deltas:
         errors.append(f"data_only_shadow_order_path_delta:{','.join(forbidden_deltas)}")
@@ -315,7 +308,7 @@ async def _run_open_market_smoke(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--instruments", default="SBER,GAZP")
+    parser.add_argument("--instruments", default="SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T")
     parser.add_argument("--minutes", type=float, default=10)
     parser.add_argument("--database-url")
     parser.add_argument("--require-dividend-sync", action="store_true")

@@ -74,6 +74,7 @@ function mountWithStores() {
       quoteFixture("MOEX:GMKN", "GMKN", "131.7", "stale", "latest_market_candle_close"),
       quoteFixture("MOEX:OZON", "OZON", "3710.5", "stale", "latest_market_candle_close"),
       quoteFixture("MOEX:VTBR", "VTBR", "75.44", "previous_close", "previous_close"),
+      quoteFixture("MOEX:T", "T", "302.70", "stale", "latest_market_candle_close"),
     ],
   };
   market.selectedInstrumentId = "MOEX:SBER";
@@ -136,8 +137,8 @@ describe("LiveDashboardView", () => {
 
     expect(wrapper.find('[data-testid="live-dashboard"]').exists()).toBe(true);
     expect(wrapper.text()).toContain("Котировки выбранных инструментов");
-    expect(wrapper.text()).toContain("8 инструментов");
-    expect(wrapper.findAll(".quote-card").length).toBe(8);
+    expect(wrapper.text()).toContain("9 инструментов");
+    expect(wrapper.findAll(".quote-card").length).toBe(9);
     expect(wrapper.find(".quote-change").exists()).toBe(false);
     expect(wrapper.find(".quote-table").exists()).toBe(false);
     expect(wrapper.text()).toContain("СТАКАН");

@@ -32,7 +32,7 @@ from trading_common.telemetry import get_logger, log_event
 
 JsonPayload = dict[str, Any]
 MSK = ZoneInfo("Europe/Moscow")
-DEFAULT_INSTRUMENTS = ("SBER", "GAZP")
+DEFAULT_INSTRUMENTS = ("SBER", "GAZP", "LKOH", "YDEX", "TATN", "GMKN", "OZON", "VTBR", "T")
 DEFAULT_DERIVED_TIMEFRAMES = (Timeframe.M5, Timeframe.M10, Timeframe.M15)
 
 LOGGER = get_logger(__name__)
@@ -735,6 +735,8 @@ def _instrument_from_registry(row: InstrumentRegistry) -> InstrumentRef:
         figi=row.figi,
         class_code=row.class_code,
         ticker=row.ticker,
+        lot_size=row.lot_size,
+        min_price_increment=row.min_price_increment,
     )
 
 
@@ -745,11 +747,7 @@ def _ticker_for(instrument: InstrumentRef) -> str:
 
 
 def _looks_like_placeholder(instrument: InstrumentRef) -> bool:
-    value = (
-        instrument.instrument_uid
-        or instrument.figi
-        or instrument.instrument_id
-    ).lower()
+    value = (instrument.instrument_uid or instrument.figi or instrument.instrument_id).lower()
     return "placeholder" in value or "safe-noop" in value or "safe_noop" in value
 
 

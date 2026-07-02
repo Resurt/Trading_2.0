@@ -81,7 +81,17 @@ TERMINAL_ORDER_STATUSES = frozenset({"filled", "cancelled", "rejected"})
 MARKET_FEED_ORDER_BOOK_DISPLAY_LEVELS = 10
 MARKET_FEED_TRADE_TAPE_DISPLAY_ROWS = 10
 DEFAULT_ANALYTICS_LIMIT = 50
-DEFAULT_DASHBOARD_UNIVERSE = ("SBER", "GAZP", "LKOH", "YDEX", "TATN", "GMKN", "OZON", "VTBR")
+DEFAULT_DASHBOARD_UNIVERSE = (
+    "SBER",
+    "GAZP",
+    "LKOH",
+    "YDEX",
+    "TATN",
+    "GMKN",
+    "OZON",
+    "VTBR",
+    "T",
+)
 DASHBOARD_TRADE_TAPE_DISPLAY_ROWS = 10
 
 
@@ -144,9 +154,7 @@ class BffReadService:
         if portfolio_summary.balance.balance_degraded:
             degraded_flags.append("balance_unavailable")
         data_shadow_lifecycle = self._data_shadow_lifecycle_summary()
-        data_shadow_collector_state = str(
-            data_shadow_lifecycle.get("collector_state") or "stopped"
-        )
+        data_shadow_collector_state = str(data_shadow_lifecycle.get("collector_state") or "stopped")
         command = self._latest_robot_command()
         command_payload = command.payload if command is not None else {}
         result_payload = command.result_payload if command is not None else {}
@@ -155,12 +163,16 @@ class BffReadService:
         if not isinstance(result_payload, dict):
             result_payload = {}
         command_status = _command_status_for_read_model(command, data_shadow_lifecycle)
-        preflight_phase = _str_payload_value(
-            data_shadow_lifecycle,
-            "preflight_phase",
-        ) or _str_payload_value(result_payload, "preflight_phase") or _str_payload_value(
-            command_payload,
-            "preflight_phase",
+        preflight_phase = (
+            _str_payload_value(
+                data_shadow_lifecycle,
+                "preflight_phase",
+            )
+            or _str_payload_value(result_payload, "preflight_phase")
+            or _str_payload_value(
+                command_payload,
+                "preflight_phase",
+            )
         )
         start_in_progress = bool(
             command is not None
@@ -172,11 +184,11 @@ class BffReadService:
                 in {"preflight_pending", "preflight_running", "preflight_retrying"}
             )
         )
-        if (
-            robot_control_state == "running"
-            and data_shadow_collector_state
-            not in {"collecting", "starting", "paused_until_next_window"}
-        ):
+        if robot_control_state == "running" and data_shadow_collector_state not in {
+            "collecting",
+            "starting",
+            "paused_until_next_window",
+        }:
             degraded_flags.append("data_shadow_collector_not_collecting")
 
         return RobotStatusResponse(
@@ -193,14 +205,10 @@ class BffReadService:
             degraded_flags=degraded_flags,
             robot_control_state=robot_control_state,
             data_shadow_collector_state=data_shadow_collector_state,
-            daily_collection_active=bool(
-                data_shadow_lifecycle.get("daily_collection_active")
-            ),
+            daily_collection_active=bool(data_shadow_lifecycle.get("daily_collection_active")),
             effective_logging_state=_effective_logging_state(
                 collector_state=data_shadow_collector_state,
-                daily_collection_active=bool(
-                    data_shadow_lifecycle.get("daily_collection_active")
-                ),
+                daily_collection_active=bool(data_shadow_lifecycle.get("daily_collection_active")),
                 start_in_progress=start_in_progress,
             ),
             command_id=command.command_id if command is not None else None,
@@ -269,9 +277,11 @@ class BffReadService:
         *,
         preflight: Mapping[str, Any] | Any | None = None,
     ) -> SessionSnapshotResponse:
-        run = self._session.execute(
-            select(SessionRun).order_by(SessionRun.started_at.desc())
-        ).scalars().first()
+        run = (
+            self._session.execute(select(SessionRun).order_by(SessionRun.started_at.desc()))
+            .scalars()
+            .first()
+        )
         preflight_payload = _preflight_payload(preflight)
         if preflight_payload:
             return _session_snapshot_from_preflight(preflight_payload, runtime_run=run)
@@ -430,8 +440,7 @@ class BffReadService:
         summary = self._latest_order_book_summary(instrument_id, registry=registry)
         official_exchange_closed = official_decision.official_exchange_closed
         official_exchange_open = (
-            not official_exchange_closed
-            and current_session.session_phase == "continuous_trading"
+            not official_exchange_closed and current_session.session_phase == "continuous_trading"
         )
         class_code = registry.class_code if registry is not None else "TQBR"
         board = class_code
@@ -440,9 +449,7 @@ class BffReadService:
         order_book_age = None
         if summary is not None:
             order_book_age = _age_seconds(summary.ts_utc, now=now)
-            order_book_stale = (
-                order_book_age is None or order_book_age > order_book_max_age_seconds
-            )
+            order_book_stale = order_book_age is None or order_book_age > order_book_max_age_seconds
             if summary.mid_price is not None:
                 book_price_source = (
                     "live_exchange_order_book"
@@ -451,9 +458,7 @@ class BffReadService:
                     if official_exchange_closed
                     else "broker_indicative_quote"
                 )
-                price_candidates.append(
-                    (summary.ts_utc, summary.mid_price, book_price_source)
-                )
+                price_candidates.append((summary.ts_utc, summary.mid_price, book_price_source))
         if candle is not None:
             price_candidates.append(
                 (candle.close_ts_utc, candle.close_price, "latest_market_candle_close")
@@ -501,13 +506,17 @@ class BffReadService:
         )
         quote_allowed_for_display = last_price is not None
         order_book_exchange_ts = (
-            summary.exchange_ts if summary is not None and summary.exchange_ts is not None
-            else summary.ts_utc if summary is not None
+            summary.exchange_ts
+            if summary is not None and summary.exchange_ts is not None
+            else summary.ts_utc
+            if summary is not None
             else None
         )
         order_book_received_ts = (
-            summary.received_ts if summary is not None and summary.received_ts is not None
-            else summary.ts_utc if summary is not None
+            summary.received_ts
+            if summary is not None and summary.received_ts is not None
+            else summary.ts_utc
+            if summary is not None
             else None
         )
         order_book_freshness = _read_model_freshness_payload(
@@ -523,11 +532,7 @@ class BffReadService:
             else None
         )
         change_bps: Decimal | None = None
-        if (
-            change_abs is not None
-            and previous_close is not None
-            and previous_close != Decimal("0")
-        ):
+        if change_abs is not None and previous_close is not None and previous_close != Decimal("0"):
             change_bps = change_abs / previous_close * Decimal("10000")
 
         order_book_summary: JsonPayload = {}
@@ -630,9 +635,7 @@ class BffReadService:
         )
         latest_persisted_trade_ts = _latest_market_trade_ts(persisted_market_trades)
         market_trades_source = (
-            "order_book_summary_payload"
-            if recent_market_trades
-            else "no_market_trades_samples"
+            "order_book_summary_payload" if recent_market_trades else "no_market_trades_samples"
         )
         if persisted_market_trades and _latest_market_trade_ts(
             persisted_market_trades
@@ -683,12 +686,8 @@ class BffReadService:
             "spread_abs_rub": spread_abs,
             "spread_units_validated": True,
             "mid_price": mid_price,
-            "market_quality": market_quality_components.get(
-                "display_market_quality_score"
-            ),
-            "market_quality_score": market_quality_components.get(
-                "display_market_quality_score"
-            ),
+            "market_quality": market_quality_components.get("display_market_quality_score"),
+            "market_quality_score": market_quality_components.get("display_market_quality_score"),
             "display_market_quality_score": market_quality_components.get(
                 "display_market_quality_score"
             ),
@@ -759,14 +758,18 @@ class BffReadService:
 
     def _instrument_registry_row(self, instrument_id: str) -> InstrumentRegistry | None:
         ticker = _ticker_from_instrument_id(instrument_id)
-        return self._session.execute(
-            select(InstrumentRegistry)
-            .where(
-                (InstrumentRegistry.instrument_id == instrument_id)
-                | (InstrumentRegistry.ticker == ticker)
+        return (
+            self._session.execute(
+                select(InstrumentRegistry)
+                .where(
+                    (InstrumentRegistry.instrument_id == instrument_id)
+                    | (InstrumentRegistry.ticker == ticker)
+                )
+                .limit(1)
             )
-            .limit(1)
-        ).scalars().first()
+            .scalars()
+            .first()
+        )
 
     def _latest_order_book_summary(
         self,
@@ -775,12 +778,16 @@ class BffReadService:
         registry: InstrumentRegistry | None = None,
     ) -> OrderBookSummary | None:
         aliases = _instrument_storage_aliases(instrument_id, registry)
-        return self._session.execute(
-            select(OrderBookSummary)
-            .where(OrderBookSummary.instrument_id.in_(aliases))
-            .order_by(OrderBookSummary.ts_utc.desc())
-            .limit(1)
-        ).scalars().first()
+        return (
+            self._session.execute(
+                select(OrderBookSummary)
+                .where(OrderBookSummary.instrument_id.in_(aliases))
+                .order_by(OrderBookSummary.ts_utc.desc())
+                .limit(1)
+            )
+            .scalars()
+            .first()
+        )
 
     def _recent_persisted_market_trades(
         self,
@@ -810,23 +817,31 @@ class BffReadService:
 
     def _latest_market_candle(self, instrument_id: str) -> MarketCandle | None:
         try:
-            candle = self._session.execute(
-                select(MarketCandle)
-                .where(
-                    MarketCandle.instrument_id == instrument_id,
-                    MarketCandle.timeframe == "1m",
+            candle = (
+                self._session.execute(
+                    select(MarketCandle)
+                    .where(
+                        MarketCandle.instrument_id == instrument_id,
+                        MarketCandle.timeframe == "1m",
+                    )
+                    .order_by(MarketCandle.open_ts_utc.desc())
+                    .limit(1)
                 )
-                .order_by(MarketCandle.open_ts_utc.desc())
-                .limit(1)
-            ).scalars().first()
+                .scalars()
+                .first()
+            )
             if candle is not None:
                 return candle
-            return self._session.execute(
-                select(MarketCandle)
-                .where(MarketCandle.instrument_id == instrument_id)
-                .order_by(MarketCandle.open_ts_utc.desc())
-                .limit(1)
-            ).scalars().first()
+            return (
+                self._session.execute(
+                    select(MarketCandle)
+                    .where(MarketCandle.instrument_id == instrument_id)
+                    .order_by(MarketCandle.open_ts_utc.desc())
+                    .limit(1)
+                )
+                .scalars()
+                .first()
+            )
         except SQLAlchemyError:
             self._session.rollback()
             return None
@@ -836,9 +851,11 @@ class BffReadService:
         if trading_date is not None:
             stmt = stmt.where(MarketCandle.trading_date < trading_date)
         try:
-            candle = self._session.execute(
-                stmt.order_by(MarketCandle.close_ts_utc.desc()).limit(1)
-            ).scalars().first()
+            candle = (
+                self._session.execute(stmt.order_by(MarketCandle.close_ts_utc.desc()).limit(1))
+                .scalars()
+                .first()
+            )
         except SQLAlchemyError:
             self._session.rollback()
             return None
@@ -872,19 +889,11 @@ class BffReadService:
             stmt = stmt.where(MarketMicrostructureSnapshot.instrument_id == instrument_id)
         rows = list(self._session.execute(stmt).scalars())
         spread_values = [row.spread_bps for row in rows if row.spread_bps is not None]
-        bid_depth_values = [
-            row.bid_depth_lots for row in rows if row.bid_depth_lots is not None
-        ]
-        ask_depth_values = [
-            row.ask_depth_lots for row in rows if row.ask_depth_lots is not None
-        ]
-        imbalance_values = [
-            row.book_imbalance for row in rows if row.book_imbalance is not None
-        ]
+        bid_depth_values = [row.bid_depth_lots for row in rows if row.bid_depth_lots is not None]
+        ask_depth_values = [row.ask_depth_lots for row in rows if row.ask_depth_lots is not None]
+        imbalance_values = [row.book_imbalance for row in rows if row.book_imbalance is not None]
         quality_values = [
-            row.market_quality_score
-            for row in rows
-            if row.market_quality_score is not None
+            row.market_quality_score for row in rows if row.market_quality_score is not None
         ]
         sessions: dict[str, int] = {}
         for row in rows:
@@ -947,9 +956,8 @@ class BffReadService:
                 Decimal(str((datetime.now(tz=UTC) - latest_ts_utc).total_seconds())),
             )
             last_message_age_seconds = age_seconds.quantize(Decimal("0.001"))
-        stream_alive = (
-            last_message_age_seconds is not None
-            and last_message_age_seconds <= Decimal("30")
+        stream_alive = last_message_age_seconds is not None and last_message_age_seconds <= Decimal(
+            "30"
         )
         collector_state = _collector_state_from_command(command, stream_alive=stream_alive)
         lifecycle_event = self._latest_data_shadow_lifecycle_event_after(command)
@@ -1004,9 +1012,7 @@ class BffReadService:
             lifecycle_payload.get("day_collection_state") or ""
         ) in {"completed", "completed_for_day"}
         paused_at = (
-            _datetime_payload_value(lifecycle_payload, "paused_at")
-            if collector_paused
-            else None
+            _datetime_payload_value(lifecycle_payload, "paused_at") if collector_paused else None
         )
         completed_for_day_at = (
             _datetime_payload_value(lifecycle_payload, "completed_for_day_at")
@@ -1045,12 +1051,8 @@ class BffReadService:
             enabled=enabled,
             collector_state=collector_state,
             data_shadow_collector_state=collector_state,
-            day_collection_state=str(
-                lifecycle_payload.get("day_collection_state") or "inactive"
-            ),
-            daily_collection_active=bool(
-                lifecycle_payload.get("daily_collection_active")
-            ),
+            day_collection_state=str(lifecycle_payload.get("day_collection_state") or "inactive"),
+            daily_collection_active=bool(lifecycle_payload.get("daily_collection_active")),
             current_window_state=str(
                 lifecycle_payload.get("current_window_state")
                 or lifecycle_payload.get("window_collector_state")
@@ -1114,9 +1116,7 @@ class BffReadService:
                 lifecycle_payload,
                 "trade_samples_seen",
             ),
-            last_trade_sample_at=last_trade_sample_at
-            if int(trade_sample_count or 0) > 0
-            else None,
+            last_trade_sample_at=last_trade_sample_at if int(trade_sample_count or 0) > 0 else None,
             last_data_only_trade_poll_at=_datetime_payload_value(
                 lifecycle_payload,
                 "last_data_only_trade_poll_at",
@@ -1193,8 +1193,7 @@ class BffReadService:
             (
                 event
                 for event in events
-                if event.severity in {"error", "critical"}
-                or str(event.action).endswith("_failed")
+                if event.severity in {"error", "critical"} or str(event.action).endswith("_failed")
             ),
             None,
         )
@@ -1269,9 +1268,13 @@ class BffReadService:
         }
 
     def _latest_robot_command(self) -> RobotCommand | None:
-        return self._session.execute(
-            select(RobotCommand).order_by(RobotCommand.requested_at.desc()).limit(1)
-        ).scalars().first()
+        return (
+            self._session.execute(
+                select(RobotCommand).order_by(RobotCommand.requested_at.desc()).limit(1)
+            )
+            .scalars()
+            .first()
+        )
 
     def _latest_data_shadow_lifecycle_event_after(
         self,
@@ -1294,12 +1297,13 @@ class BffReadService:
         filters: list[ColumnElement[bool]] = [AuditEvent.action.in_(lifecycle_actions)]
         if command is not None:
             filters.append(AuditEvent.ts_utc >= command.requested_at)
-        return self._session.execute(
-            select(AuditEvent)
-            .where(*filters)
-            .order_by(AuditEvent.ts_utc.desc())
-            .limit(1)
-        ).scalars().first()
+        return (
+            self._session.execute(
+                select(AuditEvent).where(*filters).order_by(AuditEvent.ts_utc.desc()).limit(1)
+            )
+            .scalars()
+            .first()
+        )
 
     def hourly_reports(
         self,
@@ -1699,26 +1703,36 @@ class BffReadService:
         return _intraday_snapshot_response(_intraday_payload_from_rows(rows))
 
     def calibration_observatory_status(self) -> CalibrationObservatoryStatusResponse:
-        latest_diagnostic = self._session.execute(
-            select(CalibrationDiagnosticRun).order_by(
-                CalibrationDiagnosticRun.created_at.desc()
+        latest_diagnostic = (
+            self._session.execute(
+                select(CalibrationDiagnosticRun).order_by(
+                    CalibrationDiagnosticRun.created_at.desc()
+                )
             )
-        ).scalars().first()
-        latest_cube_generated_at = self._session.execute(
-            select(RollingPerformanceCube.generated_at).order_by(
-                RollingPerformanceCube.generated_at.desc()
+            .scalars()
+            .first()
+        )
+        latest_cube_generated_at = (
+            self._session.execute(
+                select(RollingPerformanceCube.generated_at).order_by(
+                    RollingPerformanceCube.generated_at.desc()
+                )
             )
-        ).scalars().first()
-        latest_regime_generated_at = self._session.execute(
-            select(MarketRegimeSnapshot.generated_at).order_by(
-                MarketRegimeSnapshot.generated_at.desc()
+            .scalars()
+            .first()
+        )
+        latest_regime_generated_at = (
+            self._session.execute(
+                select(MarketRegimeSnapshot.generated_at).order_by(
+                    MarketRegimeSnapshot.generated_at.desc()
+                )
             )
-        ).scalars().first()
+            .scalars()
+            .first()
+        )
         open_candidates = list(
             self._session.execute(
-                select(StrategyConfigCandidate).where(
-                    StrategyConfigCandidate.status == "draft"
-                )
+                select(StrategyConfigCandidate).where(StrategyConfigCandidate.status == "draft")
             ).scalars()
         )
         return CalibrationObservatoryStatusResponse(
@@ -1767,9 +1781,7 @@ class BffReadService:
         contour_status: str | None = None,
         limit: int = 200,
     ) -> list[RollingPerformanceCubeResponse]:
-        stmt = select(RollingPerformanceCube).order_by(
-            RollingPerformanceCube.generated_at.desc()
-        )
+        stmt = select(RollingPerformanceCube).order_by(RollingPerformanceCube.generated_at.desc())
         if window_name is not None:
             stmt = stmt.where(RollingPerformanceCube.window_name == window_name)
         if instrument_id is not None:
@@ -1811,9 +1823,7 @@ class BffReadService:
         status: str | None = None,
         limit: int = 100,
     ) -> list[StrategyConfigCandidateResponse]:
-        stmt = select(StrategyConfigCandidate).order_by(
-            StrategyConfigCandidate.created_at.desc()
-        )
+        stmt = select(StrategyConfigCandidate).order_by(StrategyConfigCandidate.created_at.desc())
         if status is not None:
             stmt = stmt.where(StrategyConfigCandidate.status == status)
         rows = self._session.execute(stmt.limit(limit)).scalars()
@@ -1871,15 +1881,19 @@ class BffReadService:
         strategy_id: str,
         session_template: str,
     ) -> StrategyConfigResponse:
-        config = self._session.execute(
-            select(StrategyConfig)
-            .where(
-                StrategyConfig.strategy_id == strategy_id,
-                StrategyConfig.session_template == session_template,
-                StrategyConfig.is_active.is_(True),
+        config = (
+            self._session.execute(
+                select(StrategyConfig)
+                .where(
+                    StrategyConfig.strategy_id == strategy_id,
+                    StrategyConfig.session_template == session_template,
+                    StrategyConfig.is_active.is_(True),
+                )
+                .order_by(StrategyConfig.version.desc())
             )
-            .order_by(StrategyConfig.version.desc())
-        ).scalars().first()
+            .scalars()
+            .first()
+        )
         if config is None:
             return StrategyConfigResponse(
                 strategy_id=strategy_id,
@@ -1954,9 +1968,13 @@ class BffReadService:
         )
 
     def _latest_strategy_state(self) -> str:
-        event = self._session.execute(
-            select(StrategyStateEvent).order_by(StrategyStateEvent.ts_utc.desc()).limit(1)
-        ).scalars().first()
+        event = (
+            self._session.execute(
+                select(StrategyStateEvent).order_by(StrategyStateEvent.ts_utc.desc()).limit(1)
+            )
+            .scalars()
+            .first()
+        )
         return event.new_state if event is not None else "unknown"
 
     def _open_orders_count(self) -> int:
@@ -2542,9 +2560,7 @@ def _read_model_freshness_payload(
         exchange_age_ms = max(0, int((now - exchange_ts).total_seconds() * 1000))
     max_age_ms = max_age_seconds * 1000
     stale_by_received_time = received_age_ms is None or received_age_ms > max_age_ms
-    stale_by_exchange_time = (
-        exchange_age_ms is None or exchange_age_ms > max_age_ms
-    )
+    stale_by_exchange_time = exchange_age_ms is None or exchange_age_ms > max_age_ms
     if received_snapshot_is_authoritative and not stale_by_received_time:
         stale_by_exchange_time = False
         freshness_status = "fresh"
@@ -2803,10 +2819,7 @@ def _restart_reason(event: AuditEvent | None) -> str | None:
         return None
     payload = event.audit_payload if isinstance(event.audit_payload, dict) else {}
     reason = (
-        payload.get("reason")
-        or payload.get("reason_code")
-        or payload.get("error")
-        or event.action
+        payload.get("reason") or payload.get("reason_code") or payload.get("error") or event.action
     )
     return str(reason) if reason is not None else None
 
@@ -2820,16 +2833,16 @@ def _per_stream_status(
     if supervisor_state == "paused":
         state = "paused"
     else:
-        state = "stopped" if supervisor_state in {"stopped", "not_configured"} else (
-            "alive" if stream_alive else "stale"
+        state = (
+            "stopped"
+            if supervisor_state in {"stopped", "not_configured"}
+            else ("alive" if stream_alive else "stale")
         )
     return {
         name: {
             "state": state,
             "last_message_age_seconds": (
-                str(last_message_age_seconds)
-                if last_message_age_seconds is not None
-                else None
+                str(last_message_age_seconds) if last_message_age_seconds is not None else None
             ),
         }
         for name in (
@@ -3313,10 +3326,7 @@ def _latest_market_trade_ts(rows: list[JsonPayload]) -> datetime:
     latest: datetime | None = None
     for row in rows:
         ts = _datetime_or_none(
-            row.get("exchange_ts")
-            or row.get("ts_utc")
-            or row.get("time")
-            or row.get("ts")
+            row.get("exchange_ts") or row.get("ts_utc") or row.get("time") or row.get("ts")
         )
         if ts is not None and (latest is None or ts > latest):
             latest = ts

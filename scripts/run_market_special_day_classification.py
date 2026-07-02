@@ -40,9 +40,7 @@ def main() -> None:
     try:
         with database.session_scope() as session:
             effective_to_date = (
-                to_date + timedelta(days=args.lookahead_days)
-                if args.include_future
-                else to_date
+                to_date + timedelta(days=args.lookahead_days) if args.include_future else to_date
             )
             if args.require_dividend_sync and not CorporateActionService(
                 session
@@ -89,7 +87,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--from-date", type=parse_date)
     parser.add_argument("--to-date", type=parse_date)
     parser.add_argument("--lookback-days", type=int, default=90)
-    parser.add_argument("--instruments", default="SBER,GAZP")
+    parser.add_argument("--instruments", default="SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T")
     parser.add_argument("--database-url")
     parser.add_argument("--gap-threshold-bps", type=Decimal, default=Decimal("150"))
     parser.add_argument("--dividend-gap-threshold-bps", type=Decimal, default=Decimal("50"))

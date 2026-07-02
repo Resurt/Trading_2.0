@@ -365,9 +365,7 @@ def test_reconnect_recovery_backfills_candles_and_refreshes_account_state() -> N
             broker_gateway=cast(BrokerGateway, fake_gateway),
             event_bus=event_bus,
             refresh_positions_hook=lambda account_id: positions_refreshes.append(account_id),
-            audit_event_hook=lambda event_type, payload: audit_events.append(
-                (event_type, payload)
-            ),
+            audit_event_hook=lambda event_type, payload: audit_events.append((event_type, payload)),
         )
         await coordinator.recover_after_reconnect(
             GapRecoveryRequest(
@@ -388,9 +386,7 @@ def test_reconnect_recovery_backfills_candles_and_refreshes_account_state() -> N
         request_order_id
     ]
     assert positions_refreshes == ["account-1"]
-    assert {
-        event_type for event_type, _payload in audit_events
-    } >= {
+    assert {event_type for event_type, _payload in audit_events} >= {
         "stream_gap_recovery_requested",
         "stream_gap_backfill_started",
         "stream_gap_backfill_completed",
@@ -894,6 +890,62 @@ def test_historical_backfill_resolves_seed_row_before_real_get_candles() -> None
     engine.dispose()
 
 
+def test_historical_backfill_preserves_registry_metadata_for_cached_resolved_row() -> None:
+    candles = [recovered_candle_payload(0)]
+    fake_gateway = FakeHistoricalBackfillGateway(candles)
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        session.add(
+            InstrumentRegistry(
+                instrument_id="MOEX:T",
+                ticker="T",
+                class_code="TQBR",
+                figi="TCS80A107UL4",
+                instrument_uid="87db07bc-0e02-4e29-90bb-05e8ef791d7b",
+                name="T",
+                lot_size=1,
+                min_price_increment=Decimal("0.02"),
+                currency="RUB",
+                is_enabled=True,
+                supports_morning=True,
+                supports_evening=True,
+                supports_weekend=True,
+                source="tbank_resolved",
+                resolution_status="resolved",
+                instrument_payload={},
+            )
+        )
+        service = HistoricalCandleBackfillService(
+            broker_gateway=cast(BrokerGateway, fake_gateway),
+            session=session,
+            launch_policy=LaunchModePolicy.from_mode(RuntimeMode.SHADOW),
+        )
+        result = asyncio.run(
+            service.run(
+                HistoricalBackfillConfig(
+                    instruments=("T",),
+                    chunk_days=1,
+                    dry_run=False,
+                    runtime_mode=RuntimeMode.SHADOW.value,
+                ),
+                from_ts_utc=utc(2026, 6, 12, 7),
+                to_ts_utc=utc(2026, 6, 12, 7, 1),
+            )
+        )
+
+    instrument = result.plan.instruments[0]
+    assert fake_gateway.resolve_requests == []
+    assert instrument.instrument_id == "MOEX:T"
+    assert instrument.instrument_uid == "87db07bc-0e02-4e29-90bb-05e8ef791d7b"
+    assert instrument.figi == "TCS80A107UL4"
+    assert instrument.lot_size == 1
+    assert instrument.min_price_increment == Decimal("0.02")
+    assert fake_gateway.candle_requests[0].instrument.instrument_uid == instrument.instrument_uid
+    engine.dispose()
+
+
 def test_historical_backfill_dry_run_builds_plan_without_fetching_candles() -> None:
     fake_gateway = FakeHistoricalBackfillGateway([])
     engine = create_engine("sqlite+pysqlite:///:memory:")
@@ -906,12 +958,12 @@ def test_historical_backfill_dry_run_builds_plan_without_fetching_candles() -> N
             launch_policy=LaunchModePolicy.from_mode(RuntimeMode.HISTORICAL_REPLAY),
         )
         result = asyncio.run(
-                service.run(
-                    HistoricalBackfillConfig(instruments=("SBER", "GAZP", "LKOH"), dry_run=True),
-                    from_ts_utc=utc(2026, 6, 1, 0),
-                    to_ts_utc=utc(2026, 6, 18, 0),
-                )
+            service.run(
+                HistoricalBackfillConfig(instruments=("SBER", "GAZP", "LKOH"), dry_run=True),
+                from_ts_utc=utc(2026, 6, 1, 0),
+                to_ts_utc=utc(2026, 6, 18, 0),
             )
+        )
 
     assert result.dry_run
     assert len(result.plan.instruments) == 3

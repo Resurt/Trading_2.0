@@ -206,9 +206,7 @@ def create_fastapi_app(
             payload_dict.get("requested_instruments") or payload_dict.get("instruments")
         )
         instrument_list = [
-            item.strip()
-            for item in requested_instruments.split(",")
-            if item.strip()
+            item.strip() for item in requested_instruments.split(",") if item.strip()
         ]
         _dashboard_market_feed(request.app).pause_broker_calls(
             seconds=_float_env("DASHBOARD_FEED_PAUSE_DURING_START_SECONDS", 120.0),
@@ -245,8 +243,7 @@ def create_fastapi_app(
                 )
             else:
                 message = (
-                    "Рынок закрыт. Data-only сбор не запущен. "
-                    f"Причина: {preflight.reason_code}."
+                    f"Рынок закрыт. Data-only сбор не запущен. Причина: {preflight.reason_code}."
                 )
             return control.reject(
                 command=RobotCommand.START,
@@ -504,9 +501,7 @@ def create_fastapi_app(
             update={
                 "generated_at": datetime.now(tz=UTC),
                 "instruments": [
-                    selected_base
-                    if row.instrument_id == selected_base.instrument_id
-                    else row
+                    selected_base if row.instrument_id == selected_base.instrument_id else row
                     for row in quote_overview.instruments
                 ],
             }
@@ -561,9 +556,7 @@ def create_fastapi_app(
                 include_trades=include_details,
                 force=True,
             )
-            refreshed = MarketOverviewResponse(
-                **cast(dict[str, Any], snapshot["market_overview"])
-            )
+            refreshed = MarketOverviewResponse(**cast(dict[str, Any], snapshot["market_overview"]))
             if include_details:
                 refreshed = await _market_overview_with_broker_quotes(
                     request,
@@ -1065,7 +1058,7 @@ def create_fastapi_app(
         from_date: Annotated[date | None, Query()] = None,
         to_date: Annotated[date | None, Query()] = None,
         lookback_days: Annotated[int, Query(ge=1, le=3660)] = 90,
-        instruments: Annotated[str, Query()] = "SBER,GAZP",
+        instruments: Annotated[str, Query()] = "SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T",
         timeframes: Annotated[str, Query()] = "1m,5m,10m,15m",
         fail_on_missing: Annotated[bool, Query()] = False,
         fail_on_invalid_ohlc: Annotated[bool, Query()] = False,
@@ -1150,7 +1143,9 @@ def create_fastapi_app(
 
         require_role(auth, (ApiRole.OPERATOR, ApiRole.ADMIN))
         data = payload or {}
-        instruments = _split_csv(str(data.get("instruments", "SBER,GAZP")))
+        instruments = _split_csv(
+            str(data.get("instruments", "SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T"))
+        )
         class_code = str(data.get("class_code", "TQBR"))
         requested = tuple(
             InstrumentRef(
@@ -1295,7 +1290,9 @@ def create_fastapi_app(
         data = payload or {}
         dry_run = bool(data.get("dry_run", False))
         config = DividendSyncConfig(
-            instruments=_split_csv(str(data.get("instruments", "SBER,GAZP"))),
+            instruments=_split_csv(
+                str(data.get("instruments", "SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T"))
+            ),
             from_date=_date_from_payload(data.get("from_date")),
             to_date=_date_from_payload(data.get("to_date")),
             lookback_days=int(data.get("lookback_days", 730)),
@@ -1304,16 +1301,10 @@ def create_fastapi_app(
             force_rebuild=bool(data.get("force_rebuild", False)),
             classify_special_days=bool(data.get("classify_special_days", True)),
             gap_threshold_bps=Decimal(str(data.get("gap_threshold_bps", "150"))),
-            dividend_gap_threshold_bps=Decimal(
-                str(data.get("dividend_gap_threshold_bps", "50"))
-            ),
+            dividend_gap_threshold_bps=Decimal(str(data.get("dividend_gap_threshold_bps", "50"))),
             runtime_mode=runtime_mode.value,
         )
-        gateway = (
-            SafeNoopBrokerGateway()
-            if dry_run
-            else TBankBrokerGateway()
-        )
+        gateway = SafeNoopBrokerGateway() if dry_run else TBankBrokerGateway()
         database = _database_service(request)
         with database.session_scope() as session:
             return asyncio.run(
@@ -1327,7 +1318,7 @@ def create_fastapi_app(
         from_date: Annotated[date | None, Query()] = None,
         to_date: Annotated[date | None, Query()] = None,
         lookback_days: Annotated[int, Query(ge=1, le=3660)] = 730,
-        instruments: Annotated[str, Query()] = "SBER,GAZP",
+        instruments: Annotated[str, Query()] = "SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T",
         max_age_hours: Annotated[int, Query(ge=1, le=720)] = 24,
     ) -> dict[str, Any]:
         require_role(auth, (ApiRole.OBSERVER, ApiRole.OPERATOR, ApiRole.ADMIN))
@@ -1417,7 +1408,14 @@ def create_fastapi_app(
                 if not CorporateActionService(session).api_imported_dividend_events_exist(
                     from_date=window_from,
                     to_date=effective_to,
-                    instruments=_split_csv(str(data.get("instruments", "SBER,GAZP"))),
+                    instruments=_split_csv(
+                        str(
+                            data.get(
+                                "instruments",
+                                "SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T",
+                            )
+                        )
+                    ),
                 ):
                     raise HTTPException(
                         status_code=409,
@@ -1426,18 +1424,29 @@ def create_fastapi_app(
                             "message": "Run T-Bank dividend sync before classification",
                         },
                     )
-            return MarketSpecialDayClassifier(session).classify(
-                from_date=window_from,
-                to_date=window_to,
-                instruments=_split_csv(str(data.get("instruments", "SBER,GAZP"))),
-                gap_threshold_bps=Decimal(str(data.get("gap_threshold_bps", "150"))),
-                dividend_gap_threshold_bps=Decimal(
-                    str(data.get("dividend_gap_threshold_bps", "50"))
-                ),
-                force_rebuild=bool(data.get("force_rebuild", False)),
-                include_future=bool(data.get("include_future", False)),
-                lookahead_days=int(data.get("lookahead_days", 365)),
-            ).as_payload()
+            return (
+                MarketSpecialDayClassifier(session)
+                .classify(
+                    from_date=window_from,
+                    to_date=window_to,
+                    instruments=_split_csv(
+                        str(
+                            data.get(
+                                "instruments",
+                                "SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T",
+                            )
+                        )
+                    ),
+                    gap_threshold_bps=Decimal(str(data.get("gap_threshold_bps", "150"))),
+                    dividend_gap_threshold_bps=Decimal(
+                        str(data.get("dividend_gap_threshold_bps", "50"))
+                    ),
+                    force_rebuild=bool(data.get("force_rebuild", False)),
+                    include_future=bool(data.get("include_future", False)),
+                    lookahead_days=int(data.get("lookahead_days", 365)),
+                )
+                .as_payload()
+            )
 
     @app.get("/market-special-days", tags=["corporate-actions"])
     def market_special_days(
@@ -1461,13 +1470,9 @@ def create_fastapi_app(
                     "special_day_type": row.special_day_type,
                     "reason_code": row.reason_code,
                     "source": row.source,
-                    "open_gap_bps": str(row.open_gap_bps)
-                    if row.open_gap_bps is not None
-                    else None,
+                    "open_gap_bps": str(row.open_gap_bps) if row.open_gap_bps is not None else None,
                     "severity": row.severity,
-                    "exclude_from_primary_calibration": (
-                        row.exclude_from_primary_calibration
-                    ),
+                    "exclude_from_primary_calibration": (row.exclude_from_primary_calibration),
                     "trade_policy": row.trade_policy,
                     "payload": row.special_day_payload,
                 }
@@ -1502,13 +1507,9 @@ def create_fastapi_app(
                     "special_day_type": row.special_day_type,
                     "reason_code": row.reason_code,
                     "source": row.source,
-                    "open_gap_bps": str(row.open_gap_bps)
-                    if row.open_gap_bps is not None
-                    else None,
+                    "open_gap_bps": str(row.open_gap_bps) if row.open_gap_bps is not None else None,
                     "severity": row.severity,
-                    "exclude_from_primary_calibration": (
-                        row.exclude_from_primary_calibration
-                    ),
+                    "exclude_from_primary_calibration": (row.exclude_from_primary_calibration),
                     "trade_policy": row.trade_policy,
                     "payload": row.special_day_payload,
                 }
@@ -1544,7 +1545,9 @@ def create_fastapi_app(
         config = HistoricalDbReplayConfig(
             from_date=window_from,
             to_date=window_to,
-            instruments=_split_csv(str(data.get("instruments", "SBER,GAZP"))),
+            instruments=_split_csv(
+                str(data.get("instruments", "SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T"))
+            ),
             timeframes=tuple(
                 parse_timeframe(item)
                 for item in _split_csv(str(data.get("timeframes", "5m,10m,15m")))
@@ -1555,17 +1558,13 @@ def create_fastapi_app(
             reset_derived_events=bool(data.get("reset_derived_events", False)),
             include_special_days=bool(data.get("include_special_days", False)),
             exclude_dividend_gap_days=bool(data.get("exclude_dividend_gap_days", True)),
-            exclude_corporate_action_days=bool(
-                data.get("exclude_corporate_action_days", True)
-            ),
+            exclude_corporate_action_days=bool(data.get("exclude_corporate_action_days", True)),
             exclude_abnormal_gap_days=bool(data.get("exclude_abnormal_gap_days", False)),
             special_day_policy=str(data.get("special_day_policy", "exclude")),
             require_special_day_classification=bool(
                 data.get("require_special_day_classification", False)
             ),
-            allow_default_strategy_config=bool(
-                data.get("allow_default_strategy_config", False)
-            ),
+            allow_default_strategy_config=bool(data.get("allow_default_strategy_config", False)),
             session_template=str(data.get("session_template", "weekday_main")),
             config_version=str(data.get("config_version", "latest")),
         )
@@ -1597,7 +1596,9 @@ def create_fastapi_app(
             from_date=window_from,
             to_date=window_to,
             strategy_id=str(data.get("strategy_id", "baseline")),
-            instruments=_split_csv(str(data.get("instruments", "SBER,GAZP"))),
+            instruments=_split_csv(
+                str(data.get("instruments", "SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T"))
+            ),
             timeframes=_split_csv(str(data.get("timeframes", "5m,10m,15m"))),
             dry_run=bool(data.get("dry_run", False)),
             force_rebuild=bool(data.get("force_rebuild", False)),
@@ -1648,7 +1649,7 @@ def create_fastapi_app(
         to_date: Annotated[date | None, Query()] = None,
         lookback_days: Annotated[int, Query(ge=1, le=3660)] = 90,
         strategy_id: Annotated[str, Query()] = "baseline",
-        instruments: Annotated[str, Query()] = "SBER,GAZP",
+        instruments: Annotated[str, Query()] = "SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T",
         timeframes: Annotated[str, Query()] = "5m,10m,15m",
         group_by: Annotated[str, Query()] = "session_type,instrument_id,timeframe,blocker_code",
         calibration_scope: Annotated[str, Query()] = "primary_normal_days",
@@ -2115,15 +2116,11 @@ async def _market_overview_with_broker_quotes(
                     "price_staleness_seconds": 0,
                     "quote_status": "live" if official_exchange_open else "broker_quote",
                     "warning": (
-                        "broker_quote_not_for_calibration"
-                        if official_exchange_closed
-                        else None
+                        "broker_quote_not_for_calibration" if official_exchange_closed else None
                     ),
                     "recent_market_trades": recent_trades,
                     "market_trades_source": (
-                        "tbank_get_last_trades"
-                        if recent_trades
-                        else "no_market_trades_samples"
+                        "tbank_get_last_trades" if recent_trades else "no_market_trades_samples"
                     ),
                     "market_trades_age_ms": _market_trades_age_ms(recent_trades),
                     "quote_payload": {
@@ -2352,15 +2349,11 @@ def _order_book_overview_payload(
         "mid_price": mid_price,
         "market_quality": quality_components.get("display_market_quality_score"),
         "market_quality_score": quality_components.get("display_market_quality_score"),
-        "display_market_quality_score": quality_components.get(
-            "display_market_quality_score"
-        ),
+        "display_market_quality_score": quality_components.get("display_market_quality_score"),
         "calibration_market_quality_score": quality_components.get(
             "calibration_market_quality_score"
         ),
-        "market_quality_label": quality_components.get(
-            "market_quality_label", "unknown"
-        ),
+        "market_quality_label": quality_components.get("market_quality_label", "unknown"),
         "market_quality_components": quality_components,
         "best_bid": best_bid_price,
         "best_ask": best_ask_price,
@@ -2377,13 +2370,9 @@ def _order_book_overview_payload(
         "trade_tape_status": trade_tape_status,
         "trade_tape_reason": trade_tape_reason,
         "reason_code": (
-            "moex_dsvd_cancelled_platform_update"
-            if official_exchange_closed
-            else None
+            "moex_dsvd_cancelled_platform_update" if official_exchange_closed else None
         ),
-        "warning": (
-            "broker_quote_not_for_calibration" if official_exchange_closed else None
-        ),
+        "warning": ("broker_quote_not_for_calibration" if official_exchange_closed else None),
         "order_book_summary": {
             "source": quote_source,
             "venue_type": venue_type,
@@ -2508,11 +2497,7 @@ def _instrument_refs_for_preflight(
     from trade_core.broker_gateway import InstrumentRef
     from trading_common.db.models import InstrumentRegistry
 
-    raw_values = [
-        item.strip().upper()
-        for item in (instruments or "").split(",")
-        if item.strip()
-    ]
+    raw_values = [item.strip().upper() for item in (instruments or "").split(",") if item.strip()]
     refs: list[Any] = []
     with database.session_scope() as session:
         if not raw_values:
@@ -2534,9 +2519,13 @@ def _instrument_refs_for_preflight(
         for raw in raw_values:
             row = session.get(InstrumentRegistry, raw)
             if row is None:
-                row = session.execute(
-                    select(InstrumentRegistry).where(InstrumentRegistry.ticker == raw)
-                ).scalars().first()
+                row = (
+                    session.execute(
+                        select(InstrumentRegistry).where(InstrumentRegistry.ticker == raw)
+                    )
+                    .scalars()
+                    .first()
+                )
             if row is None:
                 refs.append(InstrumentRef(instrument_id=raw, ticker=raw, class_code="TQBR"))
                 continue
@@ -2553,7 +2542,7 @@ def _instrument_refs_for_preflight(
 
 
 def _default_preflight_instruments() -> str:
-    return os.getenv("TRADING_INSTRUMENTS", "SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR")
+    return os.getenv("TRADING_INSTRUMENTS", "SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T")
 
 
 def _float_env(name: str, default: float) -> float:
@@ -2619,10 +2608,7 @@ def _market_trades_age_ms(trades: list[dict[str, object]]) -> int | None:
     newest: datetime | None = None
     for trade in trades:
         ts = _datetime_or_none(
-            trade.get("exchange_ts")
-            or trade.get("ts_utc")
-            or trade.get("time")
-            or trade.get("ts")
+            trade.get("exchange_ts") or trade.get("ts_utc") or trade.get("time") or trade.get("ts")
         )
         if ts is not None and (newest is None or ts > newest):
             newest = ts
@@ -2633,10 +2619,7 @@ def _market_trades_age_ms(trades: list[dict[str, object]]) -> int | None:
 
 def _trade_sort_ts(trade: dict[str, object]) -> datetime:
     return _datetime_or_none(
-        trade.get("exchange_ts")
-        or trade.get("ts_utc")
-        or trade.get("time")
-        or trade.get("ts")
+        trade.get("exchange_ts") or trade.get("ts_utc") or trade.get("time") or trade.get("ts")
     ) or datetime.min.replace(tzinfo=UTC)
 
 
@@ -2646,8 +2629,7 @@ def _trade_tape_status(trades: list[dict[str, object]], age_ms: int | None) -> s
     if age_ms is None:
         return "stale"
     max_age_ms = int(
-        float(os.environ.get("DASHBOARD_TRADES_MAX_EXCHANGE_AGE_SECONDS", "15"))
-        * 1000
+        float(os.environ.get("DASHBOARD_TRADES_MAX_EXCHANGE_AGE_SECONDS", "15")) * 1000
     )
     return "live" if age_ms <= max_age_ms else "stale"
 
@@ -2658,8 +2640,7 @@ def _trade_tape_reason(trades: list[dict[str, object]], age_ms: int | None) -> s
     if age_ms is None:
         return "missing_trade_exchange_ts"
     max_age_ms = int(
-        float(os.environ.get("DASHBOARD_TRADES_MAX_EXCHANGE_AGE_SECONDS", "15"))
-        * 1000
+        float(os.environ.get("DASHBOARD_TRADES_MAX_EXCHANGE_AGE_SECONDS", "15")) * 1000
     )
     return "fresh" if age_ms <= max_age_ms else "trade_exchange_ts_too_old"
 
@@ -2671,12 +2652,10 @@ def _can_display_delayed_trade_rows(
     if not trades or age_ms is None:
         return False
     live_age_ms = int(
-        float(os.environ.get("DASHBOARD_TRADES_MAX_EXCHANGE_AGE_SECONDS", "15"))
-        * 1000
+        float(os.environ.get("DASHBOARD_TRADES_MAX_EXCHANGE_AGE_SECONDS", "15")) * 1000
     )
     delayed_age_ms = int(
-        float(os.environ.get("DASHBOARD_TRADES_DELAYED_DISPLAY_SECONDS", "60"))
-        * 1000
+        float(os.environ.get("DASHBOARD_TRADES_DELAYED_DISPLAY_SECONDS", "60")) * 1000
     )
     return live_age_ms < age_ms <= delayed_age_ms
 
@@ -2740,9 +2719,8 @@ async def _dashboard_market_feed_snapshot(
 ) -> dict[str, object]:
     del service
     if (
-        ((include_trades and not include_order_book) or (include_order_book and not include_trades))
-        and full_selected_details
-    ):
+        (include_trades and not include_order_book) or (include_order_book and not include_trades)
+    ) and full_selected_details:
         base_overview, refs = await asyncio.to_thread(
             _dashboard_market_feed_selected_base_and_refs,
             cast(FastAPI, request.app),
@@ -2801,9 +2779,8 @@ async def _dashboard_market_feed_snapshot_from_app(
         else None
     )
     if (
-        ((include_trades and not include_order_book) or (include_order_book and not include_trades))
-        and full_selected_details
-    ):
+        (include_trades and not include_order_book) or (include_order_book and not include_trades)
+    ) and full_selected_details:
         base_overview, refs = await asyncio.to_thread(
             _dashboard_market_feed_selected_base_and_refs,
             app,
@@ -3219,9 +3196,7 @@ def _cached_market_row_safe_for_session(
     if base.official_exchange_open:
         return True
     cached_payload = cached.quote_payload if isinstance(cached.quote_payload, dict) else {}
-    cached_book = (
-        cached.order_book_summary if isinstance(cached.order_book_summary, dict) else {}
-    )
+    cached_book = cached.order_book_summary if isinstance(cached.order_book_summary, dict) else {}
     return not (
         cached.official_exchange_open
         or cached.quote_allowed_for_data_collection

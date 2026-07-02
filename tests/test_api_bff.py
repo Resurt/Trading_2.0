@@ -595,9 +595,7 @@ def preflight_response(*, market_open: bool, reason_code: str) -> SessionPreflig
         official_exchange_closed=official_exchange_closed,
         official_exchange_reason_code=reason_code if official_exchange_closed else None,
         official_exchange_source=(
-            "official_moex_news_2026_06_17"
-            if official_exchange_closed
-            else "test_preflight"
+            "official_moex_news_2026_06_17" if official_exchange_closed else "test_preflight"
         ),
         broker_stream_available=official_exchange_closed,
         broker_otc_or_indicative_available=official_exchange_closed,
@@ -898,9 +896,7 @@ def seed_database(database: DatabaseService) -> None:
                             {"price": "100.1", "quantity_lots": "8"},
                             {"price": "100.2", "quantity_lots": "8"},
                         ],
-                        "recent_market_trades": [
-                            {"side": "buy", "price": "100.04", "qty_lots": 5}
-                        ]
+                        "recent_market_trades": [{"side": "buy", "price": "100.04", "qty_lots": 5}],
                     },
                 ),
                 MarketMicrostructureSnapshot(
@@ -1237,9 +1233,7 @@ def test_robot_status_and_market_overview(
     sber_details = client.get("/market/instruments/MOEX%3ASBER/details").json()
     latest_microstructure = client.get("/market/microstructure/latest").json()
     seed_ts = utc(2026, 6, 12, 7)
-    lookback_minutes = (
-        int((datetime.now(tz=UTC) - seed_ts).total_seconds() // 60) + 60
-    )
+    lookback_minutes = int((datetime.now(tz=UTC) - seed_ts).total_seconds() // 60) + 60
     microstructure_summary = client.get(
         "/market/microstructure/summary",
         params={"lookback_minutes": lookback_minutes},
@@ -1260,7 +1254,7 @@ def test_robot_status_and_market_overview(
     assert status["balance"]["balance_degraded"] is False
     assert "account-1" not in str(status["balance"])
     assert market["instruments"][0]["instrument_id"] == "MOEX:SBER"
-    assert len(market["instruments"]) == 8
+    assert len(market["instruments"]) == 9
     assert market["instruments"][0]["last_price"] == "100.05000000"
     assert market["instruments"][0]["last_price_source"] == "broker_quote_exchange_closed"
     assert market["instruments"][0]["quote_source"] == "broker_quote_exchange_closed"
@@ -1657,9 +1651,13 @@ def test_market_overview_keeps_order_book_when_candle_fallback_query_fails(
     seed_database(database)
     now = datetime.now(tz=UTC)
     with database.session_scope() as session:
-        summary = session.execute(
-            select(OrderBookSummary).where(OrderBookSummary.instrument_id == "MOEX:SBER")
-        ).scalars().one()
+        summary = (
+            session.execute(
+                select(OrderBookSummary).where(OrderBookSummary.instrument_id == "MOEX:SBER")
+            )
+            .scalars()
+            .one()
+        )
         summary.ts_utc = now
         summary.exchange_ts = now
         summary.received_ts = now
@@ -1937,7 +1935,7 @@ def test_market_overview_uses_read_model_when_dashboard_gateway_unavailable(
         headers={"X-API-Role": "observer"},
     ).json()
 
-    assert len(market["instruments"]) == 8
+    assert len(market["instruments"]) == 9
     assert {row["instrument_id"] for row in market["instruments"]} >= {"MOEX:SBER", "MOEX:GAZP"}
     assert feed_status["errors"] == []
 
@@ -2001,7 +1999,7 @@ def test_dashboard_market_feed_snapshot_does_not_require_collector_or_write_db(
         }
 
     assert snapshot["data_only_collection_required"] is False
-    assert len(snapshot["quote_rows"]) == 8
+    assert len(snapshot["quote_rows"]) == 9
     assert snapshot["session"]["market_open"] is False
     assert snapshot["selected_details"]["instrument_id"] == "MOEX:SBER"
     assert snapshot["selected_details"]["order_book_source"] == "broker_quote_exchange_closed"
@@ -2059,7 +2057,7 @@ def test_dashboard_quote_board_uses_read_model_without_collector_or_db_writes(
 
     assert before == after
     assert snapshot["data_only_collection_required"] is False
-    assert len(snapshot["quote_rows"]) == 8
+    assert len(snapshot["quote_rows"]) == 9
     assert gateway.order_book_calls == []
     assert gateway.last_trade_calls == []
     sber = next(row for row in snapshot["quote_rows"] if row["instrument_id"] == "MOEX:SBER")
@@ -2371,9 +2369,7 @@ def test_dashboard_market_feed_limits_selected_trade_tape_to_ten_rows(
     monkeypatch.setenv("DASHBOARD_TRADES_REFRESH_SECONDS", "0")
     force_exchange_open(monkeypatch)
     monkeypatch.setattr(app_module, "_readonly_tbank_gateway", lambda: FakeManyTradesGateway())
-    database = DatabaseService(
-        f"sqlite+pysqlite:///{tmp_path / 'dashboard-feed-trades-limit.db'}"
-    )
+    database = DatabaseService(f"sqlite+pysqlite:///{tmp_path / 'dashboard-feed-trades-limit.db'}")
     Base.metadata.create_all(database.engine)
     seed_database(database)
     app = create_fastapi_app(database=database, report_task_client=FakeReportTaskClient())
@@ -3028,7 +3024,7 @@ def test_market_websocket_uses_dashboard_feed_and_preserves_selection(
     first_snapshot = first["payload"]["data"]
     second_snapshot = second["payload"]["data"]
     assert first_snapshot["source"] == "dashboard_market_feed"
-    assert len(first_snapshot["quote_rows"]) == 8
+    assert len(first_snapshot["quote_rows"]) == 9
     assert first_snapshot["selected_details"]["instrument_id"] == "MOEX:SBER"
     assert first_snapshot["selected_details"]["market_trades_source"] is not None
     assert second_snapshot["selected_instrument"] == "MOEX:GAZP"
@@ -3119,7 +3115,7 @@ def test_market_overview_uses_read_model_without_readonly_quote_board_books(
     market = client.get("/market/overview").json()
     sber = next(row for row in market["instruments"] if row["instrument_id"] == "MOEX:SBER")
 
-    assert len(market["instruments"]) == 8
+    assert len(market["instruments"]) == 9
     assert sber["last_price"] == "100.05000000"
     assert sber["last_price_source"] == "broker_quote_exchange_closed"
     assert "bids" not in sber["order_book_summary"]
@@ -3244,9 +3240,7 @@ def test_order_book_payload_on_official_closed_is_display_only_broker_quote() ->
     assert payload["warning"] == "broker_quote_not_for_calibration"
     assert Decimal(str(payload["spread_abs"])) == Decimal("0.35")
     assert Decimal(str(payload["spread_abs_rub"])) == Decimal("0.35")
-    assert Decimal(str(payload["spread_bps"])).quantize(Decimal("0.01")) == Decimal(
-        "11.18"
-    )
+    assert Decimal(str(payload["spread_bps"])).quantize(Decimal("0.01")) == Decimal("11.18")
     assert payload["market_quality_label"] == "not_for_calibration"
     assert payload["calibration_market_quality_score"] == Decimal("0")
     assert payload["order_book_summary"]["include_in_calibration"] is False
@@ -3381,9 +3375,7 @@ def test_robot_start_closed_market_queues_async_preflight_command(
     with database.session_scope() as session:
         command = session.get(RobotCommand, UUID(response["command_id"]))
         audit = (
-            session.query(AuditEvent)
-            .filter(AuditEvent.entity_id == response["command_id"])
-            .one()
+            session.query(AuditEvent).filter(AuditEvent.entity_id == response["command_id"]).one()
         )
         assert command is not None
         assert command.status == "requested"
@@ -3554,9 +3546,7 @@ def test_reports_config_and_openapi(tmp_path: Path) -> None:
 def test_logging_analytics_read_models(tmp_path: Path) -> None:
     client = make_client(tmp_path)
 
-    blockers = client.get(
-        "/analytics/blockers?trading_date=2026-06-12&strategy_id=baseline"
-    ).json()
+    blockers = client.get("/analytics/blockers?trading_date=2026-06-12&strategy_id=baseline").json()
     funnel = client.get(
         "/analytics/candidate-funnel?trading_date=2026-06-12&strategy_id=baseline"
     ).json()

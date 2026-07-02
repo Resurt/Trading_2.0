@@ -383,6 +383,7 @@ def test_instrument_resolver_returns_lot_and_tick_for_core_universe_from_sdk() -
                 "GMKN": (1, "0.1"),
                 "OZON": (1, "0.5"),
                 "VTBR": (10000, "0.00001"),
+                "T": (1, "0.02"),
             }
             return BrokerUnaryResponse(
                 method_name="ResolveInstruments",
@@ -408,7 +409,7 @@ def test_instrument_resolver_returns_lot_and_tick_for_core_universe_from_sdk() -
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     fake_gateway = CoreUniverseResolveGateway()
-    tickers = ("SBER", "GAZP", "LKOH", "YDEX", "TATN", "GMKN", "OZON", "VTBR")
+    tickers = ("SBER", "GAZP", "LKOH", "YDEX", "TATN", "GMKN", "OZON", "VTBR", "T")
 
     with Session(engine) as session:
         service = InstrumentResolverService(
@@ -425,13 +426,10 @@ def test_instrument_resolver_returns_lot_and_tick_for_core_universe_from_sdk() -
             )
         )
 
-        rows = {
-            row.ticker: row
-            for row in session.execute(select(InstrumentRegistry)).scalars()
-        }
+        rows = {row.ticker: row for row in session.execute(select(InstrumentRegistry)).scalars()}
 
     assert fake_gateway.requests[0].tickers == tickers
-    assert len(resolved) == 8
+    assert len(resolved) == 9
     assert {item.ticker for item in resolved} == set(tickers)
     assert all(item.lot_size is not None and item.lot_size > 0 for item in resolved)
     assert all(item.min_price_increment is not None for item in resolved)

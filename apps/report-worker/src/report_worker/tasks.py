@@ -288,5 +288,9 @@ def _today_utc() -> date:
 
 
 def _parse_universe(value: str | None) -> list[str]:
-    raw = value or os.getenv("CALIBRATION_OBSERVATORY_UNIVERSE") or "SBER,GAZP"
+    raw = (
+        value
+        or os.getenv("CALIBRATION_OBSERVATORY_UNIVERSE")
+        or "SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T"
+    )
     return [part.strip() for part in raw.split(",") if part.strip()]

@@ -236,18 +236,10 @@ def normalize_sdk_response(
         }
     if method_name == "GetLastPrices":
         return {
-            "prices": [
-                _last_price_payload(item)
-                for item in _list_attr(response, "last_prices")
-            ]
+            "prices": [_last_price_payload(item) for item in _list_attr(response, "last_prices")]
         }
     if method_name == "GetLastTrades":
-        return {
-            "trades": [
-                _market_trade_payload(item)
-                for item in _list_attr(response, "trades")
-            ]
-        }
+        return {"trades": [_market_trade_payload(item) for item in _list_attr(response, "trades")]}
     if method_name == "GetOrderBook":
         return _order_book_payload(response)
     if method_name == "PostOrder":
@@ -395,10 +387,7 @@ def _canonical_stream_payload(
     if not instrument_id_by_broker_id:
         return payload
     broker_id = str(
-        payload.get("instrument_uid")
-        or payload.get("figi")
-        or payload.get("instrument_id")
-        or ""
+        payload.get("instrument_uid") or payload.get("figi") or payload.get("instrument_id") or ""
     )
     canonical_id = instrument_id_by_broker_id.get(broker_id)
     if not canonical_id:
@@ -512,9 +501,7 @@ def _call_sdk_method(sdk: Any, services: Any, method_name: str, payload: JsonPay
             price_type=_enum_or_none(sdk, "PriceType", "PRICE_TYPE_CURRENCY"),
         )
     if method_name == "GetOrders":
-        return services.orders.get_orders(
-            account_id=str(payload["account_id"])
-        )
+        return services.orders.get_orders(account_id=str(payload["account_id"]))
     if method_name == "GetPortfolio":
         return services.operations.get_portfolio(account_id=str(payload["account_id"]))
     if method_name == "GetPositions":
@@ -833,11 +820,7 @@ def _quotation(sdk: Any, value: object) -> Any | None:
 
 def _instrument_id(value: object) -> str:
     if isinstance(value, Mapping):
-        raw = (
-            value.get("instrument_uid")
-            or value.get("figi")
-            or value.get("instrument_id")
-        )
+        raw = value.get("instrument_uid") or value.get("figi") or value.get("instrument_id")
         if raw:
             identifier = str(raw)
             if identifier.upper().startswith("MOEX:"):
@@ -911,9 +894,7 @@ def _schedule_window(
     end = _attr(day, end_field)
     if not _is_present(start) or not _is_present(end) or start == end:
         return None
-    normalized_session_type = (
-        "weekend" if _is_weekend_date(trading_date) else session_type
-    )
+    normalized_session_type = "weekend" if _is_weekend_date(trading_date) else session_type
     return {
         "session_type": normalized_session_type,
         "session_phase": "continuous_trading",
@@ -936,9 +917,7 @@ def _is_weekend_date(value: str | None) -> bool:
 def _trading_status_payload(response: Any, *, request_payload: Mapping[str, object]) -> JsonPayload:
     instrument_payload = request_payload.get("instrument")
     instrument_id = (
-        _instrument_id(instrument_payload)
-        if isinstance(instrument_payload, Mapping)
-        else None
+        _instrument_id(instrument_payload) if isinstance(instrument_payload, Mapping) else None
     )
     return {
         "instrument_id": instrument_id or _str_or_none(_attr(response, "instrument_uid")),
@@ -1048,9 +1027,7 @@ def _stream_candle_payload(candle: Any) -> JsonPayload:
 
 
 def _last_price_payload(item: Any) -> JsonPayload:
-    instrument_id = _str_or_none(_attr(item, "instrument_uid")) or _str_or_none(
-        _attr(item, "figi")
-    )
+    instrument_id = _str_or_none(_attr(item, "instrument_uid")) or _str_or_none(_attr(item, "figi"))
     return {
         "instrument_id": instrument_id,
         "figi": _str_or_none(_attr(item, "figi")),
@@ -1062,9 +1039,7 @@ def _last_price_payload(item: Any) -> JsonPayload:
 
 def _order_book_payload(book: Any) -> JsonPayload:
     exchange_ts = _attr(book, "orderbook_ts") or _attr(book, "time")
-    instrument_id = _str_or_none(_attr(book, "instrument_uid")) or _str_or_none(
-        _attr(book, "figi")
-    )
+    instrument_id = _str_or_none(_attr(book, "instrument_uid")) or _str_or_none(_attr(book, "figi"))
     return {
         "instrument_id": instrument_id,
         "figi": _str_or_none(_attr(book, "figi")),
@@ -1119,8 +1094,7 @@ def _order_state_payload(order: Any, *, default_status: str) -> JsonPayload:
         "order_date": _iso_or_none(_attr(order, "order_date")),
         "message": _str_or_none(_attr(order, "message")),
         "fills": [
-            _fill_payload(stage, order=order, index=index)
-            for index, stage in enumerate(stages)
+            _fill_payload(stage, order=order, index=index) for index, stage in enumerate(stages)
         ],
     }
 
@@ -1282,6 +1256,7 @@ def _instrument_catalog_payload(instrument: Any) -> JsonPayload:
         "instrument_id": instrument_uid or _str_or_none(_attr(instrument, "figi")) or ticker,
         "instrument_uid": instrument_uid,
         "figi": _str_or_none(_attr(instrument, "figi")),
+        "isin": _str_or_none(_attr(instrument, "isin")),
         "ticker": ticker,
         "class_code": class_code,
         "name": _str_or_none(_attr(instrument, "name")) or ticker or instrument_uid,

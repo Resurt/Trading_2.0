@@ -9,7 +9,7 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
-CORE = "SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR"
+CORE = "SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T"
 
 
 def get_json(base_url: str, path: str, timeout: float) -> dict[str, Any]:
@@ -40,8 +40,7 @@ def main() -> int:
             "reason_code": preflight.get("reason_code"),
             "official_exchange_closed": True,
             "message": (
-                "official MOEX exchange is closed; "
-                "calibration stream freshness is not expected"
+                "official MOEX exchange is closed; calibration stream freshness is not expected"
             ),
         }
         print(json.dumps(result, ensure_ascii=False, indent=2 if args.json_output else None))

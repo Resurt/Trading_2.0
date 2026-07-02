@@ -1,25 +1,25 @@
 # Local Development Runbook
 
-## Назначение
+## РќР°Р·РЅР°С‡РµРЅРёРµ
 
-Локальный запуск нужен для проверки runtime wiring, health endpoints, Prometheus/Grafana/Loki и Docker Compose wiring. По умолчанию `trade-core` стартует в безопасном `historical_replay`: он ведёт session/micro-session loop, пишет domain events, строит closed bars и pseudo-orders без реальных T-Bank broker calls.
+Р›РѕРєР°Р»СЊРЅС‹Р№ Р·Р°РїСѓСЃРє РЅСѓР¶РµРЅ РґР»СЏ РїСЂРѕРІРµСЂРєРё runtime wiring, health endpoints, Prometheus/Grafana/Loki Рё Docker Compose wiring. РџРѕ СѓРјРѕР»С‡Р°РЅРёСЋ `trade-core` СЃС‚Р°СЂС‚СѓРµС‚ РІ Р±РµР·РѕРїР°СЃРЅРѕРј `historical_replay`: РѕРЅ РІРµРґС‘С‚ session/micro-session loop, РїРёС€РµС‚ domain events, СЃС‚СЂРѕРёС‚ closed bars Рё pseudo-orders Р±РµР· СЂРµР°Р»СЊРЅС‹С… T-Bank broker calls.
 
-## Обязательные ограничения
+## РћР±СЏР·Р°С‚РµР»СЊРЅС‹Рµ РѕРіСЂР°РЅРёС‡РµРЅРёСЏ
 
-- Не коммитить реальные T-Bank токены.
-- Не хранить реальные секреты в `.env`.
-- Production-like secrets читаются только из Docker Compose secrets.
-- Для dev допускаются локальные файлы в `secrets/`; папка `secrets/` игнорируется Git.
+- РќРµ РєРѕРјРјРёС‚РёС‚СЊ СЂРµР°Р»СЊРЅС‹Рµ T-Bank С‚РѕРєРµРЅС‹.
+- РќРµ С…СЂР°РЅРёС‚СЊ СЂРµР°Р»СЊРЅС‹Рµ СЃРµРєСЂРµС‚С‹ РІ `.env`.
+- Production-like secrets С‡РёС‚Р°СЋС‚СЃСЏ С‚РѕР»СЊРєРѕ РёР· Docker Compose secrets.
+- Р”Р»СЏ dev РґРѕРїСѓСЃРєР°СЋС‚СЃСЏ Р»РѕРєР°Р»СЊРЅС‹Рµ С„Р°Р№Р»С‹ РІ `secrets/`; РїР°РїРєР° `secrets/` РёРіРЅРѕСЂРёСЂСѓРµС‚СЃСЏ Git.
 
-## Подготовка окружения
+## РџРѕРґРіРѕС‚РѕРІРєР° РѕРєСЂСѓР¶РµРЅРёСЏ
 
-Скопируйте несекретные параметры:
+РЎРєРѕРїРёСЂСѓР№С‚Рµ РЅРµСЃРµРєСЂРµС‚РЅС‹Рµ РїР°СЂР°РјРµС‚СЂС‹:
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-Создайте локальные secret files:
+РЎРѕР·РґР°Р№С‚Рµ Р»РѕРєР°Р»СЊРЅС‹Рµ secret files:
 
 ```powershell
 New-Item -ItemType Directory -Force secrets | Out-Null
@@ -29,9 +29,9 @@ Set-Content -NoNewline secrets/tbank_full_access_token "paste_full_access_token_
 Set-Content -NoNewline secrets/tbank_readonly_token "paste_readonly_token_here"
 ```
 
-Для реального токена замените `paste_*_token_here` вручную. Не вставляйте токены в документы, compose-файлы или `.env`.
+Р”Р»СЏ СЂРµР°Р»СЊРЅРѕРіРѕ С‚РѕРєРµРЅР° Р·Р°РјРµРЅРёС‚Рµ `paste_*_token_here` РІСЂСѓС‡РЅСѓСЋ. РќРµ РІСЃС‚Р°РІР»СЏР№С‚Рµ С‚РѕРєРµРЅС‹ РІ РґРѕРєСѓРјРµРЅС‚С‹, compose-С„Р°Р№Р»С‹ РёР»Рё `.env`.
 
-T-Bank adapter по умолчанию работает в `sandbox` режиме:
+T-Bank adapter РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ СЂР°Р±РѕС‚Р°РµС‚ РІ `sandbox` СЂРµР¶РёРјРµ:
 
 ```powershell
 $env:TBANK_ENVIRONMENT = "sandbox"
@@ -40,32 +40,32 @@ $env:SSL_TBANK_VERIFY = "true"
 $env:TBANK_UNARY_TIMEOUT_FLOOR_SECONDS = "5.0"
 ```
 
-`SSL_TBANK_VERIFY=true` включает встроенный в официальный T-Bank SDK bundle
-`RussianTrustedRootCA.pem`. Это нужно для endpoints T-Invest с цепочкой НУЦ
-Минцифры РФ. Если Windows/curl/Python показывают
-`self signed certificate in certificate chain` или issuer
-`CN=The original certificate provided by the server is untrusted`, проверьте
-ESET/HTTPS inspection и доверие Russian Trusted Root/Sub CA в окружении процесса.
+`SSL_TBANK_VERIFY=true` РІРєР»СЋС‡Р°РµС‚ РІСЃС‚СЂРѕРµРЅРЅС‹Р№ РІ РѕС„РёС†РёР°Р»СЊРЅС‹Р№ T-Bank SDK bundle
+`RussianTrustedRootCA.pem`. Р­С‚Рѕ РЅСѓР¶РЅРѕ РґР»СЏ endpoints T-Invest СЃ С†РµРїРѕС‡РєРѕР№ РќРЈР¦
+РњРёРЅС†РёС„СЂС‹ Р Р¤. Р•СЃР»Рё Windows/curl/Python РїРѕРєР°Р·С‹РІР°СЋС‚
+`self signed certificate in certificate chain` РёР»Рё issuer
+`CN=The original certificate provided by the server is untrusted`, РїСЂРѕРІРµСЂСЊС‚Рµ
+ESET/HTTPS inspection Рё РґРѕРІРµСЂРёРµ Russian Trusted Root/Sub CA РІ РѕРєСЂСѓР¶РµРЅРёРё РїСЂРѕС†РµСЃСЃР°.
 
-Для реальных sandbox/live readonly calls через официальный SDK установите optional extra:
+Р”Р»СЏ СЂРµР°Р»СЊРЅС‹С… sandbox/live readonly calls С‡РµСЂРµР· РѕС„РёС†РёР°Р»СЊРЅС‹Р№ SDK СѓСЃС‚Р°РЅРѕРІРёС‚Рµ optional extra:
 
 ```powershell
 python -m pip install -e ".[tbank]" --extra-index-url https://opensource.tbank.ru/api/v4/projects/238/packages/pypi/simple
 ```
 
-## Запуск стека
+## Р—Р°РїСѓСЃРє СЃС‚РµРєР°
 
 ```powershell
 docker compose up -d --build
 ```
 
-Альтернатива, если установлен `make`:
+РђР»СЊС‚РµСЂРЅР°С‚РёРІР°, РµСЃР»Рё СѓСЃС‚Р°РЅРѕРІР»РµРЅ `make`:
 
 ```powershell
 make up
 ```
 
-## Проверка health
+## РџСЂРѕРІРµСЂРєР° health
 
 ```powershell
 docker compose ps
@@ -78,9 +78,9 @@ Invoke-WebRequest http://localhost:3000/api/health
 Invoke-WebRequest http://localhost:3100/ready
 ```
 
-## Проверка trade-core runtime
+## РџСЂРѕРІРµСЂРєР° trade-core runtime
 
-Локально без токенов используйте только безопасный режим:
+Р›РѕРєР°Р»СЊРЅРѕ Р±РµР· С‚РѕРєРµРЅРѕРІ РёСЃРїРѕР»СЊР·СѓР№С‚Рµ С‚РѕР»СЊРєРѕ Р±РµР·РѕРїР°СЃРЅС‹Р№ СЂРµР¶РёРј:
 
 ```powershell
 $env:TRADING_RUNTIME_MODE = "historical_replay"
@@ -88,32 +88,32 @@ $env:TRADE_CORE_TICK_INTERVAL_SECONDS = "1"
 python -m trade_core.service
 ```
 
-Ожидаемые endpoints:
+РћР¶РёРґР°РµРјС‹Рµ endpoints:
 
 ```powershell
 Invoke-WebRequest http://localhost:8001/health
 Invoke-WebRequest http://localhost:8001/metrics
 ```
 
-В `historical_replay` runtime:
+Р’ `historical_replay` runtime:
 
-- не требует T-Bank токены;
-- не вызывает `BrokerGateway.post_order`;
-- открывает logical hourly micro-sessions без рестарта процесса;
-- пишет `signal_candidate`, `candidate_stage_result`, `order_intent`, `broker_order` как domain facts;
-- на shutdown пишет `audit_event`.
+- РЅРµ С‚СЂРµР±СѓРµС‚ T-Bank С‚РѕРєРµРЅС‹;
+- РЅРµ РІС‹Р·С‹РІР°РµС‚ `BrokerGateway.post_order`;
+- РѕС‚РєСЂС‹РІР°РµС‚ logical hourly micro-sessions Р±РµР· СЂРµСЃС‚Р°СЂС‚Р° РїСЂРѕС†РµСЃСЃР°;
+- РїРёС€РµС‚ `signal_candidate`, `candidate_stage_result`, `order_intent`, `broker_order` РєР°Рє domain facts;
+- РЅР° shutdown РїРёС€РµС‚ `audit_event`.
 
-Если `TRADING_DATABASE_URL`/`DATABASE_URL` не задан, runtime не должен молча уходить в SQLite. Для одно-процессного локального эксперимента без Postgres выставьте явный флаг:
+Р•СЃР»Рё `TRADING_DATABASE_URL`/`DATABASE_URL` РЅРµ Р·Р°РґР°РЅ, runtime РЅРµ РґРѕР»Р¶РµРЅ РјРѕР»С‡Р° СѓС…РѕРґРёС‚СЊ РІ SQLite. Р”Р»СЏ РѕРґРЅРѕ-РїСЂРѕС†РµСЃСЃРЅРѕРіРѕ Р»РѕРєР°Р»СЊРЅРѕРіРѕ СЌРєСЃРїРµСЂРёРјРµРЅС‚Р° Р±РµР· Postgres РІС‹СЃС‚Р°РІСЊС‚Рµ СЏРІРЅС‹Р№ С„Р»Р°Рі:
 
 ```powershell
 $env:TRADING_RUNTIME_LOCAL_SQLITE = "1"
 ```
 
-В Docker Compose этот флаг не используется: `trade-core`, `api` и `report-worker` должны смотреть в один PostgreSQL через `POSTGRES_HOST=postgres`, `POSTGRES_DB`, `POSTGRES_USER` и `POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password`.
+Р’ Docker Compose СЌС‚РѕС‚ С„Р»Р°Рі РЅРµ РёСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ: `trade-core`, `api` Рё `report-worker` РґРѕР»Р¶РЅС‹ СЃРјРѕС‚СЂРµС‚СЊ РІ РѕРґРёРЅ PostgreSQL С‡РµСЂРµР· `POSTGRES_HOST=postgres`, `POSTGRES_DB`, `POSTGRES_USER` Рё `POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password`.
 
 ## FastAPI BFF
 
-OpenAPI доступен локально:
+OpenAPI РґРѕСЃС‚СѓРїРµРЅ Р»РѕРєР°Р»СЊРЅРѕ:
 
 ```powershell
 Invoke-WebRequest http://localhost:8000/openapi.json
@@ -125,7 +125,7 @@ Swagger UI:
 http://localhost:8000/docs
 ```
 
-Чтение состояния не требует роли выше `observer`:
+Р§С‚РµРЅРёРµ СЃРѕСЃС‚РѕСЏРЅРёСЏ РЅРµ С‚СЂРµР±СѓРµС‚ СЂРѕР»Рё РІС‹С€Рµ `observer`:
 
 ```powershell
 Invoke-RestMethod http://localhost:8000/robot/status
@@ -133,8 +133,8 @@ Invoke-RestMethod http://localhost:8000/session/current
 Invoke-RestMethod http://localhost:8000/market/overview
 ```
 
-Команды управления и ручной запуск daily report в local-dev используют dev auth
-headers. В production этот путь запрещен, там нужен `TRADING_AUTH_MODE=static_bearer`.
+РљРѕРјР°РЅРґС‹ СѓРїСЂР°РІР»РµРЅРёСЏ Рё СЂСѓС‡РЅРѕР№ Р·Р°РїСѓСЃРє daily report РІ local-dev РёСЃРїРѕР»СЊР·СѓСЋС‚ dev auth
+headers. Р’ production СЌС‚РѕС‚ РїСѓС‚СЊ Р·Р°РїСЂРµС‰РµРЅ, С‚Р°Рј РЅСѓР¶РµРЅ `TRADING_AUTH_MODE=static_bearer`.
 
 ```powershell
 Invoke-RestMethod -Method Post -Headers @{ "X-API-Role" = "operator" } http://localhost:8000/robot/start
@@ -145,11 +145,11 @@ Invoke-RestMethod -Method Post -Headers @{ "X-API-Role" = "operator" } `
   http://localhost:8000/reports/daily/run
 ```
 
-Эти команды сохраняются в `robot_command`, а `trade-core` применяет их в runtime loop.
-Проверить статус durable команды можно через `/robot/status` и прямую диагностику БД
-в local-dev.
+Р­С‚Рё РєРѕРјР°РЅРґС‹ СЃРѕС…СЂР°РЅСЏСЋС‚СЃСЏ РІ `robot_command`, Р° `trade-core` РїСЂРёРјРµРЅСЏРµС‚ РёС… РІ runtime loop.
+РџСЂРѕРІРµСЂРёС‚СЊ СЃС‚Р°С‚СѓСЃ durable РєРѕРјР°РЅРґС‹ РјРѕР¶РЅРѕ С‡РµСЂРµР· `/robot/status` Рё РїСЂСЏРјСѓСЋ РґРёР°РіРЅРѕСЃС‚РёРєСѓ Р‘Р”
+РІ local-dev.
 
-WebSocket каналы:
+WebSocket РєР°РЅР°Р»С‹:
 
 - `ws://localhost:8000/ws/dashboard`
 - `ws://localhost:8000/ws/orders`
@@ -157,7 +157,7 @@ WebSocket каналы:
 - `ws://localhost:8000/ws/market` - compatibility alias for the same market feed
 - `ws://localhost:8000/ws/reports`
 
-Для Vite frontend API должен разрешать локальный origin:
+Р”Р»СЏ Vite frontend API РґРѕР»Р¶РµРЅ СЂР°Р·СЂРµС€Р°С‚СЊ Р»РѕРєР°Р»СЊРЅС‹Р№ origin:
 
 ```powershell
 $env:CORS_ALLOW_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173"
@@ -165,14 +165,14 @@ $env:CORS_ALLOW_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173"
 
 ## Frontend
 
-Локальный запуск:
+Р›РѕРєР°Р»СЊРЅС‹Р№ Р·Р°РїСѓСЃРє:
 
 ```powershell
 cd apps/frontend
 npm.cmd run dev
 ```
 
-Проверки:
+РџСЂРѕРІРµСЂРєРё:
 
 ```powershell
 cd apps/frontend
@@ -181,23 +181,23 @@ npm.cmd run test:unit
 npm.cmd run build
 ```
 
-## Миграции PostgreSQL
+## РњРёРіСЂР°С†РёРё PostgreSQL
 
-После запуска `postgres` примените схему:
+РџРѕСЃР»Рµ Р·Р°РїСѓСЃРєР° `postgres` РїСЂРёРјРµРЅРёС‚Рµ СЃС…РµРјСѓ:
 
 ```powershell
 python -m alembic upgrade head
 python -m alembic current
 ```
 
-Проверка обратимости последней миграции:
+РџСЂРѕРІРµСЂРєР° РѕР±СЂР°С‚РёРјРѕСЃС‚Рё РїРѕСЃР»РµРґРЅРµР№ РјРёРіСЂР°С†РёРё:
 
 ```powershell
 python -m alembic downgrade -1
 python -m alembic upgrade head
 ```
 
-## Локальные адреса
+## Р›РѕРєР°Р»СЊРЅС‹Рµ Р°РґСЂРµСЃР°
 
 - Frontend: `http://localhost:5173`
 - API: `http://localhost:8000`
@@ -209,53 +209,53 @@ python -m alembic upgrade head
 - Fluent Bit HTTP: `http://localhost:2020`
 - Fluent Bit forward input: `localhost:24224`
 
-## Логи
+## Р›РѕРіРё
 
 ```powershell
 docker compose logs -f --tail=200
 ```
 
-Docker services используют `fluentd` logging driver с async-доставкой на Fluent Bit `forward` input (`localhost:24224`). Fluent Bit отправляет stdout/stderr logs в Loki.
+Docker services РёСЃРїРѕР»СЊР·СѓСЋС‚ `fluentd` logging driver СЃ async-РґРѕСЃС‚Р°РІРєРѕР№ РЅР° Fluent Bit `forward` input (`localhost:24224`). Fluent Bit РѕС‚РїСЂР°РІР»СЏРµС‚ stdout/stderr logs РІ Loki.
 
-## Остановка
+## РћСЃС‚Р°РЅРѕРІРєР°
 
 ```powershell
 docker compose down
 ```
 
-С удалением volume-данных:
+РЎ СѓРґР°Р»РµРЅРёРµРј volume-РґР°РЅРЅС‹С…:
 
 ```powershell
 docker compose down -v
 ```
 
-## Локальные проверки без Docker
+## Р›РѕРєР°Р»СЊРЅС‹Рµ РїСЂРѕРІРµСЂРєРё Р±РµР· Docker
 
 ```powershell
 python scripts/check.py
 python scripts/run_replay_harness.py
 python scripts/run_sandbox_smoke.py --dry-run
-python scripts/run_historical_candle_backfill.py --instruments SBER,GAZP --lookback-days 90 --dry-run
+python scripts/run_historical_candle_backfill.py --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T --lookback-days 90 --dry-run
 ```
 
-Полный локальный controlled-launch gate без реальных broker orders:
+РџРѕР»РЅС‹Р№ Р»РѕРєР°Р»СЊРЅС‹Р№ controlled-launch gate Р±РµР· СЂРµР°Р»СЊРЅС‹С… broker orders:
 
 ```powershell
 python scripts/run_controlled_launch_acceptance.py
 ```
 
-Если `python scripts/check.py` уже выполнен отдельно, можно ускорить приемку:
+Р•СЃР»Рё `python scripts/check.py` СѓР¶Рµ РІС‹РїРѕР»РЅРµРЅ РѕС‚РґРµР»СЊРЅРѕ, РјРѕР¶РЅРѕ СѓСЃРєРѕСЂРёС‚СЊ РїСЂРёРµРјРєСѓ:
 
 ```powershell
 python scripts/run_controlled_launch_acceptance.py --skip-full-check
 ```
 
-Этот скрипт запускает analytics acceptance, report rebuild, replay-day, `docker compose config`,
+Р­С‚РѕС‚ СЃРєСЂРёРїС‚ Р·Р°РїСѓСЃРєР°РµС‚ analytics acceptance, report rebuild, replay-day, `docker compose config`,
 SQLite migration `upgrade -> downgrade -1 -> upgrade`, sandbox dry-run, production safety guards
-и secret scan. Прямой `python -m alembic upgrade head` использует PostgreSQL из `alembic.ini`/env
-и должен запускаться только после поднятого `postgres` или с явно заданным `DATABASE_URL`.
+Рё secret scan. РџСЂСЏРјРѕР№ `python -m alembic upgrade head` РёСЃРїРѕР»СЊР·СѓРµС‚ PostgreSQL РёР· `alembic.ini`/env
+Рё РґРѕР»Р¶РµРЅ Р·Р°РїСѓСЃРєР°С‚СЊСЃСЏ С‚РѕР»СЊРєРѕ РїРѕСЃР»Рµ РїРѕРґРЅСЏС‚РѕРіРѕ `postgres` РёР»Рё СЃ СЏРІРЅРѕ Р·Р°РґР°РЅРЅС‹Рј `DATABASE_URL`.
 
-Расширенный launch-readiness gate:
+Р Р°СЃС€РёСЂРµРЅРЅС‹Р№ launch-readiness gate:
 
 ```powershell
 python scripts/run_launch_readiness.py --mode local
@@ -265,13 +265,13 @@ python scripts/run_launch_readiness.py --mode shadow
 python scripts/run_launch_readiness.py --mode production-preflight
 ```
 
-`compose` mode проверяет общий PostgreSQL config, health endpoints, Celery/report worker smoke и frontend build. `production-preflight` падает без `TRADING_PRODUCTION_CONFIRM`, production auth token, отключения dev auth, resolved instrument ids и shared Postgres.
+`compose` mode РїСЂРѕРІРµСЂСЏРµС‚ РѕР±С‰РёР№ PostgreSQL config, health endpoints, Celery/report worker smoke Рё frontend build. `production-preflight` РїР°РґР°РµС‚ Р±РµР· `TRADING_PRODUCTION_CONFIRM`, production auth token, РѕС‚РєР»СЋС‡РµРЅРёСЏ dev auth, resolved instrument ids Рё shared Postgres.
 
-На Windows, если PowerShell блокирует `npm.ps1`, используйте `npm.cmd` напрямую из `apps/frontend`.
+РќР° Windows, РµСЃР»Рё PowerShell Р±Р»РѕРєРёСЂСѓРµС‚ `npm.ps1`, РёСЃРїРѕР»СЊР·СѓР№С‚Рµ `npm.cmd` РЅР°РїСЂСЏРјСѓСЋ РёР· `apps/frontend`.
 
 ## Controlled launch modes
 
-Безопасный local default:
+Р‘РµР·РѕРїР°СЃРЅС‹Р№ local default:
 
 ```powershell
 $env:TRADING_RUNTIME_MODE = "historical_replay"
@@ -284,44 +284,44 @@ $env:TRADING_RUNTIME_MODE = "sandbox"
 python scripts/run_sandbox_smoke.py --dry-run
 ```
 
-Shadow mode локально должен писать pseudo-orders и не вызывать реальный `PostOrder`:
+Shadow mode Р»РѕРєР°Р»СЊРЅРѕ РґРѕР»Р¶РµРЅ РїРёСЃР°С‚СЊ pseudo-orders Рё РЅРµ РІС‹Р·С‹РІР°С‚СЊ СЂРµР°Р»СЊРЅС‹Р№ `PostOrder`:
 
 ```powershell
 $env:TRADING_RUNTIME_MODE = "shadow"
 docker compose up -d --build trade-core api report-worker report-worker-health frontend
 ```
 
-Production не включать локально без отдельного checklist. Для production требуется `TRADING_PRODUCTION_CONFIRM=I_UNDERSTAND_LIVE_ORDERS`.
+Production РЅРµ РІРєР»СЋС‡Р°С‚СЊ Р»РѕРєР°Р»СЊРЅРѕ Р±РµР· РѕС‚РґРµР»СЊРЅРѕРіРѕ checklist. Р”Р»СЏ production С‚СЂРµР±СѓРµС‚СЃСЏ `TRADING_PRODUCTION_CONFIRM=I_UNDERSTAND_LIVE_ORDERS`.
 
 ## Report Worker
 
-В Docker Compose роли разделены:
+Р’ Docker Compose СЂРѕР»Рё СЂР°Р·РґРµР»РµРЅС‹:
 
-- `report-worker` запускает Celery worker очереди `reports`;
-- `report-worker-health` отдает HTTP `/health` и `/metrics` на `http://localhost:8002`;
-- тяжелые hourly/daily/counterfactual отчеты не выполняются в FastAPI process.
+- `report-worker` Р·Р°РїСѓСЃРєР°РµС‚ Celery worker РѕС‡РµСЂРµРґРё `reports`;
+- `report-worker-health` РѕС‚РґР°РµС‚ HTTP `/health` Рё `/metrics` РЅР° `http://localhost:8002`;
+- С‚СЏР¶РµР»С‹Рµ hourly/daily/counterfactual РѕС‚С‡РµС‚С‹ РЅРµ РІС‹РїРѕР»РЅСЏСЋС‚СЃСЏ РІ FastAPI process.
 
-Запуск только контура отчетов:
+Р—Р°РїСѓСЃРє С‚РѕР»СЊРєРѕ РєРѕРЅС‚СѓСЂР° РѕС‚С‡РµС‚РѕРІ:
 
 ```powershell
 docker compose up -d --build redis postgres report-worker report-worker-health
 Invoke-WebRequest http://localhost:8002/health
 ```
 
-Проверка способности worker принимать задачи:
+РџСЂРѕРІРµСЂРєР° СЃРїРѕСЃРѕР±РЅРѕСЃС‚Рё worker РїСЂРёРЅРёРјР°С‚СЊ Р·Р°РґР°С‡Рё:
 
 ```powershell
 make celery-inspect
 make report-worker-smoke
 ```
 
-Эквивалентная Celery команда внутри контейнера:
+Р­РєРІРёРІР°Р»РµРЅС‚РЅР°СЏ Celery РєРѕРјР°РЅРґР° РІРЅСѓС‚СЂРё РєРѕРЅС‚РµР№РЅРµСЂР°:
 
 ```powershell
 docker compose exec -T report-worker celery -A report_worker.celery_app.celery_app inspect ping
 ```
 
-Локальный запуск worker без Docker, если Redis доступен на `localhost:6379`:
+Р›РѕРєР°Р»СЊРЅС‹Р№ Р·Р°РїСѓСЃРє worker Р±РµР· Docker, РµСЃР»Рё Redis РґРѕСЃС‚СѓРїРµРЅ РЅР° `localhost:6379`:
 
 ```powershell
 $env:CELERY_BROKER_URL = "redis://localhost:6379/0"
@@ -331,7 +331,7 @@ $env:CELERY_REPORTS_QUEUE = "reports"
 celery -A report_worker.celery_app.celery_app worker --loglevel=INFO --queues=reports
 ```
 
-Ручной запуск отчетов без FastAPI:
+Р СѓС‡РЅРѕР№ Р·Р°РїСѓСЃРє РѕС‚С‡РµС‚РѕРІ Р±РµР· FastAPI:
 
 ```powershell
 python tools/reports/build_hourly_report.py --date 2026-06-12 --strategy-id baseline --force-rebuild
@@ -339,13 +339,13 @@ python tools/reports/build_daily_report.py --date 2026-06-12 --strategy-id basel
 python tools/reports/run_counterfactual_analysis.py --date 2026-06-12 --strategy-id baseline --force-rebuild
 ```
 
-Фильтры CLI: `--instrument`, `--timeframe`, `--session-type`,
-`--strategy-version`, `--force-rebuild`. HTML preview можно получить через
-`--output-format html` или вместе с JSON через `--output-format both`.
+Р¤РёР»СЊС‚СЂС‹ CLI: `--instrument`, `--timeframe`, `--session-type`,
+`--strategy-version`, `--force-rebuild`. HTML preview РјРѕР¶РЅРѕ РїРѕР»СѓС‡РёС‚СЊ С‡РµСЂРµР·
+`--output-format html` РёР»Рё РІРјРµСЃС‚Рµ СЃ JSON С‡РµСЂРµР· `--output-format both`.
 
 ## Historical Candle Backfill
 
-Перед shadow/prod калибровкой можно накопить raw candles и derived bars:
+РџРµСЂРµРґ shadow/prod РєР°Р»РёР±СЂРѕРІРєРѕР№ РјРѕР¶РЅРѕ РЅР°РєРѕРїРёС‚СЊ raw candles Рё derived bars:
 
 ```powershell
 $env:TRADING_BACKFILL_RUNTIME_MODE = "shadow"
@@ -353,7 +353,7 @@ $env:TBANK_ENVIRONMENT = "live"
 $env:SSL_TBANK_VERIFY = "true"
 python scripts/run_tbank_sdk_import_check.py
 python scripts/run_historical_candle_backfill.py `
-  --instruments SBER,GAZP,LKOH `
+  --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T `
   --from-date 2025-01-01 `
   --to-date 2026-06-18 `
   --raw-interval 1m `
@@ -362,12 +362,12 @@ python scripts/run_historical_candle_backfill.py `
   --strategy-id baseline
 ```
 
-Скрипт не вызывает `PostOrder`/`CancelOrder`; он использует только readonly
-`GetCandles` и пишет `market_candle`. Подробности: `Docs/historical-candle-backfill.md`.
+РЎРєСЂРёРїС‚ РЅРµ РІС‹Р·С‹РІР°РµС‚ `PostOrder`/`CancelOrder`; РѕРЅ РёСЃРїРѕР»СЊР·СѓРµС‚ С‚РѕР»СЊРєРѕ readonly
+`GetCandles` Рё РїРёС€РµС‚ `market_candle`. РџРѕРґСЂРѕР±РЅРѕСЃС‚Рё: `Docs/historical-candle-backfill.md`.
 
 ## Historical replay local workflow
 
-После backfill можно прогнать полный local historical контур без реальных
+РџРѕСЃР»Рµ backfill РјРѕР¶РЅРѕ РїСЂРѕРіРЅР°С‚СЊ РїРѕР»РЅС‹Р№ local historical РєРѕРЅС‚СѓСЂ Р±РµР· СЂРµР°Р»СЊРЅС‹С…
 broker orders:
 
 ```powershell
@@ -379,8 +379,8 @@ make calibration-report LOOKBACK_DAYS=10
 python scripts/run_launch_readiness.py --mode historical-replay --dry-run
 ```
 
-Для реальной проверки на уже загруженных candles уберите `--dry-run` у
-конкретных CLI-команд. Все результаты пишутся в PostgreSQL domain tables:
+Р”Р»СЏ СЂРµР°Р»СЊРЅРѕР№ РїСЂРѕРІРµСЂРєРё РЅР° СѓР¶Рµ Р·Р°РіСЂСѓР¶РµРЅРЅС‹С… candles СѓР±РµСЂРёС‚Рµ `--dry-run` Сѓ
+РєРѕРЅРєСЂРµС‚РЅС‹С… CLI-РєРѕРјР°РЅРґ. Р’СЃРµ СЂРµР·СѓР»СЊС‚Р°С‚С‹ РїРёС€СѓС‚СЃСЏ РІ PostgreSQL domain tables:
 `historical_data_quality_report`, replay-generated candidate/order facts,
-`counterfactual_result`, `hourly_report`, `daily_report` и
+`counterfactual_result`, `hourly_report`, `daily_report` Рё
 `calibration_report`.

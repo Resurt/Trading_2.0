@@ -1,4 +1,4 @@
-# Market Data Pipeline и Bar Engine
+# Market Data Pipeline Рё Bar Engine
 
 ## Broker Display Refresh
 
@@ -18,16 +18,16 @@ recent persisted data-only rows from `market_trade_sample` with
 `trade_tape_source=persisted_data_only_trade_tape`. That fallback is readonly UI
 data and never writes DB rows.
 
-Этот документ фиксирует реализацию шага 06. Он дополняет `Docs/architecture.md`,
-`Docs/broker-gateway.md`, `Docs/session-manager.md` и `Docs/logging-analytics-spec.md`.
+Р­С‚РѕС‚ РґРѕРєСѓРјРµРЅС‚ С„РёРєСЃРёСЂСѓРµС‚ СЂРµР°Р»РёР·Р°С†РёСЋ С€Р°РіР° 06. РћРЅ РґРѕРїРѕР»РЅСЏРµС‚ `Docs/architecture.md`,
+`Docs/broker-gateway.md`, `Docs/session-manager.md` Рё `Docs/logging-analytics-spec.md`.
 
-## Цель
+## Р¦РµР»СЊ
 
-Market data слой дает `trade-core` нормализованный поток рыночных событий,
-закрытые бары 5m/10m/15m, lightweight market state и read models для live dashboard.
+Market data СЃР»РѕР№ РґР°РµС‚ `trade-core` РЅРѕСЂРјР°Р»РёР·РѕРІР°РЅРЅС‹Р№ РїРѕС‚РѕРє СЂС‹РЅРѕС‡РЅС‹С… СЃРѕР±С‹С‚РёР№,
+Р·Р°РєСЂС‹С‚С‹Рµ Р±Р°СЂС‹ 5m/10m/15m, lightweight market state Рё read models РґР»СЏ live dashboard.
 
-Стратегия на этом шаге не реализуется. Сигнальный контекст готовится только как
-рыночный read model, без правил входа/выхода.
+РЎС‚СЂР°С‚РµРіРёСЏ РЅР° СЌС‚РѕРј С€Р°РіРµ РЅРµ СЂРµР°Р»РёР·СѓРµС‚СЃСЏ. РЎРёРіРЅР°Р»СЊРЅС‹Р№ РєРѕРЅС‚РµРєСЃС‚ РіРѕС‚РѕРІРёС‚СЃСЏ С‚РѕР»СЊРєРѕ РєР°Рє
+СЂС‹РЅРѕС‡РЅС‹Р№ read model, Р±РµР· РїСЂР°РІРёР» РІС…РѕРґР°/РІС‹С…РѕРґР°.
 
 ## Pipeline Flow
 
@@ -63,27 +63,27 @@ MarketEventBus
 
 ## Historical Candle Backfill
 
-Для накопления базы перед replay/calibration добавлен отдельный контур
-`HistoricalCandleBackfillService` в `trade_core.market_data.historical_backfill`.
-Он вызывает `BrokerGateway.get_candles()` для raw `1m` candles, сохраняет их в
-`market_candle` и строит derived `5m/10m/15m` bars через тот же `BarEngine`.
+Р”Р»СЏ РЅР°РєРѕРїР»РµРЅРёСЏ Р±Р°Р·С‹ РїРµСЂРµРґ replay/calibration РґРѕР±Р°РІР»РµРЅ РѕС‚РґРµР»СЊРЅС‹Р№ РєРѕРЅС‚СѓСЂ
+`HistoricalCandleBackfillService` РІ `trade_core.market_data.historical_backfill`.
+РћРЅ РІС‹Р·С‹РІР°РµС‚ `BrokerGateway.get_candles()` РґР»СЏ raw `1m` candles, СЃРѕС…СЂР°РЅСЏРµС‚ РёС… РІ
+`market_candle` Рё СЃС‚СЂРѕРёС‚ derived `5m/10m/15m` bars С‡РµСЂРµР· С‚РѕС‚ Р¶Рµ `BarEngine`.
 
-Backfill использует `instrument_registry` или `InstrumentResolverService`, поэтому
-SBER/GAZP/LKOH должны работать через canonical `instrument_id` без placeholder UID.
-Повторный запуск идемпотентен благодаря upsert по
+Backfill РёСЃРїРѕР»СЊР·СѓРµС‚ `instrument_registry` РёР»Рё `InstrumentResolverService`, РїРѕСЌС‚РѕРјСѓ
+SBER/GAZP/LKOH РґРѕР»Р¶РЅС‹ СЂР°Р±РѕС‚Р°С‚СЊ С‡РµСЂРµР· canonical `instrument_id` Р±РµР· placeholder UID.
+РџРѕРІС‚РѕСЂРЅС‹Р№ Р·Р°РїСѓСЃРє РёРґРµРјРїРѕС‚РµРЅС‚РµРЅ Р±Р»Р°РіРѕРґР°СЂСЏ upsert РїРѕ
 `instrument_id + timeframe + open_ts_utc + trading_date`.
 
 CLI:
 
 ```powershell
-python scripts/run_historical_candle_backfill.py --instruments SBER,GAZP --lookback-days 90 --dry-run
+python scripts/run_historical_candle_backfill.py --instruments SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T --lookback-days 90 --dry-run
 ```
 
-Полный runbook: `Docs/historical-candle-backfill.md`.
+РџРѕР»РЅС‹Р№ runbook: `Docs/historical-candle-backfill.md`.
 
-## Подписки
+## РџРѕРґРїРёСЃРєРё
 
-`MarketDataSubscriptionService` нормализует broker `StreamEvent` в typed events:
+`MarketDataSubscriptionService` РЅРѕСЂРјР°Р»РёР·СѓРµС‚ broker `StreamEvent` РІ typed events:
 
 - `candles`;
 - `order_book`;
@@ -93,12 +93,12 @@ python scripts/run_historical_candle_backfill.py --instruments SBER,GAZP --lookb
 - `market_trades`;
 - `user_order_state`.
 
-Сервис не подменяет gRPC trading methods. Он использует существующий
-`BrokerGateway.stream_market_data()` и `BrokerGateway.stream_orders()`.
+РЎРµСЂРІРёСЃ РЅРµ РїРѕРґРјРµРЅСЏРµС‚ gRPC trading methods. РћРЅ РёСЃРїРѕР»СЊР·СѓРµС‚ СЃСѓС‰РµСЃС‚РІСѓСЋС‰РёР№
+`BrokerGateway.stream_market_data()` Рё `BrokerGateway.stream_orders()`.
 
-## Публикуемые События
+## РџСѓР±Р»РёРєСѓРµРјС‹Рµ РЎРѕР±С‹С‚РёСЏ
 
-Внутренний `MarketEventBus` публикует:
+Р’РЅСѓС‚СЂРµРЅРЅРёР№ `MarketEventBus` РїСѓР±Р»РёРєСѓРµС‚:
 
 - `candle`;
 - `order_book`;
@@ -113,23 +113,23 @@ python scripts/run_historical_candle_backfill.py --instruments SBER,GAZP --lookb
 
 ## Bar Engine
 
-`BarEngine` строит closed bars:
+`BarEngine` СЃС‚СЂРѕРёС‚ closed bars:
 
 - `5m`;
 - `10m`;
 - `15m`.
 
-Правила:
+РџСЂР°РІРёР»Р°:
 
-- primary signal input - только `bar_closed`;
-- формирующиеся свечи игнорируются, если явно не включен `include_forming`;
-- timestamps хранятся и в UTC, и в exchange timezone;
-- bucket считается по exchange timezone, затем сохраняется UTC-граница;
-- если робот получает backfill после reconnect, такие свечи проходят через тот же pipeline.
+- primary signal input - С‚РѕР»СЊРєРѕ `bar_closed`;
+- С„РѕСЂРјРёСЂСѓСЋС‰РёРµСЃСЏ СЃРІРµС‡Рё РёРіРЅРѕСЂРёСЂСѓСЋС‚СЃСЏ, РµСЃР»Рё СЏРІРЅРѕ РЅРµ РІРєР»СЋС‡РµРЅ `include_forming`;
+- timestamps С…СЂР°РЅСЏС‚СЃСЏ Рё РІ UTC, Рё РІ exchange timezone;
+- bucket СЃС‡РёС‚Р°РµС‚СЃСЏ РїРѕ exchange timezone, Р·Р°С‚РµРј СЃРѕС…СЂР°РЅСЏРµС‚СЃСЏ UTC-РіСЂР°РЅРёС†Р°;
+- РµСЃР»Рё СЂРѕР±РѕС‚ РїРѕР»СѓС‡Р°РµС‚ backfill РїРѕСЃР»Рµ reconnect, С‚Р°РєРёРµ СЃРІРµС‡Рё РїСЂРѕС…РѕРґСЏС‚ С‡РµСЂРµР· С‚РѕС‚ Р¶Рµ pipeline.
 
 ## Market State Calculators
 
-`MarketStateCalculator` считает:
+`MarketStateCalculator` СЃС‡РёС‚Р°РµС‚:
 
 - `best_bid`;
 - `best_ask`;
@@ -142,95 +142,95 @@ python scripts/run_historical_candle_backfill.py --instruments SBER,GAZP --lookb
 - `market_quality_score`;
 - `feed_freshness`.
 
-`market_quality_score` - технический quality indicator, а не торговая стратегия.
-Он нужен для dashboard, blocker analytics и будущей калибровки.
+`market_quality_score` - С‚РµС…РЅРёС‡РµСЃРєРёР№ quality indicator, Р° РЅРµ С‚РѕСЂРіРѕРІР°СЏ СЃС‚СЂР°С‚РµРіРёСЏ.
+РћРЅ РЅСѓР¶РµРЅ РґР»СЏ dashboard, blocker analytics Рё Р±СѓРґСѓС‰РµР№ РєР°Р»РёР±СЂРѕРІРєРё.
 
-## Read Models для API/UI
+## Read Models РґР»СЏ API/UI
 
-Готовы in-memory read models:
+Р“РѕС‚РѕРІС‹ in-memory read models:
 
-- `live_order_book(instrument_id)` - стакан + derived market state;
-- `recent_trades(instrument_id)` - последние anonymous market trades;
+- `live_order_book(instrument_id)` - СЃС‚Р°РєР°РЅ + derived market state;
+- `recent_trades(instrument_id)` - РїРѕСЃР»РµРґРЅРёРµ anonymous market trades;
 - `current_signal_context(instrument_id)` - latest closed bars, last price,
-  trading status и market state.
+  trading status Рё market state.
 
-Эти модели являются фундаментом для будущих REST/WebSocket endpoints BFF.
+Р­С‚Рё РјРѕРґРµР»Рё СЏРІР»СЏСЋС‚СЃСЏ С„СѓРЅРґР°РјРµРЅС‚РѕРј РґР»СЏ Р±СѓРґСѓС‰РёС… REST/WebSocket endpoints BFF.
 
 ## Gap Recovery
 
-`StreamGapRecoveryService` является текущей реализацией recovery-контура после reconnect/gap.
-`GapRecoveryCoordinator` оставлен как backward-compatible alias для старых импортов.
+`StreamGapRecoveryService` СЏРІР»СЏРµС‚СЃСЏ С‚РµРєСѓС‰РµР№ СЂРµР°Р»РёР·Р°С†РёРµР№ recovery-РєРѕРЅС‚СѓСЂР° РїРѕСЃР»Рµ reconnect/gap.
+`GapRecoveryCoordinator` РѕСЃС‚Р°РІР»РµРЅ РєР°Рє backward-compatible alias РґР»СЏ СЃС‚Р°СЂС‹С… РёРјРїРѕСЂС‚РѕРІ.
 
 Flow:
 
-1. фиксирует `stream_gap_recovery_requested` в audit/domain контуре и публикует `recovery_requested`;
-2. определяет `last_good_event_ts` по ключу `stream_name + instrument_id + timeframe`;
-3. вызывает `BrokerGateway.get_candles()` только для пропущенных closed candles;
-4. отбрасывает duplicate/replayed candles, у которых `close_ts_utc <= recovery_cursor`;
-5. публикует восстановленные `candle` events в тот же `MarketEventBus`, поэтому `BarEngine`,
-   `MarketDataPipeline`, read models и DB store получают backfill без отдельной ветки логики;
-6. пишет `stream_gap_backfill_started` и `stream_gap_backfill_completed`;
-7. вызывает `BrokerGateway.reconcile_open_orders()`;
-8. вызывает `BrokerGateway.reconcile_order_state()` для всех known working orders;
-9. вызывает `PositionService.refresh_positions()` через runtime hook;
-10. пишет `order_reconciliation_completed` и `position_reconciliation_completed`;
-11. публикует `recovery_completed`;
-12. при ошибке пишет `stream_gap_recovery_failed`, метрику failed duration и переводит runtime в
-    degraded state через failure hook.
+1. С„РёРєСЃРёСЂСѓРµС‚ `stream_gap_recovery_requested` РІ audit/domain РєРѕРЅС‚СѓСЂРµ Рё РїСѓР±Р»РёРєСѓРµС‚ `recovery_requested`;
+2. РѕРїСЂРµРґРµР»СЏРµС‚ `last_good_event_ts` РїРѕ РєР»СЋС‡Сѓ `stream_name + instrument_id + timeframe`;
+3. РІС‹Р·С‹РІР°РµС‚ `BrokerGateway.get_candles()` С‚РѕР»СЊРєРѕ РґР»СЏ РїСЂРѕРїСѓС‰РµРЅРЅС‹С… closed candles;
+4. РѕС‚Р±СЂР°СЃС‹РІР°РµС‚ duplicate/replayed candles, Сѓ РєРѕС‚РѕСЂС‹С… `close_ts_utc <= recovery_cursor`;
+5. РїСѓР±Р»РёРєСѓРµС‚ РІРѕСЃСЃС‚Р°РЅРѕРІР»РµРЅРЅС‹Рµ `candle` events РІ С‚РѕС‚ Р¶Рµ `MarketEventBus`, РїРѕСЌС‚РѕРјСѓ `BarEngine`,
+   `MarketDataPipeline`, read models Рё DB store РїРѕР»СѓС‡Р°СЋС‚ backfill Р±РµР· РѕС‚РґРµР»СЊРЅРѕР№ РІРµС‚РєРё Р»РѕРіРёРєРё;
+6. РїРёС€РµС‚ `stream_gap_backfill_started` Рё `stream_gap_backfill_completed`;
+7. РІС‹Р·С‹РІР°РµС‚ `BrokerGateway.reconcile_open_orders()`;
+8. РІС‹Р·С‹РІР°РµС‚ `BrokerGateway.reconcile_order_state()` РґР»СЏ РІСЃРµС… known working orders;
+9. РІС‹Р·С‹РІР°РµС‚ `PositionService.refresh_positions()` С‡РµСЂРµР· runtime hook;
+10. РїРёС€РµС‚ `order_reconciliation_completed` Рё `position_reconciliation_completed`;
+11. РїСѓР±Р»РёРєСѓРµС‚ `recovery_completed`;
+12. РїСЂРё РѕС€РёР±РєРµ РїРёС€РµС‚ `stream_gap_recovery_failed`, РјРµС‚СЂРёРєСѓ failed duration Рё РїРµСЂРµРІРѕРґРёС‚ runtime РІ
+    degraded state С‡РµСЂРµР· failure hook.
 
-Метрики recovery:
+РњРµС‚СЂРёРєРё recovery:
 
 - `stream_reconnect_total{stream_type,result}`;
 - `gap_recovery_duration_seconds{stream_type,status}`;
 - `recovered_candles_total{instrument,timeframe,status}`;
 - `reconciliation_mismatch_total{result}`.
 
-Дедупликация выполняется до публикации в event bus. Дополнительно `market_candle` хранится через
-repository-level upsert по `instrument_id + timeframe + open_ts_utc + trading_date`, поэтому повторный
-backfill не должен плодить факты для аналитики.
+Р”РµРґСѓРїР»РёРєР°С†РёСЏ РІС‹РїРѕР»РЅСЏРµС‚СЃСЏ РґРѕ РїСѓР±Р»РёРєР°С†РёРё РІ event bus. Р”РѕРїРѕР»РЅРёС‚РµР»СЊРЅРѕ `market_candle` С…СЂР°РЅРёС‚СЃСЏ С‡РµСЂРµР·
+repository-level upsert РїРѕ `instrument_id + timeframe + open_ts_utc + trading_date`, РїРѕСЌС‚РѕРјСѓ РїРѕРІС‚РѕСЂРЅС‹Р№
+backfill РЅРµ РґРѕР»Р¶РµРЅ РїР»РѕРґРёС‚СЊ С„Р°РєС‚С‹ РґР»СЏ Р°РЅР°Р»РёС‚РёРєРё.
 
-## Хранение
+## РҐСЂР°РЅРµРЅРёРµ
 
-Добавлены таблицы:
+Р”РѕР±Р°РІР»РµРЅС‹ С‚Р°Р±Р»РёС†С‹:
 
-- `market_candle` - закрытые свечи и бары с UTC/exchange timestamps;
-- `market_status_snapshot` - нормализованный status/info snapshot;
+- `market_candle` - Р·Р°РєСЂС‹С‚С‹Рµ СЃРІРµС‡Рё Рё Р±Р°СЂС‹ СЃ UTC/exchange timestamps;
+- `market_status_snapshot` - РЅРѕСЂРјР°Р»РёР·РѕРІР°РЅРЅС‹Р№ status/info snapshot;
 - `order_book_summary` - lightweight book summary.
 - `market_trade_sample` - persisted data-only trade tape samples from
   `market_trades` stream events or bounded readonly `GetLastTrades` polling.
 
-Полный стакан на каждый тик не хранится в PostgreSQL. В БД попадают агрегаты:
-best bid/ask, depth, spread, imbalance, quality score и payload для расширенного
-контекста. Retention-политика для частоты snapshot будет уточняться после
-подключения реальных потоков.
+РџРѕР»РЅС‹Р№ СЃС‚Р°РєР°РЅ РЅР° РєР°Р¶РґС‹Р№ С‚РёРє РЅРµ С…СЂР°РЅРёС‚СЃСЏ РІ PostgreSQL. Р’ Р‘Р” РїРѕРїР°РґР°СЋС‚ Р°РіСЂРµРіР°С‚С‹:
+best bid/ask, depth, spread, imbalance, quality score Рё payload РґР»СЏ СЂР°СЃС€РёСЂРµРЅРЅРѕРіРѕ
+РєРѕРЅС‚РµРєСЃС‚Р°. Retention-РїРѕР»РёС‚РёРєР° РґР»СЏ С‡Р°СЃС‚РѕС‚С‹ snapshot Р±СѓРґРµС‚ СѓС‚РѕС‡РЅСЏС‚СЊСЃСЏ РїРѕСЃР»Рµ
+РїРѕРґРєР»СЋС‡РµРЅРёСЏ СЂРµР°Р»СЊРЅС‹С… РїРѕС‚РѕРєРѕРІ.
 
-## Ограничения
+## РћРіСЂР°РЅРёС‡РµРЅРёСЏ
 
-- Реальная T-Bank stream схема подключена в `infra/tbank/sdk_clients.py`, но выше
-  `infra/tbank` по-прежнему проходят только SDK-neutral payloads из `StreamEvent`.
-- Для candle stream SDK wrapper выставляет `waiting_close=True`; closed candles остаются
-  primary input, а формирующиеся свечи не запускают strategy candidates без явного флага.
-- Deprecated user trade stream не используется как источник истины по собственным
-  исполнениям; для этого остается broker order/fill reconciliation.
-- Market quality score не является сигналом на сделку сам по себе.
+- Р РµР°Р»СЊРЅР°СЏ T-Bank stream СЃС…РµРјР° РїРѕРґРєР»СЋС‡РµРЅР° РІ `infra/tbank/sdk_clients.py`, РЅРѕ РІС‹С€Рµ
+  `infra/tbank` РїРѕ-РїСЂРµР¶РЅРµРјСѓ РїСЂРѕС…РѕРґСЏС‚ С‚РѕР»СЊРєРѕ SDK-neutral payloads РёР· `StreamEvent`.
+- Р”Р»СЏ candle stream SDK wrapper РІС‹СЃС‚Р°РІР»СЏРµС‚ `waiting_close=True`; closed candles РѕСЃС‚Р°СЋС‚СЃСЏ
+  primary input, Р° С„РѕСЂРјРёСЂСѓСЋС‰РёРµСЃСЏ СЃРІРµС‡Рё РЅРµ Р·Р°РїСѓСЃРєР°СЋС‚ strategy candidates Р±РµР· СЏРІРЅРѕРіРѕ С„Р»Р°РіР°.
+- Deprecated user trade stream РЅРµ РёСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ РєР°Рє РёСЃС‚РѕС‡РЅРёРє РёСЃС‚РёРЅС‹ РїРѕ СЃРѕР±СЃС‚РІРµРЅРЅС‹Рј
+  РёСЃРїРѕР»РЅРµРЅРёСЏРј; РґР»СЏ СЌС‚РѕРіРѕ РѕСЃС‚Р°РµС‚СЃСЏ broker order/fill reconciliation.
+- Market quality score РЅРµ СЏРІР»СЏРµС‚СЃСЏ СЃРёРіРЅР°Р»РѕРј РЅР° СЃРґРµР»РєСѓ СЃР°Рј РїРѕ СЃРµР±Рµ.
 
 ## Historical replay from stored candles
 
-`market_candle` теперь является входом не только для backfill, но и для
-DB-backed historical replay. Контур `HistoricalDbReplayService` читает
-закрытые `5m/10m/15m` bars, созданные через `BarEngine`, и передаёт их в тот
-же strategy/risk/execution/persistence путь, что live runtime. Для `1m` raw
-candles применяется только quality control и построение derived bars.
+`market_candle` С‚РµРїРµСЂСЊ СЏРІР»СЏРµС‚СЃСЏ РІС…РѕРґРѕРј РЅРµ С‚РѕР»СЊРєРѕ РґР»СЏ backfill, РЅРѕ Рё РґР»СЏ
+DB-backed historical replay. РљРѕРЅС‚СѓСЂ `HistoricalDbReplayService` С‡РёС‚Р°РµС‚
+Р·Р°РєСЂС‹С‚С‹Рµ `5m/10m/15m` bars, СЃРѕР·РґР°РЅРЅС‹Рµ С‡РµСЂРµР· `BarEngine`, Рё РїРµСЂРµРґР°С‘С‚ РёС… РІ С‚РѕС‚
+Р¶Рµ strategy/risk/execution/persistence РїСѓС‚СЊ, С‡С‚Рѕ live runtime. Р”Р»СЏ `1m` raw
+candles РїСЂРёРјРµРЅСЏРµС‚СЃСЏ С‚РѕР»СЊРєРѕ quality control Рё РїРѕСЃС‚СЂРѕРµРЅРёРµ derived bars.
 
-Historical session context строится детерминированно: synthetic
-`micro_session_id` имеет формат
+Historical session context СЃС‚СЂРѕРёС‚СЃСЏ РґРµС‚РµСЂРјРёРЅРёСЂРѕРІР°РЅРЅРѕ: synthetic
+`micro_session_id` РёРјРµРµС‚ С„РѕСЂРјР°С‚
 `historical:{trading_date}:{session_type}:{HH}`. `weekday_morning`,
-`weekday_main`, `weekday_evening` и `weekend` не смешиваются; свечи вне
-fallback trading windows получают `session_phase=closed`.
+`weekday_main`, `weekday_evening` Рё `weekend` РЅРµ СЃРјРµС€РёРІР°СЋС‚СЃСЏ; СЃРІРµС‡Рё РІРЅРµ
+fallback trading windows РїРѕР»СѓС‡Р°СЋС‚ `session_phase=closed`.
 
-Replay-generated rows обязаны иметь `payload.source=historical_db_replay`.
-Этот признак используется для идемпотентности и для безопасного
-`--reset-derived-events`, который не удаляет live/shadow/sandbox факты.
+Replay-generated rows РѕР±СЏР·Р°РЅС‹ РёРјРµС‚СЊ `payload.source=historical_db_replay`.
+Р­С‚РѕС‚ РїСЂРёР·РЅР°Рє РёСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ РґР»СЏ РёРґРµРјРїРѕС‚РµРЅС‚РЅРѕСЃС‚Рё Рё РґР»СЏ Р±РµР·РѕРїР°СЃРЅРѕРіРѕ
+`--reset-derived-events`, РєРѕС‚РѕСЂС‹Р№ РЅРµ СѓРґР°Р»СЏРµС‚ live/shadow/sandbox С„Р°РєС‚С‹.
 ## Historical Special-Day Awareness
 
 Historical `market_candle` data is used by replay and calibration only after

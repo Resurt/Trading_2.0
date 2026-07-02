@@ -15,7 +15,7 @@ import type {
 } from "../api/types";
 import { useMarketStore } from "./market";
 
-const CORE_UNIVERSE = "SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR";
+const CORE_UNIVERSE = "SBER,GAZP,LKOH,YDEX,TATN,GMKN,OZON,VTBR,T";
 const COMMAND_AUTO_DISMISS_MS = 12_000;
 
 const EMPTY_STATUS: RobotStatusResponse = {
@@ -227,6 +227,7 @@ export const useRobotStore = defineStore("robot", () => {
     }
     if (payload.data?.robot_status) {
       status.value = payload.data.robot_status;
+      useMarketStore().applyRobotRuntimeStatus(payload.data.robot_status);
       session.value = {
         ...session.value,
         session_type: payload.data.robot_status.session_type,
